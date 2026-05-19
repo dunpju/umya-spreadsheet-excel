@@ -42,13 +42,6 @@ impl CellRange {
         row == self.start_row && col == self.start_col
     }
 
-    pub fn width(&self) -> u32 {
-        self.end_col - self.start_col + 1
-    }
-
-    pub fn height(&self) -> u32 {
-        self.end_row - self.start_row + 1
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,19 +72,6 @@ impl SheetData {
         self.merged_cells.iter().find(|r| r.contains(row, col))
     }
 
-    pub fn is_merged_cell(&self, row: u32, col: u32) -> bool {
-        self.get_merged_range(row, col).is_some()
-    }
-
-    pub fn is_merged_cell_top_left(&self, row: u32, col: u32) -> bool {
-        self.get_merged_range(row, col)
-            .map(|r| r.is_top_left(row, col))
-            .unwrap_or(false)
-    }
-
-    pub fn is_merged_cell_covered(&self, row: u32, col: u32) -> bool {
-        self.is_merged_cell(row, col) && !self.is_merged_cell_top_left(row, col)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,11 +103,20 @@ impl ExcelData {
                 }
             }
 
-            if let Ok(merged_cells) = worksheet.get_merge_cells() {
-                for range_str in merged_cells {
-                    if let Some(range) = parse_range(range_str) {
-                        sheet.merged_cells.push(range);
-                    }
+            for range in worksheet.get_merge_cells() {
+                if let (Some(start_row), Some(start_col), Some(end_row), Some(end_col)) = (
+                    range.get_coordinate_start_row(),
+                    range.get_coordinate_start_col(),
+                    range.get_coordinate_end_row(),
+                    range.get_coordinate_end_col(),
+                ) {
+                    let cell_range = CellRange::new(
+                        *start_row.get_num(),
+                        *start_col.get_num(),
+                        *end_row.get_num(),
+                        *end_col.get_num(),
+                    );
+                    sheet.merged_cells.push(cell_range);
                 }
             }
 
@@ -144,43 +133,6 @@ impl ExcelData {
     pub fn get_sheet(&self, index: usize) -> Option<&SheetData> {
         self.sheets.get(index)
     }
-
-    pub fn sheet_count(&self) -> usize {
-        self.sheets.len()
-    }
-}
-
-fn parse_range(range_str: &str) -> Option<CellRange> {
-    let parts: Vec<&str> = range_str.split(':').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-
-    let start = parse_cell_address(parts[0])?;
-    let end = parse_cell_address(parts[1])?;
-
-    Some(CellRange::new(start.0, start.1, end.0, end.1))
-}
-
-fn parse_cell_address(address: &str) -> Option<(u32, u32)> {
-    let mut col_str = String::new();
-    let mut row_str = String::new();
-
-    for c in address.chars() {
-        if c.is_ascii_alphabetic() {
-            col_str.push(c.to_ascii_uppercase());
-        } else if c.is_ascii_digit() {
-            row_str.push(c);
-        }
-    }
-
-    let row: u32 = row_str.parse().ok()?;
-    let mut col: u32 = 0;
-    for c in col_str.chars() {
-        col = col * 26 + (c as u32 - b'A' as u32 + 1);
-    }
-
-    Some((row, col))
 }
 
 pub fn col_to_letter(mut col: u32) -> String {

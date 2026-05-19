@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::excel::reader::{ExcelData, SheetData, col_to_letter};
+use crate::excel::reader::{ExcelData, col_to_letter};
 
 pub struct ExcelViewer {
     excel_data: Option<ExcelData>,
