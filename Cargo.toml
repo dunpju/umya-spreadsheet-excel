@@ -1,0 +1,10 @@
+[package]
+name = "umya-spreadsheet-excel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+umya-spreadsheet = "2.2.0"
+eframe = "0.29"
+egui = "0.29"
+rfd = "0.14"
