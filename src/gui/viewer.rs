@@ -1,5 +1,14 @@
 use eframe::egui;
 use crate::excel::reader::{ExcelData, col_to_letter};
+use std::sync::mpsc::Receiver;
+
+#[derive(Debug, Clone)]
+pub enum LoadState {
+    Idle,
+    Loading,
+    Success(ExcelData),
+    Failed(String),
+}
 
 pub struct ExcelViewer {
     excel_data: Option<ExcelData>,
@@ -8,6 +17,8 @@ pub struct ExcelViewer {
     selected_cell: Option<(u32, u32)>,
     hovered_cell: Option<(u32, u32)>,
     show_import_dialog: bool,
+    load_state: LoadState,
+    rx: Option<Receiver<Result<ExcelData, String>>>,
 }
 
 impl ExcelViewer {
@@ -19,6 +30,49 @@ impl ExcelViewer {
             selected_cell: None,
             hovered_cell: None,
             show_import_dialog: false,
+            load_state: LoadState::Idle,
+            rx: None,
+        }
+    }
+
+    pub fn start_async_load(&mut self, path: String, ctx: egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.rx = Some(rx);
+        self.load_state = LoadState::Loading;
+        self.error_message = None;
+
+        std::thread::spawn(move || {
+            match ExcelData::load_from_file(&path) {
+                Ok(data) => {
+                    let _ = tx.send(Ok(data));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn check_load_result(&mut self) {
+        if let Some(ref rx) = self.rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(data) => {
+                        self.excel_data = Some(data);
+                        self.current_sheet = 0;
+                        self.selected_cell = None;
+                        self.hovered_cell = None;
+                        self.error_message = None;
+                        self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
+                    }
+                    Err(e) => {
+                        self.error_message = Some(e.clone());
+                        self.load_state = LoadState::Failed(e);
+                    }
+                }
+                self.rx = None;
+            }
         }
     }
 
@@ -98,13 +152,13 @@ impl ExcelViewer {
         });
     }
 
-    fn draw_import_dialog(&mut self, _ctx: &egui::Context) {
+    fn draw_import_dialog(&mut self, ctx: &egui::Context) {
         if self.show_import_dialog {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Excel Files", &["xlsx", "xls"])
                 .pick_file()
             {
-                self.load_file(path.to_string_lossy().as_ref());
+                self.start_async_load(path.to_string_lossy().to_string(), ctx.clone());
             }
             self.show_import_dialog = false;
         }
@@ -157,10 +211,27 @@ impl ExcelViewer {
                         egui::Color32::GRAY,
                     );
                     
-                    let mut y = tl_y + border_width;
-                    for row in 0..=sheet.max_row {
-                        let mut x = tl_x + border_width;
-                        for col in 0..=sheet.max_col {
+                    let viewport_rect = ui.clip_rect();
+                    let margin = 100.0;
+                    
+                    let visible_rows_start = ((viewport_rect.min.y - tl_y - margin) / (row_height + border_width)).floor() as u32;
+                    let visible_rows_end = ((viewport_rect.max.y - tl_y + margin) / (row_height + border_width)).ceil() as u32;
+                    let visible_rows_start = visible_rows_start.max(0).min(sheet.max_row + 1);
+                    let visible_rows_end = visible_rows_end.max(0).min(sheet.max_row + 1);
+                    
+                    let visible_cols_start = ((viewport_rect.min.x - tl_x - margin) / (col_width + border_width)).floor() as u32;
+                    let visible_cols_end = ((viewport_rect.max.x - tl_x + margin) / (col_width + border_width)).ceil() as u32;
+                    let visible_cols_start = visible_cols_start.max(0).min(sheet.max_col + 1);
+                    let visible_cols_end = visible_cols_end.max(0).min(sheet.max_col + 1);
+                    
+                    let start_y = tl_y + border_width + visible_rows_start as f32 * (row_height + border_width);
+                    let mut y = start_y;
+                    
+                    for row in visible_rows_start..=visible_rows_end {
+                        let start_x = tl_x + border_width + visible_cols_start as f32 * (col_width + border_width);
+                        let mut x = start_x;
+                        
+                        for col in visible_cols_start..=visible_cols_end {
                             let cell_width = if col == 0 { header_width } else { col_width };
                             let cell_height = row_height;
                             
@@ -307,15 +378,37 @@ impl eframe::App for ExcelViewer {
         self.draw_menu_bar(ctx);
         self.draw_import_dialog(ctx);
         
+        self.check_load_result();
+        
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_error(ui);
             
-            if self.excel_data.is_some() {
-                self.draw_sheet_selector(ui);
-                self.draw_table(ui);
-                self.draw_selected_info(ui);
-            } else {
-                self.draw_empty_state(ui);
+            match &self.load_state {
+                LoadState::Loading => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("正在解析 Excel 样式与公式，请稍候...");
+                    });
+                    ctx.request_repaint();
+                }
+                LoadState::Success(_) | LoadState::Idle => {
+                    if self.excel_data.is_some() {
+                        self.draw_sheet_selector(ui);
+                        self.draw_table(ui);
+                        self.draw_selected_info(ui);
+                    } else {
+                        self.draw_empty_state(ui);
+                    }
+                }
+                LoadState::Failed(_) => {
+                    if self.excel_data.is_some() {
+                        self.draw_sheet_selector(ui);
+                        self.draw_table(ui);
+                        self.draw_selected_info(ui);
+                    } else {
+                        self.draw_empty_state(ui);
+                    }
+                }
             }
         });
     }
