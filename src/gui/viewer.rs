@@ -326,19 +326,52 @@ impl ExcelViewer {
                 
                 // 获取当前可见区域，用于虚拟渲染
                 let viewport_rect = ui.clip_rect();
-                let margin = 100.0; // 额外渲染一些边距，避免滚动时空白
+                let margin = 100.0; // 适当的边距即可，不需要太大
                     
-                    // 计算可见行范围
+                    // 先计算所有列的累积宽度，用于准确计算可见列
+                    // 索引 0: 0.0 (起点
+                    // 索引 1: 行号列结束位置
+                    // 索引 2: A列结束位置
+                    // ...
+                    let mut col_cumulative_width = vec![0.0];
+                    let mut current_width = 0.0;
+                    
+                    // 第 0 列（行号列）
+                    current_width += header_width + border_width;
+                    col_cumulative_width.push(current_width);
+                    
+                    // 第 1 列及以后（数据列）
+                    for col in 1..=sheet.max_col {
+                        current_width += get_col_width(col) + border_width;
+                        col_cumulative_width.push(current_width);
+                    }
+                    
+                    // 根据实际列宽计算可见列范围
+                    let target_start_x = viewport_rect.min.x - tl_x - margin;
+                    let target_end_x = viewport_rect.max.x - tl_x + margin;
+                    
+                    // 查找可见列范围
+                    let mut visible_cols_start = 0;
+                    let mut visible_cols_end = sheet.max_col + 1;
+                    
+                    for (i, &width) in col_cumulative_width.iter().enumerate() {
+                        if width > target_start_x && visible_cols_start == 0 {
+                            visible_cols_start = i.saturating_sub(1).max(0) as u32;
+                        }
+                        if width > target_end_x {
+                            visible_cols_end = i.min((sheet.max_col + 1) as usize) as u32;
+                            break;
+                        }
+                    }
+                    
+                    // 确保第 0 列（行号列）始终可见
+                    visible_cols_start = 0;
+                    
+                    // 计算可见行范围（行高固定，保持原逻辑）
                     let visible_rows_start = ((viewport_rect.min.y - tl_y - margin) / (row_height + border_width)).floor() as u32;
                     let visible_rows_end = ((viewport_rect.max.y - tl_y + margin) / (row_height + border_width)).ceil() as u32;
                     let visible_rows_start = visible_rows_start.max(0).min(sheet.max_row + 1);
                     let visible_rows_end = visible_rows_end.max(0).min(sheet.max_row + 1);
-                    
-                    // 计算可见列范围
-                    let visible_cols_start = ((viewport_rect.min.x - tl_x - margin) / (default_col_width + border_width)).floor() as u32;
-                    let visible_cols_end = ((viewport_rect.max.x - tl_x + margin) / (default_col_width + border_width)).ceil() as u32;
-                    let visible_cols_start = visible_cols_start.max(0).min(sheet.max_col + 1);
-                    let visible_cols_end = visible_cols_end.max(0).min(sheet.max_col + 1);
                     
                     // 计算起始绘制位置
                     let start_y = tl_y + border_width + visible_rows_start as f32 * (row_height + border_width);
