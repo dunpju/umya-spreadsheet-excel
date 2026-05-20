@@ -184,35 +184,34 @@ impl ExcelViewer {
         }
     }
 
-    fn draw_table(&mut self, ui: &mut egui::Ui) {
+    fn draw_table_content(&mut self, ui: &mut egui::Ui) {
         if let Some(data) = &self.excel_data {
             if let Some(sheet) = data.get_sheet(self.current_sheet) {
                 let selected_cell = self.selected_cell;
                 
-                egui::ScrollArea::both().show(ui, |ui| {
-                    let row_height = 25.0;
-                    let col_width = 80.0;
-                    let header_width = 60.0;
-                    let border_width = 1.0;
-                    
-                    let total_width = header_width + col_width * sheet.max_col as f32 + border_width * (sheet.max_col + 1) as f32;
-                    let total_height = row_height * (sheet.max_row + 1) as f32 + border_width * (sheet.max_row + 2) as f32;
-                    
-                    let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::hover());
-                    let rect = response.rect;
-                    let top_left = rect.min;
-                    
-                    let tl_x = top_left.x;
-                    let tl_y = top_left.y;
-                    
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(egui::Pos2::new(tl_x, tl_y), egui::vec2(total_width, total_height)),
-                        0.0,
-                        egui::Color32::GRAY,
-                    );
-                    
-                    let viewport_rect = ui.clip_rect();
-                    let margin = 100.0;
+                let row_height = 25.0;
+                let col_width = 80.0;
+                let header_width = 60.0;
+                let border_width = 1.0;
+                
+                let total_width = header_width + col_width * sheet.max_col as f32 + border_width * (sheet.max_col + 1) as f32;
+                let total_height = row_height * (sheet.max_row + 1) as f32 + border_width * (sheet.max_row + 2) as f32;
+                
+                let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::hover());
+                let rect = response.rect;
+                let top_left = rect.min;
+                
+                let tl_x = top_left.x;
+                let tl_y = top_left.y;
+                
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(tl_x, tl_y), egui::vec2(total_width, total_height)),
+                    0.0,
+                    egui::Color32::GRAY,
+                );
+                
+                let viewport_rect = ui.clip_rect();
+                let margin = 100.0;
                     
                     let visible_rows_start = ((viewport_rect.min.y - tl_y - margin) / (row_height + border_width)).floor() as u32;
                     let visible_rows_end = ((viewport_rect.max.y - tl_y + margin) / (row_height + border_width)).ceil() as u32;
@@ -342,7 +341,6 @@ impl ExcelViewer {
                         }
                         y += row_height + border_width;
                     }
-                });
             }
         }
     }
@@ -381,31 +379,32 @@ impl eframe::App for ExcelViewer {
         self.check_load_result();
         
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.draw_error(ui);
-            
-            match &self.load_state {
-                LoadState::Loading => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("正在解析 Excel 样式与公式，请稍候...");
+            if self.excel_data.is_some() {
+                let total_height = ui.available_height();
+                let table_height = total_height - 40.0;
+                
+                egui::ScrollArea::both()
+                    .max_height(table_height)
+                    .show(ui, |ui| {
+                        self.draw_table_content(ui);
                     });
-                    ctx.request_repaint();
-                }
-                LoadState::Success(_) | LoadState::Idle => {
-                    if self.excel_data.is_some() {
-                        self.draw_sheet_selector(ui);
-                        self.draw_table(ui);
-                        self.draw_selected_info(ui);
-                    } else {
+                
+                ui.separator();
+                ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
+                self.draw_sheet_selector(ui);
+            } else {
+                match &self.load_state {
+                    LoadState::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("正在解析 Excel 样式与公式，请稍候...");
+                        });
+                        ctx.request_repaint();
+                    }
+                    LoadState::Failed(_) => {
                         self.draw_empty_state(ui);
                     }
-                }
-                LoadState::Failed(_) => {
-                    if self.excel_data.is_some() {
-                        self.draw_sheet_selector(ui);
-                        self.draw_table(ui);
-                        self.draw_selected_info(ui);
-                    } else {
+                    _ => {
                         self.draw_empty_state(ui);
                     }
                 }
