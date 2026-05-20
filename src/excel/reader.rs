@@ -1,7 +1,49 @@
 // 引入 umya-spreadsheet 库用于读取 Excel 文件
-use umya_spreadsheet::reader;
+use umya_spreadsheet::{reader, EnumTrait};
 // 引入 HashMap 用于存储单元格和列宽数据
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalAlignment {
+    General,
+    Left,
+    Center,
+    Right,
+    Fill,
+    Justify,
+    CenterContinuous,
+    Distributed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAlignment {
+    Top,
+    Center,
+    Bottom,
+    Justify,
+    Distributed,
+}
+
+#[derive(Debug, Clone)]
+pub struct CellAlignment {
+    pub horizontal: HorizontalAlignment,
+    pub vertical: VerticalAlignment,
+    #[allow(dead_code)]
+    pub indent: i32,
+    #[allow(dead_code)]
+    pub text_wrap: bool,
+}
+
+impl Default for CellAlignment {
+    fn default() -> Self {
+        Self {
+            horizontal: HorizontalAlignment::General,
+            vertical: VerticalAlignment::Bottom,
+            indent: 0,
+            text_wrap: false,
+        }
+    }
+}
 
 /// 单元格数据结构，存储单元格的值和公式
 #[derive(Debug, Clone)]
@@ -11,6 +53,8 @@ pub struct CellData {
     /// 单元格的公式（如存在）
     #[allow(dead_code)]
     pub formula: String,
+    /// 单元格对齐方式
+    pub alignment: CellAlignment,
 }
 
 /// CellData 的默认实现，创建空值和空公式的单元格
@@ -19,6 +63,7 @@ impl Default for CellData {
         Self {
             value: String::new(),
             formula: String::new(),
+            alignment: CellAlignment::default(),
         }
     }
 }
@@ -172,11 +217,14 @@ impl ExcelData {
                 for col_idx in 1..=highest_col {
                     if let Some(cell) = worksheet.get_cell((row_idx, col_idx)) {
                         let value = cell.get_value().to_string();
-                        // 只保存非空的单元格
                         if !value.trim().is_empty() {
+                            let style = worksheet.get_style((row_idx, col_idx));
+                            let alignment = Self::parse_alignment(style);
+                            
                             let cell_data = CellData {
                                 value,
                                 formula: cell.get_formula().to_string(),
+                                alignment,
                             };
                             sheet.cells.insert((row_idx, col_idx), cell_data);
                         }
@@ -235,6 +283,48 @@ impl ExcelData {
         }
 
         Ok(Self { sheets })
+    }
+
+    fn parse_alignment(style: &umya_spreadsheet::Style) -> CellAlignment {
+        let mut alignment = CellAlignment::default();
+        
+        if let Some(align) = style.get_alignment() {
+            let horizontal = align.get_horizontal();
+            let h_str = horizontal.get_value_string();
+            alignment.horizontal = if h_str == "left" {
+                HorizontalAlignment::Left
+            } else if h_str == "center" {
+                HorizontalAlignment::Center
+            } else if h_str == "right" {
+                HorizontalAlignment::Right
+            } else if h_str == "fill" {
+                HorizontalAlignment::Fill
+            } else if h_str == "justify" {
+                HorizontalAlignment::Justify
+            } else if h_str == "centerContinuous" {
+                HorizontalAlignment::CenterContinuous
+            } else if h_str == "distributed" {
+                HorizontalAlignment::Distributed
+            } else {
+                HorizontalAlignment::General
+            };
+            
+            let vertical = align.get_vertical();
+            let v_str = vertical.get_value_string();
+            alignment.vertical = if v_str == "top" {
+                VerticalAlignment::Top
+            } else if v_str == "center" {
+                VerticalAlignment::Center
+            } else if v_str == "justify" {
+                VerticalAlignment::Justify
+            } else if v_str == "distributed" {
+                VerticalAlignment::Distributed
+            } else {
+                VerticalAlignment::Bottom
+            };
+        }
+        
+        alignment
     }
 
     /// 根据索引获取工作表
