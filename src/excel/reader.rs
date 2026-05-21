@@ -138,6 +138,8 @@ pub struct SheetData {
     pub max_col: u32,
     /// 列宽数据，键为列号，值为宽度
     pub column_widths: HashMap<u32, f64>,
+    /// 行高数据，键为行号，值为高度
+    pub row_heights: HashMap<u32, f64>,
 }
 
 impl SheetData {
@@ -153,6 +155,7 @@ impl SheetData {
             max_row: 0,
             max_col: 0,
             column_widths: HashMap::new(),
+            row_heights: HashMap::new(),
         }
     }
 
@@ -271,6 +274,16 @@ impl ExcelData {
                     sheet.column_widths.insert(col_index, *width);
                 }
                 col_index += 1;
+            }
+
+            // 读取行高信息
+            for row_dimension in worksheet.get_row_dimensions() {
+                let row_num = *row_dimension.get_row_num();
+                let height = row_dimension.get_height();
+                // 只保存高度大于0的行
+                if *height > 0.0 {
+                    sheet.row_heights.insert(row_num, *height);
+                }
             }
 
             // 将工作表添加到列表中

@@ -23,18 +23,27 @@ pub fn draw_table_content(
 ) {
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
-        let row_height = 25.0;        // 每行高度
-        let default_col_width = 80.0; // 默认列宽
-        let header_width = 60.0;      // 行号列宽度
-        let border_width = 1.0;       // 边框宽度
+        let default_row_height = 25.0; // 默认行高
+        let default_col_width = 80.0;  // 默认列宽
+        let header_width = 60.0;       // 行号列宽度
+        let border_width = 1.0;        // 边框宽度
         
         // 获取列宽的辅助函数
         let get_col_width = |col: u32| -> f32 {
             if let Some(&width) = sheet.column_widths.get(&col) {
-                // 使用 Excel 中的列宽，乘以系数转换为像素
                 width as f32 * 8.0
             } else {
                 default_col_width
+            }
+        };
+        
+        // 获取行高的辅助函数（从 Excel 读取，或使用默认值）
+        let get_row_height = |row: u32| -> f32 {
+            if let Some(&height) = sheet.row_heights.get(&row) {
+                // Excel 行高单位是磅，转换为像素（1磅 ≈ 1.333像素）
+                height as f32 * 1.333
+            } else {
+                default_row_height
             }
         };
         
@@ -45,7 +54,10 @@ pub fn draw_table_content(
         }
         total_width += border_width;
         // 计算表格总高度（包含表头）
-        let total_height = row_height * (sheet.max_row + 1) as f32 + border_width * (sheet.max_row + 2) as f32;
+        let mut total_height = border_width; // 顶部边框
+        for row in 0..=sheet.max_row {
+            total_height += get_row_height(row) + border_width;
+        }
         
         // 分配绘画区域
         let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::hover());
@@ -105,23 +117,28 @@ pub fn draw_table_content(
             // 确保第 0 列（行号列）始终可见
             visible_cols_start = 0;
             
-            // 计算可见行范围（行高固定，保持原逻辑）
-            let visible_rows_start = ((viewport_rect.min.y - tl_y - margin) / (row_height + border_width)).floor() as u32;
-            let visible_rows_end = ((viewport_rect.max.y - tl_y + margin) / (row_height + border_width)).ceil() as u32;
-            let visible_rows_start = visible_rows_start.max(0).min(sheet.max_row + 1);
-            let visible_rows_end = visible_rows_end.max(0).min(sheet.max_row + 1);
+            // 计算累积行高用于确定可见行范围
+            let mut row_cumulative_height = vec![0.0];
+            let mut current_height = 0.0;
+            for row in 0..=sheet.max_row {
+                current_height += get_row_height(row) + border_width;
+                row_cumulative_height.push(current_height);
+            }
             
-            // 计算起始绘制位置
-            let start_y = tl_y + border_width + visible_rows_start as f32 * (row_height + border_width);
-            let mut y = start_y;
+            // 简化：确保第0行（列标题行）始终可见
+            let visible_rows_start = 0;
+            let visible_rows_end = sheet.max_row;
             
-            // 遍历可见行进行绘制
+            // ========== 第一遍：绘制所有单元格背景 ==========
             for row in visible_rows_start..=visible_rows_end {
                 let mut x = tl_x + border_width;
                 // 跳过不可见的左侧列
                 for c in 0..visible_cols_start {
                     x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
                 }
+                
+                // 使用累积行高计算 y 坐标
+                let y = tl_y + border_width + row_cumulative_height[row as usize];
                 
                 // 绘制可见列
                 for col in visible_cols_start..=visible_cols_end {
@@ -130,7 +147,7 @@ pub fn draw_table_content(
                     } else { 
                         get_col_width(col) 
                     };
-                    let cell_height = row_height;
+                    let cell_height = get_row_height(row);
                     
                     // 确定单元格背景色
                     let bg_color = if row == 0 && col == 0 {
@@ -143,15 +160,98 @@ pub fn draw_table_content(
                         egui::Color32::WHITE // 数据单元格
                     };
                     
-                    // 绘制单元格背景
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
-                        0.0,
-                        bg_color,
-                    );
+                    // 检查是否是合并单元格的一部分
+                    let mut is_merged_top_left = false;
+                    let mut is_merged_part = false;
+                    
+                    if row > 0 && col > 0 {
+                        if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                            if merged_range.is_top_left(col, row) {
+                                is_merged_top_left = true;
+                            } else {
+                                is_merged_part = true;
+                            }
+                        }
+                    }
+                    
+                    // 如果是合并单元格的非左上角部分，跳过绘制背景（由左上角单元格绘制）
+                    if is_merged_part {
+                        x += cell_width + border_width;
+                        continue;
+                    }
+                    
+                    // 如果是合并单元格的左上角，绘制合并背景
+                    if is_merged_top_left {
+                        if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                            let mut merged_col_width = 0.0;
+                            for c in merged_range.start_col..=merged_range.end_col {
+                                merged_col_width += get_col_width(c) + border_width;
+                            }
+                            merged_col_width -= border_width;
+                            let mut merged_row_height = 0.0;
+                            for r in merged_range.start_row..=merged_range.end_row {
+                                merged_row_height += get_row_height(r) + border_width;
+                            }
+                            merged_row_height -= border_width;
+                            
+                            let is_selected = selected_cell.is_some() && 
+                                merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
+                            
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(
+                                    egui::Pos2::new(x, y),
+                                    egui::vec2(merged_col_width, merged_row_height),
+                                ),
+                                0.0,
+                                if is_selected {
+                                    egui::Color32::from_rgb(173, 216, 230)
+                                } else {
+                                    egui::Color32::WHITE
+                                },
+                            );
+                        }
+                    } else {
+                        // 绘制普通单元格背景
+                        let is_selected = selected_cell == Some((col, row));
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
+                            0.0,
+                            if is_selected {
+                                egui::Color32::from_rgb(173, 216, 230)
+                            } else {
+                                bg_color
+                            },
+                        );
+                    }
+                    
+                    // 移动到下一列
+                    x += cell_width + border_width;
+                }
+            }
+            
+            // ========== 第二遍：绘制所有单元格内容 ==========
+            for row in visible_rows_start..=visible_rows_end {
+                let mut x = tl_x + border_width;
+                // 跳过不可见的左侧列
+                for c in 0..visible_cols_start {
+                    x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
+                }
+                
+                // 使用累积行高计算 y 坐标
+                let y = tl_y + border_width + row_cumulative_height[row as usize];
+                
+                // 绘制可见列
+                for col in visible_cols_start..=visible_cols_end {
+                    let cell_width = if col == 0 { 
+                        header_width 
+                    } else { 
+                        get_col_width(col) 
+                    };
+                    let cell_height = get_row_height(row);
                     
                     // 绘制列标题（A, B, C...）
                     if row == 0 && col > 0 {
+                        println!("cell_height: {:?}", cell_height);
                         painter.text(
                             egui::Pos2::new(x + cell_width / 2.0, y + cell_height / 2.0),
                             egui::Align2::CENTER_CENTER,
@@ -170,7 +270,7 @@ pub fn draw_table_content(
                             egui::Color32::BLACK,
                         );
                     } 
-                    // 绘制数据单元格
+                    // 绘制数据单元格内容
                     else if row > 0 && col > 0 {
                         let mut cell_content = String::new();
                         let mut is_merged_top_left = false;
@@ -202,7 +302,7 @@ pub fn draw_table_content(
                             continue;
                         }
                         
-                        // 绘制合并单元格
+                        // 绘制合并单元格内容
                         if is_merged_top_left {
                             if let Some(merged_range) = sheet.get_merged_range(col, row) {
                                 let mut merged_col_width = 0.0;
@@ -210,25 +310,11 @@ pub fn draw_table_content(
                                     merged_col_width += get_col_width(c) + border_width;
                                 }
                                 merged_col_width -= border_width;
-                                let merged_row_height = (merged_range.end_row - merged_range.start_row + 1) as f32 * row_height + 
-                                    (merged_range.end_row - merged_range.start_row) as f32 * border_width;
-                                
-                                let is_selected = selected_cell.is_some() && 
-                                    merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
-                                
-                                // 绘制合并单元格背景
-                                painter.rect_filled(
-                                    egui::Rect::from_min_size(
-                                        egui::Pos2::new(x, y),
-                                        egui::vec2(merged_col_width, merged_row_height),
-                                    ),
-                                    0.0,
-                                    if is_selected {
-                                        egui::Color32::from_rgb(173, 216, 230)
-                                    } else {
-                                        egui::Color32::WHITE
-                                    },
-                                );
+                                let mut merged_row_height = 0.0;
+                                for r in merged_range.start_row..=merged_range.end_row {
+                                    merged_row_height += get_row_height(r) + border_width;
+                                }
+                                merged_row_height -= border_width;
                                 
                                 // 根据对齐方式绘制内容
                                 let egui_align = alignment_to_egui(&alignment);
@@ -251,31 +337,10 @@ pub fn draw_table_content(
                                     egui::FontId::default(),
                                     egui::Color32::BLACK,
                                 );
-
-                                // 跳过合并单元格的其他列
-                                //let merge_skip = (merged_range.end_col - merged_range.start_col) as f32;
-                                //x += merge_skip * (cell_width + border_width);
                             }
                         } 
-                        // 绘制普通单元格
+                        // 绘制普通单元格内容
                         else {
-                            let is_selected = selected_cell == Some((col, row));
-                            
-                            // 绘制单元格背景
-                            painter.rect_filled(
-                                egui::Rect::from_min_size(
-                                    egui::Pos2::new(x, y),
-                                    egui::vec2(cell_width, cell_height),
-                                ),
-                                0.0,
-                                if is_selected {
-                                    egui::Color32::from_rgb(173, 216, 230)
-                                } else {
-                                    egui::Color32::WHITE
-                                },
-                            );
-                            
-                            // 根据对齐方式绘制内容
                             if !cell_content.is_empty() {
                                 let egui_align = alignment_to_egui(&alignment);
                                 let text_pos = match egui_align {
@@ -304,8 +369,6 @@ pub fn draw_table_content(
                     // 移动到下一列
                     x += cell_width + border_width;
                 }
-                // 移动到下一行
-                y += row_height + border_width;
             }
     }
 }
