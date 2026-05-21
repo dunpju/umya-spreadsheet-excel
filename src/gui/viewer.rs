@@ -12,6 +12,8 @@ use crate::gui::widgets::{
     draw_table_content,
     draw_sheet_selector,
     draw_empty_state,
+    draw_name_box,
+    NameBoxState,
 };
 use std::sync::mpsc::Receiver;
 
@@ -33,6 +35,8 @@ pub struct ExcelViewer {
     pub load_state: LoadState,
     /// 异步加载的通道接收器
     pub rx: Option<Receiver<Result<ExcelData, String>>>,
+    /// 名称框状态
+    pub name_box_state: NameBoxState,
 }
 
 impl ExcelViewer {
@@ -47,6 +51,7 @@ impl ExcelViewer {
             show_import_dialog: false,
             load_state: LoadState::Idle,
             rx: None,
+            name_box_state: NameBoxState::default(),
         }
     }
 
@@ -123,7 +128,10 @@ impl eframe::App for ExcelViewer {
         setup_fonts(ctx);
         
         // 绘制菜单栏
-        draw_menu_bar(ctx, &mut self.show_import_dialog);
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            draw_menu_bar(ui, &mut self.show_import_dialog);
+        });
+        
         // 绘制导入对话框
         if let Some(path) = draw_import_dialog(&mut self.show_import_dialog) {
             self.start_async_load(path, ctx.clone());
@@ -135,9 +143,28 @@ impl eframe::App for ExcelViewer {
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(excel_data) = &self.excel_data {
+                // 获取当前工作表信息
+                if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                    // 绘制名称框工具栏（在表格上方）
+                    ui.set_min_height(28.0);
+                    ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
+                    
+                    if let Some((col, row)) = draw_name_box(
+                        ui,
+                        &mut self.name_box_state,
+                        self.selected_cell,
+                        sheet.max_col,
+                        sheet.max_row,
+                    ) {
+                        self.selected_cell = Some((col, row));
+                    }
+                    
+                    ui.separator();
+                }
+                
                 // 已加载文件，显示表格
                 let total_height = ui.available_height();
-                let table_height = total_height - 40.0; // 留出工作表选择器空间
+                let table_height = total_height - 35.0; // 留出名称框和工作表选择器空间
                 
                 // 使用滚动区域包裹表格
                 egui::ScrollArea::both()
