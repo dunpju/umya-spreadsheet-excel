@@ -251,6 +251,10 @@ pub fn draw_table_content(
                                     egui::FontId::default(),
                                     egui::Color32::BLACK,
                                 );
+
+                                // 跳过合并单元格的其他列
+                                //let merge_skip = (merged_range.end_col - merged_range.start_col) as f32;
+                                //x += merge_skip * (cell_width + border_width);
                             }
                         } 
                         // 绘制普通单元格
