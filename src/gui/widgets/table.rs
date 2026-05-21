@@ -174,17 +174,19 @@ pub fn draw_table_content(
                     else if row > 0 && col > 0 {
                         let mut cell_content = String::new();
                         let mut is_merged_top_left = false;
+                        let mut is_merged_part = false;
                         let mut alignment = CellAlignment::default();
                         
-                        // 检查是否是合并单元格
+                        // 检查是否是合并单元格的一部分
                         if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                            // 只在合并单元格的左上角绘制内容
                             if merged_range.is_top_left(col, row) {
                                 is_merged_top_left = true;
                                 if let Some(cell) = sheet.get_cell(col, row) {
                                     cell_content = cell.value.clone();
                                     alignment = cell.alignment.clone();
                                 }
+                            } else {
+                                is_merged_part = true;
                             }
                         } else {
                             // 普通单元格
@@ -192,6 +194,12 @@ pub fn draw_table_content(
                                 cell_content = cell.value.clone();
                                 alignment = cell.alignment.clone();
                             }
+                        }
+                        
+                        // 如果是合并单元格的非左上角部分，跳过绘制
+                        if is_merged_part {
+                            x += cell_width + border_width;
+                            continue;
                         }
                         
                         // 绘制合并单元格
@@ -208,16 +216,19 @@ pub fn draw_table_content(
                                 let is_selected = selected_cell.is_some() && 
                                     merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
                                 
-                                if is_selected {
-                                    painter.rect_filled(
-                                        egui::Rect::from_min_size(
-                                            egui::Pos2::new(x, y),
-                                            egui::vec2(merged_col_width, merged_row_height),
-                                        ),
-                                        0.0,
-                                        egui::Color32::from_rgb(173, 216, 230),
-                                    );
-                                }
+                                // 绘制合并单元格背景
+                                painter.rect_filled(
+                                    egui::Rect::from_min_size(
+                                        egui::Pos2::new(x, y),
+                                        egui::vec2(merged_col_width, merged_row_height),
+                                    ),
+                                    0.0,
+                                    if is_selected {
+                                        egui::Color32::from_rgb(173, 216, 230)
+                                    } else {
+                                        egui::Color32::WHITE
+                                    },
+                                );
                                 
                                 // 根据对齐方式绘制内容
                                 let egui_align = alignment_to_egui(&alignment);
@@ -245,16 +256,20 @@ pub fn draw_table_content(
                         // 绘制普通单元格
                         else {
                             let is_selected = selected_cell == Some((col, row));
-                            if is_selected {
-                                painter.rect_filled(
-                                    egui::Rect::from_min_size(
-                                        egui::Pos2::new(x, y),
-                                        egui::vec2(cell_width, cell_height),
-                                    ),
-                                    0.0,
-                                    egui::Color32::from_rgb(173, 216, 230),
-                                );
-                            }
+                            
+                            // 绘制单元格背景
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(
+                                    egui::Pos2::new(x, y),
+                                    egui::vec2(cell_width, cell_height),
+                                ),
+                                0.0,
+                                if is_selected {
+                                    egui::Color32::from_rgb(173, 216, 230)
+                                } else {
+                                    egui::Color32::WHITE
+                                },
+                            );
                             
                             // 根据对齐方式绘制内容
                             if !cell_content.is_empty() {
