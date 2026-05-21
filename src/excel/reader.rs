@@ -176,8 +176,8 @@ impl SheetData {
     /// 
     /// # 返回值
     /// 如果单元格在合并范围内返回 Some(&CellRange)，否则返回 None
-    pub fn get_merged_range(&self, row: u32, col: u32) -> Option<&CellRange> {
-        self.merged_cells.iter().find(|r| r.contains(row, col))
+    pub fn get_merged_range(&self, col: u32, row: u32) -> Option<&CellRange> {
+        self.merged_cells.iter().find(|r| r.contains(col, row))
     }
 }
 
