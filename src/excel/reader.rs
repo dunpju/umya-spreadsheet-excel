@@ -101,24 +101,24 @@ impl CellRange {
     /// 检查指定的行列坐标是否在当前范围内
     /// 
     /// # 参数
-    /// * `row` - 要检查的行号
     /// * `col` - 要检查的列号
+    /// * `row` - 要检查的行号
     /// 
     /// # 返回值
     /// 如果坐标在范围内返回 true，否则返回 false
-    pub fn contains(&self, row: u32, col: u32) -> bool {
+    pub fn contains(&self, col: u32, row: u32) -> bool {
         row >= self.start_row && row <= self.end_row && col >= self.start_col && col <= self.end_col
     }
 
     /// 检查指定的行列坐标是否是范围的左上角（起始单元格）
     /// 
     /// # 参数
-    /// * `row` - 要检查的行号
     /// * `col` - 要检查的列号
+    /// * `row` - 要检查的行号
     /// 
     /// # 返回值
     /// 如果是起始单元格返回 true，否则返回 false
-    pub fn is_top_left(&self, row: u32, col: u32) -> bool {
+    pub fn is_top_left(&self, col: u32, row: u32) -> bool {
         row == self.start_row && col == self.start_col
     }
 }
