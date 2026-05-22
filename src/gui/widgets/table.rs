@@ -191,7 +191,7 @@ pub fn draw_table_content(
                     egui::Color32::LIGHT_GRAY // 行标题列
                 } else {
                     // 从单元格获取背景颜色，否则使用默认白色
-                    if let Some(cell) = sheet.get_cell(row, col) {
+                    if let Some(cell) = sheet.get_cell(col, row) {
                         if let Some((r, g, b)) = cell.background_color {
                             egui::Color32::from_rgb(r, g, b)
                         } else {
