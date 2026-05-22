@@ -156,7 +156,7 @@ pub fn draw_table_content(
                 // 更新选中单元格
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
                     if col > 0 && row > 0 {
-                        *selected_cell = Some((row, col));
+                        *selected_cell = Some((col, row));
                     }
                 }
             }
