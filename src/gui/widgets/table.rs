@@ -251,7 +251,6 @@ pub fn draw_table_content(
                     
                     // 绘制列标题（A, B, C...）
                     if row == 0 && col > 0 {
-                        println!("cell_height: {:?}", cell_height);
                         painter.text(
                             egui::Pos2::new(x + cell_width / 2.0, y + cell_height / 2.0),
                             egui::Align2::CENTER_CENTER,
