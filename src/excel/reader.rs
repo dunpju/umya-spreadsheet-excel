@@ -308,50 +308,53 @@ impl ExcelData {
         Ok(Self { sheets })
     }
 
+    /// 解析 Excel 单元格样式
+    /// 
+    /// 从 umya-spreadsheet 的 Style 对象中提取对齐方式、背景颜色、字体大小和字体颜色
+    /// 
+    /// # 参数
+    /// * `style` - Excel 单元格样式对象
+    /// 
+    /// # 返回值
+    /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB))
     fn parse_style(style: &umya_spreadsheet::Style) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>) {
         let mut alignment = CellAlignment::default();
         let mut background_color: Option<(u8, u8, u8)> = None;
         let mut font_size: Option<f64> = None;
         let mut font_color: Option<(u8, u8, u8)> = None;
         
+        // 解析对齐方式
         if let Some(align) = style.get_alignment() {
+            // 解析水平对齐方式
             let horizontal = align.get_horizontal();
             let h_str = horizontal.get_value_string();
-            alignment.horizontal = if h_str == "left" {
-                HorizontalAlignment::Left
-            } else if h_str == "center" {
-                HorizontalAlignment::Center
-            } else if h_str == "right" {
-                HorizontalAlignment::Right
-            } else if h_str == "fill" {
-                HorizontalAlignment::Fill
-            } else if h_str == "justify" {
-                HorizontalAlignment::Justify
-            } else if h_str == "centerContinuous" {
-                HorizontalAlignment::CenterContinuous
-            } else if h_str == "distributed" {
-                HorizontalAlignment::Distributed
-            } else {
-                HorizontalAlignment::General
+            alignment.horizontal = match h_str.as_str() {
+                "left" => HorizontalAlignment::Left,
+                "center" => HorizontalAlignment::Center,
+                "right" => HorizontalAlignment::Right,
+                "fill" => HorizontalAlignment::Fill,
+                "justify" => HorizontalAlignment::Justify,
+                "centerContinuous" => HorizontalAlignment::CenterContinuous,
+                "distributed" => HorizontalAlignment::Distributed,
+                _ => HorizontalAlignment::General,
             };
             
+            // 解析垂直对齐方式
             let vertical = align.get_vertical();
             let v_str = vertical.get_value_string();
-            alignment.vertical = if v_str == "top" {
-                VerticalAlignment::Top
-            } else if v_str == "center" {
-                VerticalAlignment::Center
-            } else if v_str == "justify" {
-                VerticalAlignment::Justify
-            } else if v_str == "distributed" {
-                VerticalAlignment::Distributed
-            } else {
-                VerticalAlignment::Bottom
+            alignment.vertical = match v_str.as_str() {
+                "top" => VerticalAlignment::Top,
+                "center" => VerticalAlignment::Center,
+                "justify" => VerticalAlignment::Justify,
+                "distributed" => VerticalAlignment::Distributed,
+                _ => VerticalAlignment::Bottom,
             };
         }
         
+        // 解析背景颜色
         if let Some(bg_color) = style.get_background_color() {
             let bg_argb = bg_color.get_argb();
+            // 跳过空值和透明色（00000000）
             if !bg_argb.is_empty() && bg_argb != "00000000" {
                 if let Ok(rgb) = Self::parse_hex_color(bg_argb) {
                     background_color = Some(rgb);
@@ -359,11 +362,14 @@ impl ExcelData {
             }
         }
         
+        // 解析字体信息（大小和颜色）
         if let Some(font) = style.get_font() {
             font_size = Some(*font.get_size());
             
+            // 解析字体颜色
             let color = font.get_color();
             let argb = color.get_argb();
+            // 跳过空值和透明色（00000000）
             if !argb.is_empty() && argb != "00000000" {
                 if let Ok(rgb) = Self::parse_hex_color(argb) {
                     font_color = Some(rgb);
@@ -374,20 +380,38 @@ impl ExcelData {
         (alignment, background_color, font_size, font_color)
     }
     
+    /// 将十六进制颜色字符串转换为 RGB 元组
+    /// 
+    /// 支持两种格式：
+    /// - 6位 RGB 格式：RRGGBB
+    /// - 8位 ARGB 格式：AARRGGBB（忽略 alpha 通道）
+    /// 
+    /// # 参数
+    /// * `hex_str` - 十六进制颜色字符串（可带或不带 # 前缀）
+    /// 
+    /// # 返回值
+    /// 成功返回 RGB 元组 (r, g, b)，失败返回 Err(())
     fn parse_hex_color(hex_str: &str) -> Result<(u8, u8, u8), ()> {
+        // 移除可能的 # 前缀
         let hex_str = hex_str.trim_start_matches('#');
-        if hex_str.len() == 6 {
-            let r = u8::from_str_radix(&hex_str[0..2], 16).map_err(|_| ())?;
-            let g = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
-            let b = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
-            Ok((r, g, b))
-        } else if hex_str.len() == 8 {
-            let r = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
-            let g = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
-            let b = u8::from_str_radix(&hex_str[6..8], 16).map_err(|_| ())?;
-            Ok((r, g, b))
-        } else {
-            Err(())
+        
+        match hex_str.len() {
+            // 6位 RGB 格式：RRGGBB
+            6 => {
+                let r = u8::from_str_radix(&hex_str[0..2], 16).map_err(|_| ())?;
+                let g = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
+                let b = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
+                Ok((r, g, b))
+            }
+            // 8位 ARGB 格式：AARRGGBB，忽略 alpha 通道
+            8 => {
+                let r = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
+                let g = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
+                let b = u8::from_str_radix(&hex_str[6..8], 16).map_err(|_| ())?;
+                Ok((r, g, b))
+            }
+            // 不支持的格式
+            _ => Err(()),
         }
     }
 

@@ -216,7 +216,7 @@ pub fn draw_table_content(
                             if is_selected {
                                 egui::Color32::from_rgb(173, 216, 230)
                             } else {
-                                egui::Color32::WHITE
+                                bg_color
                             },
                         );
                     }
