@@ -157,7 +157,16 @@ pub fn draw_table_content(
                 } else if col == 0 {
                     egui::Color32::LIGHT_GRAY // 行标题列
                 } else {
-                    egui::Color32::WHITE // 数据单元格
+                    // 从单元格获取背景颜色，否则使用默认白色
+                    if let Some(cell) = sheet.get_cell(row, col) {
+                        if let Some((r, g, b)) = cell.background_color {
+                            egui::Color32::from_rgb(r, g, b)
+                        } else {
+                            egui::Color32::WHITE
+                        }
+                    } else {
+                        egui::Color32::WHITE // 数据单元格
+                    }
                 };
 
                 // 检查是否是合并单元格的一部分
@@ -276,6 +285,8 @@ pub fn draw_table_content(
                     let mut is_merged_top_left = false;
                     let mut is_merged_part = false;
                     let mut alignment = CellAlignment::default();
+                    let mut font_size: Option<f32> = None;
+                    let mut font_color: egui::Color32 = egui::Color32::BLACK;
 
                     // 检查是否是合并单元格的一部分
                     if let Some(merged_range) = sheet.get_merged_range(col, row) {
@@ -284,6 +295,8 @@ pub fn draw_table_content(
                             if let Some(cell) = sheet.get_cell(col, row) {
                                 cell_content = cell.value.clone();
                                 alignment = cell.alignment.clone();
+                                font_size = cell.font_size.map(|s| s as f32);
+                                font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
                             }
                         } else {
                             is_merged_part = true;
@@ -293,6 +306,8 @@ pub fn draw_table_content(
                         if let Some(cell) = sheet.get_cell(col, row) {
                             cell_content = cell.value.clone();
                             alignment = cell.alignment.clone();
+                            font_size = cell.font_size.map(|s| s as f32);
+                            font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
                         }
                     }
 
@@ -331,12 +346,13 @@ pub fn draw_table_content(
                                 egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + merged_col_width - 4.0, y + merged_row_height - 4.0),
                             };
 
+                            let font_id = font_size.map(|size| egui::FontId::proportional(size)).unwrap_or(egui::FontId::default());
                             painter.text(
                                 text_pos,
                                 egui_align,
                                 &cell_content,
-                                egui::FontId::default(),
-                                egui::Color32::BLACK,
+                                font_id,
+                                font_color,
                             );
                         }
                     }
@@ -356,12 +372,13 @@ pub fn draw_table_content(
                                 egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height - 4.0),
                             };
 
+                            let font_id = font_size.map(|size| egui::FontId::proportional(size)).unwrap_or(egui::FontId::default());
                             painter.text(
                                 text_pos,
                                 egui_align,
                                 &cell_content,
-                                egui::FontId::default(),
-                                egui::Color32::BLACK,
+                                font_id,
+                                font_color,
                             );
                         }
                     }

@@ -55,6 +55,12 @@ pub struct CellData {
     pub formula: String,
     /// 单元格对齐方式
     pub alignment: CellAlignment,
+    /// 背景颜色（RGB）
+    pub background_color: Option<(u8, u8, u8)>,
+    /// 字体大小（磅）
+    pub font_size: Option<f64>,
+    /// 字体颜色（RGB）
+    pub font_color: Option<(u8, u8, u8)>,
 }
 
 /// CellData 的默认实现，创建空值和空公式的单元格
@@ -64,6 +70,9 @@ impl Default for CellData {
             value: String::new(),
             formula: String::new(),
             alignment: CellAlignment::default(),
+            background_color: None,
+            font_size: None,
+            font_color: None,
         }
     }
 }
@@ -220,17 +229,18 @@ impl ExcelData {
                 for col_idx in 1..=highest_col {
                     if let Some(cell) = worksheet.get_cell((row_idx, col_idx)) {
                         let value = cell.get_value().to_string();
-                        if !value.trim().is_empty() {
-                            let style = worksheet.get_style((row_idx, col_idx));
-                            let alignment = Self::parse_alignment(style);
-                            
-                            let cell_data = CellData {
-                                value,
-                                formula: cell.get_formula().to_string(),
-                                alignment,
-                            };
-                            sheet.cells.insert((row_idx, col_idx), cell_data);
-                        }
+                        let style = worksheet.get_style((row_idx, col_idx));
+                        let (alignment, background_color, font_size, font_color) = Self::parse_style(style);
+                        
+                        let cell_data = CellData {
+                            value,
+                            formula: cell.get_formula().to_string(),
+                            alignment,
+                            background_color,
+                            font_size,
+                            font_color,
+                        };
+                        sheet.cells.insert((row_idx, col_idx), cell_data);
                     }
                 }
             }
@@ -298,8 +308,11 @@ impl ExcelData {
         Ok(Self { sheets })
     }
 
-    fn parse_alignment(style: &umya_spreadsheet::Style) -> CellAlignment {
+    fn parse_style(style: &umya_spreadsheet::Style) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>) {
         let mut alignment = CellAlignment::default();
+        let mut background_color: Option<(u8, u8, u8)> = None;
+        let mut font_size: Option<f64> = None;
+        let mut font_color: Option<(u8, u8, u8)> = None;
         
         if let Some(align) = style.get_alignment() {
             let horizontal = align.get_horizontal();
@@ -337,7 +350,45 @@ impl ExcelData {
             };
         }
         
-        alignment
+        if let Some(bg_color) = style.get_background_color() {
+            let bg_argb = bg_color.get_argb();
+            if !bg_argb.is_empty() && bg_argb != "00000000" {
+                if let Ok(rgb) = Self::parse_hex_color(bg_argb) {
+                    background_color = Some(rgb);
+                }
+            }
+        }
+        
+        if let Some(font) = style.get_font() {
+            font_size = Some(*font.get_size());
+            
+            let color = font.get_color();
+            let argb = color.get_argb();
+            if !argb.is_empty() && argb != "00000000" {
+                if let Ok(rgb) = Self::parse_hex_color(argb) {
+                    font_color = Some(rgb);
+                }
+            }
+        }
+        
+        (alignment, background_color, font_size, font_color)
+    }
+    
+    fn parse_hex_color(hex_str: &str) -> Result<(u8, u8, u8), ()> {
+        let hex_str = hex_str.trim_start_matches('#');
+        if hex_str.len() == 6 {
+            let r = u8::from_str_radix(&hex_str[0..2], 16).map_err(|_| ())?;
+            let g = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
+            let b = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
+            Ok((r, g, b))
+        } else if hex_str.len() == 8 {
+            let r = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
+            let g = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
+            let b = u8::from_str_radix(&hex_str[6..8], 16).map_err(|_| ())?;
+            Ok((r, g, b))
+        } else {
+            Err(())
+        }
     }
 
     /// 根据索引获取工作表
