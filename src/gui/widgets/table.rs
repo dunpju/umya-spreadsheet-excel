@@ -14,12 +14,12 @@ use crate::gui::alignment::alignment_to_egui;
 /// * `ui` - egui UI 上下文
 /// * `excel_data` - Excel 数据引用
 /// * `current_sheet` - 当前工作表索引
-/// * `selected_cell` - 当前选中单元格
+/// * `selected_cell` - 当前选中单元格（可变引用，用于更新选中状态）
 pub fn draw_table_content(
     ui: &mut egui::Ui,
     excel_data: &ExcelData,
     current_sheet: usize,
-    selected_cell: Option<(u32, u32)>,
+    selected_cell: &mut Option<(u32, u32)>,
 ) {
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
@@ -59,8 +59,8 @@ pub fn draw_table_content(
             total_height += get_row_height(row) + border_width;
         }
         
-        // 分配绘画区域
-        let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::hover());
+        // 分配绘画区域（支持点击事件）
+        let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::click_and_drag());
         let rect = response.rect;
         let top_left = rect.min;
         
@@ -128,6 +128,39 @@ pub fn draw_table_content(
         // 简化：确保第0行（列标题行）始终可见
         let visible_rows_start = 0;
         let visible_rows_end = sheet.max_row;
+
+        // 处理点击事件
+        if response.clicked() {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let click_x = pos.x - tl_x;
+                let click_y = pos.y - tl_y;
+
+                // 查找被点击的列
+                let mut clicked_col: Option<u32> = None;
+                for (i, &width) in col_cumulative_width.iter().enumerate() {
+                    if click_x <= width && i > 0 {
+                        clicked_col = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+
+                // 查找被点击的行
+                let mut clicked_row: Option<u32> = None;
+                for (i, &height) in row_cumulative_height.iter().enumerate() {
+                    if click_y <= height && i > 0 {
+                        clicked_row = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+
+                // 更新选中单元格
+                if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
+                    if col > 0 && row > 0 {
+                        *selected_cell = Some((row, col));
+                    }
+                }
+            }
+        }
 
         // ========== 第一遍：绘制所有单元格背景 ==========
         for row in visible_rows_start..=visible_rows_end {
@@ -222,7 +255,7 @@ pub fn draw_table_content(
                     }
                 } else {
                     // 绘制普通单元格背景
-                    let is_selected = selected_cell == Some((col, row));
+                    let is_selected = *selected_cell == Some((col, row));
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
                         0.0,

@@ -328,7 +328,7 @@ impl ExcelData {
             // 解析水平对齐方式
             let horizontal = align.get_horizontal();
             let h_str = horizontal.get_value_string();
-            alignment.horizontal = match h_str.as_str() {
+            alignment.horizontal = match &*h_str {
                 "left" => HorizontalAlignment::Left,
                 "center" => HorizontalAlignment::Center,
                 "right" => HorizontalAlignment::Right,
@@ -342,7 +342,7 @@ impl ExcelData {
             // 解析垂直对齐方式
             let vertical = align.get_vertical();
             let v_str = vertical.get_value_string();
-            alignment.vertical = match v_str.as_str() {
+            alignment.vertical = match &*v_str {
                 "top" => VerticalAlignment::Top,
                 "center" => VerticalAlignment::Center,
                 "justify" => VerticalAlignment::Justify,

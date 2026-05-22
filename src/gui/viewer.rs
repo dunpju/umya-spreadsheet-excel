@@ -170,7 +170,7 @@ impl eframe::App for ExcelViewer {
                 egui::ScrollArea::both()
                     .max_height(table_height)
                     .show(ui, |ui| {
-                        draw_table_content(ui, excel_data, self.current_sheet, self.selected_cell);
+                        draw_table_content(ui, excel_data, self.current_sheet, &mut self.selected_cell);
                     });
                 
                 // 分隔线
