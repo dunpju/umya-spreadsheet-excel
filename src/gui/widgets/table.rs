@@ -191,7 +191,7 @@ pub fn draw_table_content(
                     egui::Color32::LIGHT_GRAY // 行标题列
                 } else {
                     // 从单元格获取背景颜色，否则使用默认白色
-                    if let Some(cell) = sheet.get_cell(col, row) {
+                    if let Some(cell) = sheet.get_cell(row, col) {
                         if let Some((r, g, b)) = cell.background_color {
                             egui::Color32::from_rgb(r, g, b)
                         } else {
@@ -325,7 +325,7 @@ pub fn draw_table_content(
                     if let Some(merged_range) = sheet.get_merged_range(col, row) {
                         if merged_range.is_top_left(col, row) {
                             is_merged_top_left = true;
-                            if let Some(cell) = sheet.get_cell(col, row) {
+                            if let Some(cell) = sheet.get_cell(row, col) {
                                 cell_content = cell.value.clone();
                                 alignment = cell.alignment.clone();
                                 font_size = cell.font_size.map(|s| s as f32);
@@ -336,7 +336,7 @@ pub fn draw_table_content(
                         }
                     } else {
                         // 普通单元格
-                        if let Some(cell) = sheet.get_cell(col, row) {
+                        if let Some(cell) = sheet.get_cell(row, col) {
                             cell_content = cell.value.clone();
                             alignment = cell.alignment.clone();
                             font_size = cell.font_size.map(|s| s as f32);
