@@ -3,7 +3,7 @@
 //! 负责渲染 Excel 表格内容，包括单元格、合并单元格和对齐方式
 
 use eframe::egui;
-use crate::excel::reader::{CellAlignment, ExcelData, col_to_letter};
+use crate::excel::reader::{CellAlignment, CellData, ExcelData, col_to_letter};
 use crate::gui::alignment::alignment_to_egui;
 
 /// 绘制表格内容
@@ -12,14 +12,18 @@ use crate::gui::alignment::alignment_to_egui;
 /// 
 /// # 参数
 /// * `ui` - egui UI 上下文
-/// * `excel_data` - Excel 数据引用
+/// * `excel_data` - Excel 数据引用（可变引用，用于编辑）
 /// * `current_sheet` - 当前工作表索引
 /// * `selected_cell` - 当前选中单元格（可变引用，用于更新选中状态）
+/// * `editing_cell` - 当前正在编辑的单元格（可变引用）
+/// * `edit_value` - 当前编辑的值（可变引用）
 pub fn draw_table_content(
     ui: &mut egui::Ui,
-    excel_data: &ExcelData,
+    excel_data: &mut ExcelData,
     current_sheet: usize,
     selected_cell: &mut Option<(u32, u32)>,
+    editing_cell: &mut Option<(u32, u32)>,
+    edit_value: &mut String,
 ) {
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
@@ -159,6 +163,15 @@ pub fn draw_table_content(
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
                     if col > 0 && row > 0 {
                         *selected_cell = Some((col, row));
+                        
+                        // 处理双击事件，进入编辑模式
+                        if response.double_clicked() {
+                            *editing_cell = Some((col, row));
+                            // 获取单元格当前值作为编辑初始值
+                            *edit_value = sheet.get_cell(row, col)
+                                .map(|cell| cell.value.clone())
+                                .unwrap_or_default();
+                        }
                     }
                 }
             }
@@ -421,6 +434,83 @@ pub fn draw_table_content(
 
                 // 移动到下一列
                 x += cell_width + border_width;
+            }
+        }
+
+        // ========== 编辑模式：显示输入框 ==========
+        // 复制编辑单元格坐标，避免在闭包中借用冲突
+        let editing_coords = editing_cell.map(|(c, r)| (c, r));
+        if let Some((edit_col, edit_row)) = editing_coords {
+            // 检查是否在可见范围内
+            if edit_col >= visible_cols_start && edit_col <= visible_cols_end &&
+               edit_row >= visible_rows_start && edit_row <= visible_rows_end {
+                
+                // 计算编辑单元格的位置
+                let mut x = tl_x + border_width;
+                for c in 0..edit_col {
+                    x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
+                }
+                let y = tl_y + border_width + row_cumulative_height[edit_row as usize];
+                
+                let cell_width = get_col_width(edit_col);
+                let cell_height = get_row_height(edit_row);
+                
+                // 限制输入框宽度，避免超出单元格
+                let input_width = (cell_width - 8.0).max(10.0);
+                
+                // 保存编辑状态用于闭包
+                let mut save_cell = false;
+                let mut clear_edit = false;
+                
+                // 创建输入框响应区域
+                let rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(x + 4.0, y + 2.0),
+                    egui::vec2(input_width, cell_height - 4.0)
+                );
+                let builder = egui::UiBuilder::new().max_rect(rect);
+                ui.allocate_new_ui(builder, |ui| {
+                        let text_edit = egui::TextEdit::singleline(edit_value)
+                            .font(egui::FontId::default())
+                            .desired_width(input_width);
+                        
+                        let response = ui.add(text_edit);
+                        
+                        // 自动聚焦输入框
+                        if !response.has_focus() {
+                            response.request_focus();
+                        }
+                        
+                        // 处理回车键，保存编辑
+                        if response.has_focus() {
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                save_cell = true;
+                                clear_edit = true;
+                            }
+                            // 处理 ESC 键，取消编辑
+                            else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                clear_edit = true;
+                            }
+                            // 点击其他地方时退出编辑
+                            else if ui.input(|i| i.pointer.any_click() && !response.rect.contains(i.pointer.hover_pos().unwrap_or_default())) {
+                                save_cell = true;
+                                clear_edit = true;
+                            }
+                        }
+                    }
+                );
+                
+                // 在闭包外部处理状态更新
+                if save_cell {
+                    if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                        let cell = sheet.cells.entry((edit_row, edit_col))
+                            .or_insert_with(CellData::default);
+                        cell.value = edit_value.clone();
+                    }
+                }
+                if clear_edit {
+                    *editing_cell = None;
+                    edit_value.clear();
+                }
             }
         }
     }

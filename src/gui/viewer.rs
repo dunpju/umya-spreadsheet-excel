@@ -25,8 +25,12 @@ pub struct ExcelViewer {
     pub current_sheet: usize,
     /// 错误信息（有错误时为 Some）
     pub error_message: Option<String>,
-    /// 当前选中的单元格坐标（行, 列）
+    /// 当前选中的单元格坐标（列, 行）
     pub selected_cell: Option<(u32, u32)>,
+    /// 当前正在编辑的单元格坐标（列, 行）
+    pub editing_cell: Option<(u32, u32)>,
+    /// 当前编辑的值
+    pub edit_value: String,
     /// 当前鼠标悬停的单元格坐标
     pub hovered_cell: Option<(u32, u32)>,
     /// 是否显示导入文件对话框
@@ -37,6 +41,8 @@ pub struct ExcelViewer {
     pub rx: Option<Receiver<Result<ExcelData, String>>>,
     /// 名称框状态
     pub name_box_state: NameBoxState,
+    /// 待保存的公式值（由公式栏触发）
+    pub pending_formula_save: Option<String>,
 }
 
 impl ExcelViewer {
@@ -47,11 +53,14 @@ impl ExcelViewer {
             current_sheet: 0,
             error_message: None,
             selected_cell: None,
+            editing_cell: None,
+            edit_value: String::new(),
             hovered_cell: None,
             show_import_dialog: false,
             load_state: LoadState::Idle,
             rx: None,
             name_box_state: NameBoxState::default(),
+            pending_formula_save: None,
         }
     }
 
@@ -99,6 +108,9 @@ impl ExcelViewer {
                         self.excel_data = Some(data);
                         self.current_sheet = 0;
                         self.selected_cell = None;
+                        self.editing_cell = None;
+                        self.edit_value.clear();
+                        self.pending_formula_save = None;
                         self.hovered_cell = None;
                         self.error_message = None;
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
@@ -142,23 +154,18 @@ impl eframe::App for ExcelViewer {
         
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(excel_data) = &self.excel_data {
-                // 获取当前工作表信息
-                if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
-                    // 绘制名称框工具栏（在表格上方）
-                    ui.set_min_height(28.0);
-                    ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
-                    
-                    // 获取选中单元格的显示内容（优先显示公式，否则显示值）
-                    // 如果点击的是合并单元格，则获取左上角单元格的内容
-                    let display_text = self.selected_cell.and_then(|(col, row)| {
-                        // 检查是否是合并单元格，如果是则获取左上角单元格
+            if let Some(excel_data) = &mut self.excel_data {
+                // 预先获取工作表信息
+                let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(0);
+                let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(0);
+                
+                let display_text = self.selected_cell.and_then(|(col, row)| {
+                    excel_data.get_sheet(self.current_sheet).and_then(|sheet| {
                         let (target_col, target_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
                             (merged_range.start_col, merged_range.start_row)
                         } else {
                             (col, row)
                         };
-                        
                         sheet.get_cell(target_row, target_col).map(|cell| {
                             if !cell.formula.is_empty() {
                                 cell.formula.as_str()
@@ -166,48 +173,65 @@ impl eframe::App for ExcelViewer {
                                 cell.value.as_str()
                             }
                         })
-                    });
-                    
-                    // 计算名称框显示的单元格位置（合并单元格显示左上角位置）
-                    let display_cell = self.selected_cell.map(|(col, row)| {
+                    })
+                });
+                
+                let display_cell = self.selected_cell.and_then(|(col, row)| {
+                    excel_data.get_sheet(self.current_sheet).and_then(|sheet| {
                         if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                            (merged_range.start_col, merged_range.start_row)
+                            Some((merged_range.start_col, merged_range.start_row))
                         } else {
-                            (col, row)
+                            Some((col, row))
                         }
-                    });
-                    
-                    if let Some((col, row)) = draw_name_box(
-                        ui,
-                        &mut self.name_box_state,
-                        display_cell,
-                        display_text,
-                        sheet.max_col,
-                        sheet.max_row,
-                    ) {
-                        self.selected_cell = Some((col, row));
-                    }
-                    
-                    ui.separator();
+                    })
+                });
+                
+                ui.set_min_height(28.0);
+                ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
+                
+                if let Some((col, row)) = draw_name_box(
+                    ui,
+                    &mut self.name_box_state,
+                    display_cell,
+                    display_text,
+                    max_col,
+                    max_row,
+                    &mut self.pending_formula_save,
+                ) {
+                    self.selected_cell = Some((col, row));
                 }
                 
-                // 已加载文件，显示表格
-                let total_height = ui.available_height();
-                let table_height = total_height - 35.0; // 留出名称框和工作表选择器空间
+                ui.separator();
                 
-                // 使用滚动区域包裹表格
+                let total_height = ui.available_height();
+                let table_height = total_height - 35.0;
+                
                 egui::ScrollArea::both()
                     .max_height(table_height)
                     .show(ui, |ui| {
-                        draw_table_content(ui, excel_data, self.current_sheet, &mut self.selected_cell);
+                        draw_table_content(
+                            ui, 
+                            excel_data, 
+                            self.current_sheet, 
+                            &mut self.selected_cell,
+                            &mut self.editing_cell,
+                            &mut self.edit_value,
+                        );
                     });
                 
-                // 分隔线
                 ui.separator();
-                // 设置按钮间距
                 ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
-                // 绘制工作表选择器
                 draw_sheet_selector(ui, excel_data, &mut self.current_sheet, &mut self.selected_cell);
+                
+                // 处理公式栏的待保存值
+                if let Some(formula_value) = self.pending_formula_save.take() {
+                    if let Some((col, row)) = self.selected_cell {
+                        let cell = excel_data.sheets[self.current_sheet]
+                            .cells.entry((row, col))
+                            .or_insert_with(|| crate::excel::reader::CellData::default());
+                        cell.value = formula_value;
+                    }
+                }
             } else {
                 // 未加载文件，显示相应状态
                 match &self.load_state {

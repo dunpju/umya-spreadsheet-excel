@@ -100,6 +100,7 @@ impl Default for NameBoxState {
 /// * `formula` - 当前单元格的公式（可选）
 /// * `max_col` - 表格最大列数
 /// * `max_row` - 表格最大行数
+/// * `pending_save` - 待保存的公式值（输出参数）
 /// 
 /// # 返回值
 /// 如果用户输入了有效的单元格坐标并按下回车，返回 Some((列号, 行号))，否则返回 None
@@ -110,6 +111,7 @@ pub fn draw_name_box(
     formula: Option<&str>,
     max_col: u32,
     max_row: u32,
+    pending_save: &mut Option<String>,
 ) -> Option<(u32, u32)> {
     let mut result: Option<(u32, u32)> = None;
     
@@ -187,6 +189,15 @@ pub fn draw_name_box(
             
             // 检测公式输入框焦点状态
             state.formula_has_focus = formula_response.has_focus();
+            
+            // 处理公式栏的回车键，设置待保存值
+            if formula_response.has_focus() {
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if !state.formula_text.is_empty() {
+                        *pending_save = Some(state.formula_text.clone());
+                    }
+                }
+            }
         });
     });
     
