@@ -149,10 +149,22 @@ impl eframe::App for ExcelViewer {
                     ui.set_min_height(28.0);
                     ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
                     
+                    // 获取选中单元格的显示内容（优先显示公式，否则显示值）
+                    let display_text = self.selected_cell.and_then(|(col, row)| {
+                        sheet.get_cell(row, col).map(|cell| {
+                            if !cell.formula.is_empty() {
+                                cell.formula.as_str()
+                            } else {
+                                cell.value.as_str()
+                            }
+                        })
+                    });
+                    
                     if let Some((col, row)) = draw_name_box(
                         ui,
                         &mut self.name_box_state,
                         self.selected_cell,
+                        display_text,
                         sheet.max_col,
                         sheet.max_row,
                     ) {

@@ -64,23 +64,29 @@ fn parse_cell_reference(input: &str) -> Option<(u32, u32)> {
 /// 名称框组件状态
 #[derive(Clone)]
 pub struct NameBoxState {
-    /// 输入框内容
+    /// 输入框内容（单元格位置）
     pub input_text: String,
+    /// 当前单元格的公式
+    pub formula_text: String,
     /// 是否显示下拉菜单
     pub show_dropdown: bool,
     /// 输入框是否有焦点
     pub has_focus: bool,
     /// 输入框唯一 ID
     pub input_id: egui::Id,
+    /// 公式输入框是否有焦点
+    pub formula_has_focus: bool,
 }
 
 impl Default for NameBoxState {
     fn default() -> Self {
         Self {
             input_text: String::new(),
+            formula_text: String::new(),
             show_dropdown: false,
             has_focus: false,
             input_id: egui::Id::new("name_box_input"),
+            formula_has_focus: false,
         }
     }
 }
@@ -91,6 +97,7 @@ impl Default for NameBoxState {
 /// * `ui` - egui UI 上下文
 /// * `state` - 名称框状态
 /// * `selected_cell` - 当前选中的单元格
+/// * `formula` - 当前单元格的公式（可选）
 /// * `max_col` - 表格最大列数
 /// * `max_row` - 表格最大行数
 /// 
@@ -100,6 +107,7 @@ pub fn draw_name_box(
     ui: &mut egui::Ui,
     state: &mut NameBoxState,
     selected_cell: Option<(u32, u32)>,
+    formula: Option<&str>,
     max_col: u32,
     max_row: u32,
 ) -> Option<(u32, u32)> {
@@ -163,19 +171,22 @@ pub fn draw_name_box(
         // 分隔线
         ui.add(egui::Separator::default().vertical());
         
-        // 公式栏区域（预留）
+        // 公式栏区域
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             // 插入函数按钮
             ui.add(egui::Button::new("fx").small());
             ui.add(egui::Separator::default().vertical());
             
             // 公式输入框
-            ui.add(
-                egui::TextEdit::singleline(&mut String::new())
+            let formula_response = ui.add(
+                egui::TextEdit::singleline(&mut state.formula_text)
                     .font(font_id)
                     .hint_text("输入公式...")
                     .desired_width(200.0)
             );
+            
+            // 检测公式输入框焦点状态
+            state.formula_has_focus = formula_response.has_focus();
         });
     });
     
@@ -189,6 +200,22 @@ pub fn draw_name_box(
         } else {
             if !state.input_text.is_empty() {
                 state.input_text.clear();
+            }
+        }
+    }
+    
+    // 如果选中单元格发生变化且公式输入框没有焦点，更新公式显示
+    if !state.formula_has_focus {
+        match formula {
+            Some(f) if !f.is_empty() => {
+                if state.formula_text != f {
+                    state.formula_text = f.to_string();
+                }
+            }
+            _ => {
+                if !state.formula_text.is_empty() {
+                    state.formula_text.clear();
+                }
             }
         }
     }

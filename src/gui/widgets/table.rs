@@ -137,25 +137,25 @@ pub fn draw_table_content(
                 let click_x = pos.x - tl_x;
                 let click_y = pos.y - tl_y;
 
-                // 查找被点击的列
+                // 查找被点击的列（使用 < 确保边界位置归属于后一列）
                 let mut clicked_col: Option<u32> = None;
                 for (i, &width) in col_cumulative_width.iter().enumerate() {
-                    if click_x <= width && i > 0 {
+                    if click_x < width && i > 1 {
                         clicked_col = Some(i as u32 - 1);
                         break;
                     }
                 }
 
-                // 查找被点击的行
+                // 查找被点击的行（使用 < 确保边界位置归属于后一行）
                 let mut clicked_row: Option<u32> = None;
                 for (i, &height) in row_cumulative_height.iter().enumerate() {
-                    if click_y <= height && i > 0 {
+                    if click_y < height && i > 0 {
                         clicked_row = Some(i as u32 - 1);
                         break;
                     }
                 }
 
-                // 更新选中单元格
+                // 更新选中单元格（保持 col, row 顺序）
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
                     if col > 0 && row > 0 {
                         *selected_cell = Some((col, row));
