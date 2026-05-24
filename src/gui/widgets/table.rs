@@ -47,17 +47,19 @@ pub fn draw_table_content(
             }
         };
         
-        // 计算表格总宽度
+        // 计算表格总宽度（添加滚动条宽度边距，避免右侧单元格被覆盖）
         let mut total_width = header_width;
         for col in 1..=sheet.max_col {
             total_width += get_col_width(col) + border_width;
         }
-        total_width += border_width;
-        // 计算表格总高度（包含表头）
+        total_width += border_width + 11.0; // +11 像素用于垂直滚动条
+        
+        // 计算表格总高度（添加滚动条高度边距，避免底部单元格被覆盖）
         let mut total_height = border_width; // 顶部边框
         for row in 0..=sheet.max_row {
             total_height += get_row_height(row) + border_width;
         }
+        total_height += 11.0; // +11 像素用于水平滚动条
         
         // 分配绘画区域（支持点击事件）
         let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::click_and_drag());
