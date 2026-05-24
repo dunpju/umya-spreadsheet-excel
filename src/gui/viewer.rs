@@ -150,8 +150,16 @@ impl eframe::App for ExcelViewer {
                     ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
                     
                     // 获取选中单元格的显示内容（优先显示公式，否则显示值）
+                    // 如果点击的是合并单元格，则获取左上角单元格的内容
                     let display_text = self.selected_cell.and_then(|(col, row)| {
-                        sheet.get_cell(row, col).map(|cell| {
+                        // 检查是否是合并单元格，如果是则获取左上角单元格
+                        let (target_col, target_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                            (merged_range.start_col, merged_range.start_row)
+                        } else {
+                            (col, row)
+                        };
+                        
+                        sheet.get_cell(target_row, target_col).map(|cell| {
                             if !cell.formula.is_empty() {
                                 cell.formula.as_str()
                             } else {
@@ -160,10 +168,19 @@ impl eframe::App for ExcelViewer {
                         })
                     });
                     
+                    // 计算名称框显示的单元格位置（合并单元格显示左上角位置）
+                    let display_cell = self.selected_cell.map(|(col, row)| {
+                        if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                            (merged_range.start_col, merged_range.start_row)
+                        } else {
+                            (col, row)
+                        }
+                    });
+                    
                     if let Some((col, row)) = draw_name_box(
                         ui,
                         &mut self.name_box_state,
-                        self.selected_cell,
+                        display_cell,
                         display_text,
                         sheet.max_col,
                         sheet.max_row,
