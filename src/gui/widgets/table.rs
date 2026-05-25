@@ -17,6 +17,7 @@ use crate::gui::alignment::alignment_to_egui;
 /// * `selected_cell` - 当前选中单元格（可变引用，用于更新选中状态）
 /// * `editing_cell` - 当前正在编辑的单元格（可变引用）
 /// * `edit_value` - 当前编辑的值（可变引用）
+/// * `just_entered_edit_mode` - 是否刚进入编辑模式（用于忽略进入编辑时的Enter键）
 pub fn draw_table_content(
     ui: &mut egui::Ui,
     excel_data: &mut ExcelData,
@@ -24,7 +25,120 @@ pub fn draw_table_content(
     selected_cell: &mut Option<(u32, u32)>,
     editing_cell: &mut Option<(u32, u32)>,
     edit_value: &mut String,
+    just_entered_edit_mode: &mut bool,
 ) {
+    // 先获取必要的数据用于键盘处理
+    let (max_col, max_row) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+        (sheet.max_col, sheet.max_row)
+    } else {
+        return;
+    };
+    
+    // 如果已经在编辑模式中，重置"刚进入编辑模式"标志位
+    // 这样下一帧就可以正常处理Enter键了
+    if editing_cell.is_some() && *just_entered_edit_mode {
+        *just_entered_edit_mode = false;
+    }
+    
+    // 键盘事件处理（在借用之前）
+    let input = ui.input(|i| i.clone());
+    let mut save_current_edit = false;
+    let mut clear_current_edit = false;
+    let mut enter_edit_mode = false;
+    let mut new_selected_cell: Option<(u32, u32)> = None;
+    let editing_cell_for_save = editing_cell.clone();
+    let selected_cell_for_edit = selected_cell.clone();
+    
+    // Tab键切换单元格
+    if input.key_pressed(egui::Key::Tab) {
+        if editing_cell.is_some() {
+            save_current_edit = true;
+            clear_current_edit = true;
+        }
+        
+        if let Some((current_col, current_row)) = *selected_cell {
+            let mut next_col = current_col + 1;
+            let mut next_row = current_row;
+            
+            if next_col > max_col {
+                next_col = 1;
+                next_row = current_row + 1;
+                
+                if next_row > max_row {
+                    next_row = max_row;
+                    next_col = max_col;
+                }
+            }
+            new_selected_cell = Some((next_col, next_row));
+        }
+    }
+    
+    // Shift+Tab键反向切换单元格
+    if input.modifiers.shift && input.key_pressed(egui::Key::Tab) {
+        if editing_cell.is_some() {
+            save_current_edit = true;
+            clear_current_edit = true;
+        }
+        
+        if let Some((current_col, current_row)) = *selected_cell {
+            let mut prev_col = if current_col > 1 { current_col - 1 } else { current_col };
+            let mut prev_row = current_row;
+            
+            if prev_col < 1 {
+                prev_row = if current_row > 1 { current_row - 1 } else { 1 };
+                prev_col = max_col;
+            }
+            new_selected_cell = Some((prev_col, prev_row));
+        }
+    }
+    
+    // Enter键处理
+    // 只有在非编辑模式下按Enter才进入编辑模式
+    // 编辑模式下的Enter键处理交给输入框自己处理（见下方输入框逻辑）
+    if input.key_pressed(egui::Key::Enter) {
+        if editing_cell.is_none() && selected_cell.is_some() {
+            enter_edit_mode = true;
+            *just_entered_edit_mode = true;
+        }
+    }
+    
+    // 执行状态更新（在借用之前完成）
+    if save_current_edit {
+        if let Some((edit_col, edit_row)) = editing_cell_for_save {
+            if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                let cell = sheet.cells.entry((edit_row, edit_col))
+                    .or_insert_with(CellData::default);
+                cell.value = edit_value.clone();
+            }
+        }
+    }
+    if clear_current_edit {
+        *editing_cell = None;
+        edit_value.clear();
+    }
+    if let Some(cell) = new_selected_cell {
+        *selected_cell = Some(cell);
+    }
+    
+    // 处理Enter进入编辑模式（需要重新获取sheet）
+    if enter_edit_mode {
+        if let Some((col, row)) = selected_cell_for_edit {
+            if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+                let (edit_col, edit_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                    (merged_range.start_col, merged_range.start_row)
+                } else {
+                    (col, row)
+                };
+                
+                *editing_cell = Some((edit_col, edit_row));
+                *edit_value = sheet.get_cell(edit_row, edit_col)
+                    .map(|cell| cell.value.clone())
+                    .unwrap_or_default();
+            }
+        }
+    }
+    
+    // 现在开始渲染（获取不可变借用）
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
         let default_row_height = 25.0; // 默认行高
@@ -507,9 +621,10 @@ pub fn draw_table_content(
                             response.request_focus();
                         }
                         
-                        // 处理回车键，保存编辑
+                        // 处理键盘事件
                         if response.has_focus() {
-                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            // 如果刚进入编辑模式，忽略Enter键（避免同一帧中进入又退出）
+                            if !*just_entered_edit_mode && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 save_cell = true;
                                 clear_edit = true;
                             }
@@ -537,6 +652,7 @@ pub fn draw_table_content(
                 if clear_edit {
                     *editing_cell = None;
                     edit_value.clear();
+                    *just_entered_edit_mode = false;
                 }
             }
         }

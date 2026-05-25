@@ -31,6 +31,8 @@ pub struct ExcelViewer {
     pub editing_cell: Option<(u32, u32)>,
     /// 当前编辑的值
     pub edit_value: String,
+    /// 是否刚进入编辑模式（用于忽略进入编辑时的Enter键）
+    pub just_entered_edit_mode: bool,
     /// 当前鼠标悬停的单元格坐标
     pub hovered_cell: Option<(u32, u32)>,
     /// 是否显示导入文件对话框
@@ -55,6 +57,7 @@ impl ExcelViewer {
             selected_cell: None,
             editing_cell: None,
             edit_value: String::new(),
+            just_entered_edit_mode: false,
             hovered_cell: None,
             show_import_dialog: false,
             load_state: LoadState::Idle,
@@ -216,6 +219,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.selected_cell,
                             &mut self.editing_cell,
                             &mut self.edit_value,
+                            &mut self.just_entered_edit_mode,
                         );
                     });
                 
