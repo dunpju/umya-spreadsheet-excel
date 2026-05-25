@@ -142,6 +142,55 @@ impl eframe::App for ExcelViewer {
         // 设置中文字体
         setup_fonts(ctx);
         
+        // 处理Tab键事件（在任何UI绘制之前）
+        let input = ctx.input(|i| i.clone());
+        if input.key_pressed(egui::Key::Tab) || (input.modifiers.shift && input.key_pressed(egui::Key::Tab)) {
+            // 消费Tab键事件
+            ctx.input_mut(|i| {
+                i.consume_key(input.modifiers, egui::Key::Tab);
+            });
+            
+            // 执行Tab切换逻辑
+            if self.selected_cell.is_some() && self.editing_cell.is_none() {
+                if let Some(excel_data) = &mut self.excel_data {
+                    if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                        let (current_col, current_row) = self.selected_cell.unwrap();
+                        let max_col = sheet.max_col;
+                        let max_row = sheet.max_row;
+                        
+                        if input.modifiers.shift {
+                            // Shift+Tab：上一个单元格
+                            let mut prev_col = if current_col > 1 { current_col - 1 } else { current_col };
+                            let mut prev_row = current_row;
+                            
+                            if prev_col < 1 {
+                                prev_row = if current_row > 1 { current_row - 1 } else { 1 };
+                                prev_col = max_col;
+                            }
+                            
+                            self.selected_cell = Some((prev_col, prev_row));
+                        } else {
+                            // Tab：下一个单元格
+                            let mut next_col = current_col + 1;
+                            let mut next_row = current_row;
+                            
+                            if next_col > max_col {
+                                next_col = 1;
+                                next_row = current_row + 1;
+                                
+                                if next_row > max_row {
+                                    next_row = max_row;
+                                    next_col = max_col;
+                                }
+                            }
+                            
+                            self.selected_cell = Some((next_col, next_row));
+                        }
+                    }
+                }
+            }
+        }
+        
         // 绘制菜单栏
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             draw_menu_bar(ui, &mut self.show_import_dialog);
@@ -157,6 +206,15 @@ impl eframe::App for ExcelViewer {
         
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
+            // 添加一个隐藏的文本框来捕获焦点，防止Tab键焦点导航到菜单栏
+            if self.selected_cell.is_some() && self.editing_cell.is_none() {
+                ui.add(egui::TextEdit::singleline(&mut String::new())
+                    .frame(false)
+                    .desired_width(0.0)
+                    .hint_text(""))
+                    .request_focus();
+            }
+            
             if let Some(excel_data) = &mut self.excel_data {
                 // 预先获取工作表信息
                 let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(0);

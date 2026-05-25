@@ -28,7 +28,7 @@ pub fn draw_table_content(
     just_entered_edit_mode: &mut bool,
 ) {
     // 先获取必要的数据用于键盘处理
-    let (max_col, max_row) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+    let (_max_col, _max_row) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         (sheet.max_col, sheet.max_row)
     } else {
         return;
@@ -45,51 +45,15 @@ pub fn draw_table_content(
     let mut save_current_edit = false;
     let mut clear_current_edit = false;
     let mut enter_edit_mode = false;
-    let mut new_selected_cell: Option<(u32, u32)> = None;
+    let new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
     let selected_cell_for_edit = selected_cell.clone();
     
-    // Tab键切换单元格
-    if input.key_pressed(egui::Key::Tab) {
-        if editing_cell.is_some() {
-            save_current_edit = true;
-            clear_current_edit = true;
-        }
-        
-        if let Some((current_col, current_row)) = *selected_cell {
-            let mut next_col = current_col + 1;
-            let mut next_row = current_row;
-            
-            if next_col > max_col {
-                next_col = 1;
-                next_row = current_row + 1;
-                
-                if next_row > max_row {
-                    next_row = max_row;
-                    next_col = max_col;
-                }
-            }
-            new_selected_cell = Some((next_col, next_row));
-        }
-    }
-    
-    // Shift+Tab键反向切换单元格
-    if input.modifiers.shift && input.key_pressed(egui::Key::Tab) {
-        if editing_cell.is_some() {
-            save_current_edit = true;
-            clear_current_edit = true;
-        }
-        
-        if let Some((current_col, current_row)) = *selected_cell {
-            let mut prev_col = if current_col > 1 { current_col - 1 } else { current_col };
-            let mut prev_row = current_row;
-            
-            if prev_col < 1 {
-                prev_row = if current_row > 1 { current_row - 1 } else { 1 };
-                prev_col = max_col;
-            }
-            new_selected_cell = Some((prev_col, prev_row));
-        }
+    // Tab键处理（编辑模式下）
+    // 主要的Tab切换逻辑在viewer.rs中处理，这里只处理编辑模式下的Tab键（保存并退出编辑）
+    if (input.key_pressed(egui::Key::Tab) || (input.modifiers.shift && input.key_pressed(egui::Key::Tab))) && editing_cell.is_some() {
+        save_current_edit = true;
+        clear_current_edit = true;
     }
     
     // Enter键处理
@@ -179,10 +143,33 @@ pub fn draw_table_content(
         }
         total_height += 11.0; // +11 像素用于水平滚动条
         
-        // 分配绘画区域（支持点击事件）
-        let (response, painter) = ui.allocate_painter(egui::vec2(total_width, total_height), egui::Sense::click_and_drag());
+        // 创建一个透明按钮来捕获焦点和事件
+        let button = egui::Button::new("")
+            .min_size(egui::vec2(total_width, total_height))
+            .frame(false)
+            .sense(egui::Sense::click_and_drag());
+        
+        let response = ui.add(button);
         let rect = response.rect;
         let top_left = rect.min;
+        
+        // 获取painter用于绘制
+        let painter = ui.painter_at(rect);
+        
+        // 如果表格被点击，请求焦点
+        if response.clicked() {
+            response.request_focus();
+        }
+        
+        // 添加一个隐藏的文本框来捕获焦点
+        // 这可以防止Tab键焦点导航到菜单栏
+        if selected_cell.is_some() && editing_cell.is_none() {
+            ui.add(egui::TextEdit::singleline(&mut String::new())
+                .frame(false)
+                .desired_width(0.0)
+                .hint_text(""))
+                .request_focus();
+        }
         
         let tl_x = top_left.x;
         let tl_y = top_left.y;
