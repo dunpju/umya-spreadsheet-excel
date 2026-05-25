@@ -166,9 +166,18 @@ pub fn draw_table_content(
                         
                         // 处理双击事件，进入编辑模式
                         if response.double_clicked() {
-                            *editing_cell = Some((col, row));
+                            // 检查是否是合并单元格，如果是则获取左上角单元格
+                            let (edit_col, edit_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                                // 合并单元格：使用左上角单元格
+                                (merged_range.start_col, merged_range.start_row)
+                            } else {
+                                // 普通单元格：使用当前单元格
+                                (col, row)
+                            };
+                            
+                            *editing_cell = Some((edit_col, edit_row));
                             // 获取单元格当前值作为编辑初始值
-                            *edit_value = sheet.get_cell(row, col)
+                            *edit_value = sheet.get_cell(edit_row, edit_col)
                                 .map(|cell| cell.value.clone())
                                 .unwrap_or_default();
                         }
@@ -452,8 +461,26 @@ pub fn draw_table_content(
                 }
                 let y = tl_y + border_width + row_cumulative_height[edit_row as usize];
                 
-                let cell_width = get_col_width(edit_col);
-                let cell_height = get_row_height(edit_row);
+                // 检查是否是合并单元格，如果是则计算合并区域的尺寸
+                let (cell_width, cell_height) = if let Some(merged_range) = sheet.get_merged_range(edit_col, edit_row) {
+                    // 合并单元格：计算整个合并区域的宽度和高度
+                    let mut merged_width = 0.0;
+                    for c in merged_range.start_col..=merged_range.end_col {
+                        merged_width += get_col_width(c) + border_width;
+                    }
+                    merged_width -= border_width;
+                    
+                    let mut merged_height = 0.0;
+                    for r in merged_range.start_row..=merged_range.end_row {
+                        merged_height += get_row_height(r) + border_width;
+                    }
+                    merged_height -= border_width;
+                    
+                    (merged_width, merged_height)
+                } else {
+                    // 普通单元格：使用单个单元格的尺寸
+                    (get_col_width(edit_col), get_row_height(edit_row))
+                };
                 
                 // 限制输入框宽度，避免超出单元格
                 let input_width = (cell_width - 8.0).max(10.0);
