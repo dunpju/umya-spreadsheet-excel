@@ -18,6 +18,9 @@ use crate::gui::alignment::alignment_to_egui;
 /// * `editing_cell` - 当前正在编辑的单元格（可变引用）
 /// * `edit_value` - 当前编辑的值（可变引用）
 /// * `just_entered_edit_mode` - 是否刚进入编辑模式（用于忽略进入编辑时的Enter键）
+/// 
+/// # 返回值
+/// 返回需要滚动到的目标矩形（用于键盘导航时自动滚动），如果没有则返回 None
 pub fn draw_table_content(
     ui: &mut egui::Ui,
     excel_data: &mut ExcelData,
@@ -26,12 +29,12 @@ pub fn draw_table_content(
     editing_cell: &mut Option<(u32, u32)>,
     edit_value: &mut String,
     just_entered_edit_mode: &mut bool,
-) {
+) -> Option<egui::Rect> {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         (sheet.max_col, sheet.max_row)
     } else {
-        return;
+        return None;
     };
     
     // 如果已经在编辑模式中，重置"刚进入编辑模式"标志位
@@ -47,6 +50,56 @@ pub fn draw_table_content(
     let mut enter_edit_mode = false;
     let mut new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
+    
+    // 定义默认列宽和行高
+    let default_col_width = 100.0;  // 默认列宽（像素）
+    let default_row_height = 20.0;  // 默认行高（像素）
+    
+    // 获取sheet用于获取列宽和行高
+    let sheet = excel_data.get_sheet(current_sheet);
+    
+    // 获取列宽的辅助函数
+    let get_col_width = |col: u32| -> f32 {
+        if let Some(s) = sheet {
+            if let Some(&width) = s.column_widths.get(&col) {
+                return width as f32 * 8.0;
+            }
+        }
+        default_col_width
+    };
+    
+    // 获取行高的辅助函数
+    let get_row_height = |row: u32| -> f32 {
+        if let Some(s) = sheet {
+            if let Some(&height) = s.row_heights.get(&row) {
+                // Excel 行高单位是磅，转换为像素（1磅 ≈ 1.333像素）
+                // 使用 max 确保行高不小于默认行高
+                return (height as f32 * 1.333).max(default_row_height);
+            }
+        }
+        default_row_height
+    };
+    
+    // 计算单元格像素矩形的辅助函数（相对于表格左上角）
+    let get_cell_rect = |col: u32, row: u32, header_width: f32, border_width: f32| -> (f32, f32, f32, f32) {
+        let mut x = header_width; // 行号列
+        for c in 1..col {
+            x += get_col_width(c) + border_width;
+        }
+        
+        let mut y = 0.0; // 表头行
+        for r in 0..row {
+            y += get_row_height(r) + border_width;
+        }
+        
+        let width = get_col_width(col);
+        let height = get_row_height(row);
+        
+        (x, y, width, height)
+    };
+    
+    // 用于存储滚动目标矩形
+    let mut scroll_to_rect: Option<egui::Rect> = None;
     
     // Tab键处理（编辑模式下）
     // 保存并退出编辑
@@ -225,6 +278,33 @@ pub fn draw_table_content(
             
             if new_col != col || new_row != row {
                 new_selected_cell = Some((new_col, new_row));
+                
+                // 计算目标单元格的像素矩形，用于自动滚动
+                let header_width = 60.0;
+                let border_width = 1.0;
+                let (x, y, width, height) = get_cell_rect(new_col, new_row, header_width, border_width);
+                let target_rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(x, y),
+                    egui::vec2(width, height)
+                );
+                scroll_to_rect = Some(target_rect);
+                
+                // 只有当目标单元格不在可视区域内时才滚动
+                let visible_rect = ui.clip_rect();
+                if !visible_rect.contains(target_rect.min) || !visible_rect.contains(target_rect.max) {
+                    // 根据滚动方向选择对齐方式，实现逐单元格滚动效果
+                    let align = if target_rect.min.x < visible_rect.min.x || target_rect.min.y < visible_rect.min.y {
+                        // 向左或向上滚动，对齐到顶部/左侧
+                        egui::Align::Min
+                    } else {
+                        // 向右或向下滚动，对齐到底部/右侧
+                        egui::Align::Max
+                    };
+                    
+                    // 执行滚动
+                    ui.scroll_to_rect(target_rect, Some(align));
+                }
+                
                 // 消费方向键事件
                 ui.input_mut(|i| {
                     if input.key_pressed(egui::Key::ArrowUp) {
@@ -784,7 +864,6 @@ pub fn draw_table_content(
                 );
                 let builder = egui::UiBuilder::new().max_rect(rect);
                 ui.allocate_new_ui(builder, |ui| {
-                    println!("cell_width: {} cell_height: {} input_width: {} input_height: {}", cell_width, cell_height, input_width, input_height);
                         let text_edit = egui::TextEdit::singleline(edit_value)
                             .font(egui::FontId::default())
                             .desired_width(input_width)
@@ -833,4 +912,7 @@ pub fn draw_table_content(
             }
         }
     }
+    
+    // 返回滚动目标矩形
+    scroll_to_rect
 }
