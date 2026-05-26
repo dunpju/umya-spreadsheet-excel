@@ -310,7 +310,8 @@ pub fn draw_table_content(
         let get_row_height = |row: u32| -> f32 {
             if let Some(&height) = sheet.row_heights.get(&row) {
                 // Excel 行高单位是磅，转换为像素（1磅 ≈ 1.333像素）
-                height as f32 * 1.333
+                // 使用 max 确保行高不小于默认行高
+                (height as f32 * 1.333).max(default_row_height)
             } else {
                 default_row_height
             }
@@ -767,8 +768,10 @@ pub fn draw_table_content(
                     (get_col_width(edit_col), get_row_height(edit_row))
                 };
                 
-                // 限制输入框宽度，避免超出单元格
-                let input_width = (cell_width - 8.0).max(10.0);
+                // 限制输入框尺寸，避免超出单元格
+                // 使用更小的内边距，避免输入框超出单元格边界
+                let input_width = (cell_width - 4.0).max(10.0);
+                let input_height = (cell_height - 6.0).max(16.0);
                 
                 // 保存编辑状态用于闭包
                 let mut save_cell = false;
@@ -776,14 +779,16 @@ pub fn draw_table_content(
                 
                 // 创建输入框响应区域
                 let rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x + 4.0, y + 2.0),
-                    egui::vec2(input_width, cell_height - 4.0)
+                    egui::Pos2::new(x + 2.0, y + 2.0),
+                    egui::vec2(input_width, input_height)
                 );
                 let builder = egui::UiBuilder::new().max_rect(rect);
                 ui.allocate_new_ui(builder, |ui| {
+                    println!("cell_width: {} cell_height: {} input_width: {} input_height: {}", cell_width, cell_height, input_width, input_height);
                         let text_edit = egui::TextEdit::singleline(edit_value)
                             .font(egui::FontId::default())
-                            .desired_width(input_width);
+                            .desired_width(input_width)
+                            .min_size(egui::vec2(input_width, input_height));
                         
                         let response = ui.add(text_edit);
                         
