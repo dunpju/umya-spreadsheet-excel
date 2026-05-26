@@ -204,7 +204,6 @@ pub fn draw_table_content(
         }
         
         
-        
         let tl_x = top_left.x;
         let tl_y = top_left.y;
         
