@@ -144,6 +144,103 @@ pub fn draw_table_content(
         ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Tab));
     }
     
+    // 方向键处理（非编辑模式下）- 在表格有焦点时进行单元格切换
+    if editing_cell.is_none() && selected_cell.is_some() {
+        if let Some((col, row)) = *selected_cell {
+            let mut new_col = col;
+            let mut new_row = row;
+            
+            // 获取sheet用于检查合并单元格
+            let sheet = excel_data.get_sheet(current_sheet);
+            
+            if input.key_pressed(egui::Key::ArrowUp) {
+                // 向上移动
+                if row > 1 {
+                    new_row = row - 1;
+                    // 检查新位置是否是合并单元格，如果是，使用合并区域的起始行
+                    if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(col, new_row) {
+                            new_row = merged_range.start_row;
+                        }
+                    }
+                }
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                // 向下移动
+                if row < max_row {
+                    new_row = row + 1;
+                    // 检查新位置是否是合并单元格，如果是，使用合并区域的起始行
+                    if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(col, new_row) {
+                            new_row = merged_range.start_row;
+                        }
+                    }
+                }
+            } else if input.key_pressed(egui::Key::ArrowLeft) {
+                // 向左移动
+                if col > 1 {
+                    // 检查当前单元格是否是合并单元格的一部分
+                    let current_col = if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(col, row) {
+                            merged_range.start_col
+                        } else {
+                            col
+                        }
+                    } else {
+                        col
+                    };
+                    
+                    if current_col > 1 {
+                        new_col = current_col - 1;
+                        // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                        if let Some(s) = sheet {
+                            if let Some(merged_range) = s.get_merged_range(new_col, row) {
+                                new_col = merged_range.start_col;
+                            }
+                        }
+                    }
+                }
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                // 向右移动
+                // 检查当前单元格是否是合并单元格的一部分
+                let current_col = if let Some(s) = sheet {
+                    if let Some(merged_range) = s.get_merged_range(col, row) {
+                        merged_range.end_col
+                    } else {
+                        col
+                    }
+                } else {
+                    col
+                };
+                
+                if current_col < max_col {
+                    new_col = current_col + 1;
+                    // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                    if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(new_col, row) {
+                            new_col = merged_range.start_col;
+                        }
+                    }
+                }
+            }
+            
+            if new_col != col || new_row != row {
+                new_selected_cell = Some((new_col, new_row));
+                // 消费方向键事件
+                ui.input_mut(|i| {
+                    if input.key_pressed(egui::Key::ArrowUp) {
+                        i.consume_key(input.modifiers, egui::Key::ArrowUp);
+                    } else if input.key_pressed(egui::Key::ArrowDown) {
+                        i.consume_key(input.modifiers, egui::Key::ArrowDown);
+                    } else if input.key_pressed(egui::Key::ArrowLeft) {
+                        i.consume_key(input.modifiers, egui::Key::ArrowLeft);
+                    } else if input.key_pressed(egui::Key::ArrowRight) {
+                        i.consume_key(input.modifiers, egui::Key::ArrowRight);
+                    }
+                });
+            }
+        }
+    }
+    
     // Enter键处理
     // 只有在非编辑模式下按Enter才进入编辑模式
     // 编辑模式下的Enter键处理交给输入框自己处理（见下方输入框逻辑）
