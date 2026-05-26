@@ -63,23 +63,76 @@ pub fn draw_table_content(
             let mut new_col = col;
             let mut new_row = row;
             
+            // 获取sheet用于检查合并单元格
+            let sheet = excel_data.get_sheet(current_sheet);
+            
             if input.modifiers.shift {
                 // Shift+Tab: 向左移动
                 if col > 1 {
-                    new_col = col - 1;
-                } else if row > 1 {
-                    // 已经在最左边，跳到上一行最后一列
-                    new_col = max_col;
-                    new_row = row - 1;
+                    // 检查当前单元格是否是合并单元格的一部分
+                    let current_col = if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(col, row) {
+                            // 如果是合并单元格，从合并区域的起始列开始向左移动
+                            merged_range.start_col
+                        } else {
+                            col
+                        }
+                    } else {
+                        col
+                    };
+                    
+                    if current_col > 1 {
+                        new_col = current_col - 1;
+                        // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                        if let Some(s) = sheet {
+                            if let Some(merged_range) = s.get_merged_range(new_col, row) {
+                                new_col = merged_range.start_col;
+                            }
+                        }
+                    } else if row > 1 {
+                        // 已经在最左边，跳到上一行最后一列
+                        new_col = max_col;
+                        new_row = row - 1;
+                        // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                        if let Some(s) = sheet {
+                            if let Some(merged_range) = s.get_merged_range(new_col, new_row) {
+                                new_col = merged_range.start_col;
+                            }
+                        }
+                    }
                 }
             } else {
                 // Tab: 向右移动
-                if col < max_col {
-                    new_col = col + 1;
+                // 检查当前单元格是否是合并单元格的一部分
+                let current_col = if let Some(s) = sheet {
+                    if let Some(merged_range) = s.get_merged_range(col, row) {
+                        // 如果是合并单元格，从合并区域的结束列开始向右移动
+                        merged_range.end_col
+                    } else {
+                        col
+                    }
+                } else {
+                    col
+                };
+                
+                if current_col < max_col {
+                    new_col = current_col + 1;
+                    // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                    if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(new_col, row) {
+                            new_col = merged_range.start_col;
+                        }
+                    }
                 } else if row < max_row {
                     // 已经在最右边，跳到下一行第一列
                     new_col = 1;
                     new_row = row + 1;
+                    // 检查新位置是否是合并单元格，如果是，使用合并区域的起始列
+                    if let Some(s) = sheet {
+                        if let Some(merged_range) = s.get_merged_range(new_col, new_row) {
+                            new_col = merged_range.start_col;
+                        }
+                    }
                 }
             }
             
