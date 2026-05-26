@@ -47,7 +47,6 @@ pub fn draw_table_content(
     let mut enter_edit_mode = false;
     let mut new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
-    let selected_cell_for_edit = selected_cell.clone();
     
     // Tab键处理（编辑模式下）
     // 保存并退出编辑
@@ -99,6 +98,8 @@ pub fn draw_table_content(
         if editing_cell.is_none() && selected_cell.is_some() {
             enter_edit_mode = true;
             *just_entered_edit_mode = true;
+            // 消费Enter键事件，防止被名称框检测到
+            ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Enter));
         }
     }
     
@@ -122,7 +123,7 @@ pub fn draw_table_content(
     
     // 处理Enter进入编辑模式（需要重新获取sheet）
     if enter_edit_mode {
-        if let Some((col, row)) = selected_cell_for_edit {
+        if let Some((col, row)) = *selected_cell {  // 使用更新后的selected_cell
             if let Some(sheet) = excel_data.get_sheet(current_sheet) {
                 let (edit_col, edit_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
                     (merged_range.start_col, merged_range.start_row)
@@ -202,7 +203,6 @@ pub fn draw_table_content(
         } else if !editing_cell.is_some() && selected_cell.is_some() && !response.has_focus() {
             response.request_focus();
         }
-        
         
         
         let tl_x = top_left.x;

@@ -179,23 +179,13 @@ impl eframe::App for ExcelViewer {
                     })
                 });
                 
-                let display_cell = self.selected_cell.and_then(|(col, row)| {
-                    excel_data.get_sheet(self.current_sheet).and_then(|sheet| {
-                        if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                            Some((merged_range.start_col, merged_range.start_row))
-                        } else {
-                            Some((col, row))
-                        }
-                    })
-                });
-                
                 ui.set_min_height(28.0);
                 ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
                 
                 if let Some((col, row)) = draw_name_box(
                     ui,
                     &mut self.name_box_state,
-                    display_cell,
+                    self.selected_cell,  // 直接使用选中的单元格，不转换为合并单元格的左上角
                     display_text,
                     max_col,
                     max_row,
