@@ -50,10 +50,46 @@ pub fn draw_table_content(
     let selected_cell_for_edit = selected_cell.clone();
     
     // Tab键处理（编辑模式下）
-    // 主要的Tab切换逻辑在viewer.rs中处理，这里只处理编辑模式下的Tab键（保存并退出编辑）
+    // 保存并退出编辑
     if (input.key_pressed(egui::Key::Tab) || (input.modifiers.shift && input.key_pressed(egui::Key::Tab))) && editing_cell.is_some() {
         save_current_edit = true;
         clear_current_edit = true;
+        // 消费Tab键事件，防止传递到菜单栏
+        ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Tab));
+    }
+    
+    // Tab键处理（非编辑模式下）- 在表格有焦点时进行单元格切换
+    if (input.key_pressed(egui::Key::Tab) || (input.modifiers.shift && input.key_pressed(egui::Key::Tab))) && editing_cell.is_none() {
+        if let Some((col, row)) = *selected_cell {
+            let mut new_col = col;
+            let mut new_row = row;
+            
+            if input.modifiers.shift {
+                // Shift+Tab: 向左移动
+                if col > 1 {
+                    new_col = col - 1;
+                } else if row > 1 {
+                    // 已经在最左边，跳到上一行最后一列
+                    new_col = max_col;
+                    new_row = row - 1;
+                }
+            } else {
+                // Tab: 向右移动
+                if col < max_col {
+                    new_col = col + 1;
+                } else if row < max_row {
+                    // 已经在最右边，跳到下一行第一列
+                    new_col = 1;
+                    new_row = row + 1;
+                }
+            }
+            
+            if new_col != col || new_row != row {
+                new_selected_cell = Some((new_col, new_row));
+            }
+        }
+        // 消费Tab键事件，防止传递到菜单栏
+        ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Tab));
     }
     
     // Enter键处理
@@ -143,33 +179,22 @@ pub fn draw_table_content(
         }
         total_height += 11.0; // +11 像素用于水平滚动条
         
-        // 创建一个透明按钮来捕获焦点和事件
-        let button = egui::Button::new("")
-            .min_size(egui::vec2(total_width, total_height))
-            .frame(false)
-            .sense(egui::Sense::click_and_drag());
-        
-        let response = ui.add(button);
-        let rect = response.rect;
+        // 使用 allocate_space 分配表格空间（不强制精确尺寸）
+        let (_id, rect) = ui.allocate_space(egui::vec2(total_width, total_height));
         let top_left = rect.min;
         
         // 获取painter用于绘制
         let painter = ui.painter_at(rect);
+        
+        // 创建交互区域来处理点击事件（使用同一个rect）
+        let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
         
         // 如果表格被点击，请求焦点
         if response.clicked() {
             response.request_focus();
         }
         
-        // 添加一个隐藏的文本框来捕获焦点
-        // 这可以防止Tab键焦点导航到菜单栏
-        if selected_cell.is_some() {
-            ui.add(egui::TextEdit::singleline(&mut String::new())
-                .frame(false)
-                .desired_width(0.0)
-                .hint_text(""))
-                .request_focus();
-        }
+        
         
         let tl_x = top_left.x;
         let tl_y = top_left.y;
