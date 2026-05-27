@@ -43,17 +43,11 @@ pub fn draw_table_content(
         *just_entered_edit_mode = false;
     }
     
-    // 键盘事件处理（在借用之前）
-    let input = ui.input(|i| i.clone());
-    let mut save_current_edit = false;
-    let mut clear_current_edit = false;
-    let mut enter_edit_mode = false;
-    let mut new_selected_cell: Option<(u32, u32)> = None;
-    let editing_cell_for_save = editing_cell.clone();
-    
-    // 定义默认列宽和行高
-    let default_col_width = 100.0;  // 默认列宽（像素）
-    let default_row_height = 20.0;  // 默认行高（像素）
+    // 定义默认列宽和行高（与渲染部分保持一致）
+    let default_col_width = 80.0;   // 默认列宽（像素）
+    let default_row_height = 25.0;  // 默认行高（像素）
+    let header_width = 60.0;        // 行号列宽度
+    let border_width = 1.0;         // 边框宽度
     
     // 获取sheet用于获取列宽和行高
     let sheet = excel_data.get_sheet(current_sheet);
@@ -80,8 +74,27 @@ pub fn draw_table_content(
         default_row_height
     };
     
+    // 先获取表格的尺寸和位置（这一步很关键，先做）
+    // 计算表格总宽度（添加滚动条宽度边距，避免右侧单元格被覆盖）
+    let mut total_width = header_width;
+    for col in 1..=max_col {
+        total_width += get_col_width(col) + border_width;
+    }
+    total_width += border_width + 11.0; // +11 像素用于垂直滚动条
+    
+    // 计算表格总高度（添加滚动条高度边距，避免底部单元格被覆盖）
+    let mut total_height = border_width; // 顶部边框
+    for row in 0..=max_row {
+        total_height += get_row_height(row) + border_width;
+    }
+    total_height += 11.0; // +11 像素用于水平滚动条
+    
+    // 使用 allocate_space 分配表格空间
+    let (_id, rect) = ui.allocate_space(egui::vec2(total_width, total_height));
+    let table_top_left = rect.min;
+    
     // 计算单元格像素矩形的辅助函数（相对于表格左上角）
-    let get_cell_rect = |col: u32, row: u32, header_width: f32, border_width: f32| -> (f32, f32, f32, f32) {
+    let get_cell_rect = |col: u32, row: u32| -> (f32, f32, f32, f32) {
         let mut x = header_width; // 行号列
         for c in 1..col {
             x += get_col_width(c) + border_width;
@@ -97,6 +110,28 @@ pub fn draw_table_content(
         
         (x, y, width, height)
     };
+    
+    // 检查单元格是否在可视区域内（使用全局坐标）
+    let is_cell_in_viewport = |col: u32, row: u32| -> bool {
+        let (x, y, width, height) = get_cell_rect(col, row);
+        // 转换为全局坐标
+        let cell_rect = egui::Rect::from_min_size(
+            egui::Pos2::new(x + table_top_left.x, y + table_top_left.y),
+            egui::vec2(width, height)
+        );
+        let clip_rect = ui.clip_rect();
+        
+        // 检查单元格是否完全在可视区域内
+        clip_rect.contains(cell_rect.min) && clip_rect.contains(cell_rect.max)
+    };
+    
+    // 键盘事件处理
+    let input = ui.input(|i| i.clone());
+    let mut save_current_edit = false;
+    let mut clear_current_edit = false;
+    let mut enter_edit_mode = false;
+    let mut new_selected_cell: Option<(u32, u32)> = None;
+    let editing_cell_for_save = editing_cell.clone();
     
     // 用于存储滚动目标矩形
     let mut scroll_to_rect: Option<egui::Rect> = None;
@@ -125,7 +160,6 @@ pub fn draw_table_content(
                     // 检查当前单元格是否是合并单元格的一部分
                     let current_col = if let Some(s) = sheet {
                         if let Some(merged_range) = s.get_merged_range(col, row) {
-                            // 如果是合并单元格，从合并区域的起始列开始向左移动
                             merged_range.start_col
                         } else {
                             col
@@ -159,7 +193,6 @@ pub fn draw_table_content(
                 // 检查当前单元格是否是合并单元格的一部分
                 let current_col = if let Some(s) = sheet {
                     if let Some(merged_range) = s.get_merged_range(col, row) {
-                        // 如果是合并单元格，从合并区域的结束列开始向右移动
                         merged_range.end_col
                     } else {
                         col
@@ -191,6 +224,24 @@ pub fn draw_table_content(
             
             if new_col != col || new_row != row {
                 new_selected_cell = Some((new_col, new_row));
+                
+                // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
+                if !is_cell_in_viewport(new_col, new_row) {
+                    let (x, y, width, height) = get_cell_rect(new_col, new_row);
+                    let target_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(x, y),
+                        egui::vec2(width, height)
+                    );
+                    scroll_to_rect = Some(target_rect);
+                    
+                    let visible_rect = ui.clip_rect();
+                    let align = if target_rect.min.x < visible_rect.min.x {
+                        egui::Align::Min
+                    } else {
+                        egui::Align::Max
+                    };
+                    ui.scroll_to_rect(target_rect, Some(align));
+                }
             }
         }
         // 消费Tab键事件，防止传递到菜单栏
@@ -279,19 +330,17 @@ pub fn draw_table_content(
             if new_col != col || new_row != row {
                 new_selected_cell = Some((new_col, new_row));
                 
-                // 计算目标单元格的像素矩形，用于自动滚动
-                let header_width = 60.0;
-                let border_width = 1.0;
-                let (x, y, width, height) = get_cell_rect(new_col, new_row, header_width, border_width);
-                let target_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x, y),
-                    egui::vec2(width, height)
-                );
-                scroll_to_rect = Some(target_rect);
-                
-                // 只有当目标单元格不在可视区域内时才滚动
-                let visible_rect = ui.clip_rect();
-                if !visible_rect.contains(target_rect.min) || !visible_rect.contains(target_rect.max) {
+                // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
+                if !is_cell_in_viewport(new_col, new_row) {
+                    let (x, y, width, height) = get_cell_rect(new_col, new_row);
+                    let target_rect = egui::Rect::from_min_size(
+                        egui::Pos2::new(x, y),
+                        egui::vec2(width, height)
+                    );
+                    scroll_to_rect = Some(target_rect);
+                    
+                    let visible_rect = ui.clip_rect();
+                    
                     // 根据滚动方向选择对齐方式，实现逐单元格滚动效果
                     let align = if target_rect.min.x < visible_rect.min.x || target_rect.min.y < visible_rect.min.y {
                         // 向左或向上滚动，对齐到顶部/左侧
@@ -397,23 +446,22 @@ pub fn draw_table_content(
             }
         };
         
-        // 计算表格总宽度（添加滚动条宽度边距，避免右侧单元格被覆盖）
+        // 重新计算 total_width 和 total_height（因为之前的变量可能不在作用域）
         let mut total_width = header_width;
         for col in 1..=sheet.max_col {
             total_width += get_col_width(col) + border_width;
         }
         total_width += border_width + 11.0; // +11 像素用于垂直滚动条
         
-        // 计算表格总高度（添加滚动条高度边距，避免底部单元格被覆盖）
         let mut total_height = border_width; // 顶部边框
         for row in 0..=sheet.max_row {
             total_height += get_row_height(row) + border_width;
         }
         total_height += 11.0; // +11 像素用于水平滚动条
         
-        // 使用 allocate_space 分配表格空间（不强制精确尺寸）
-        let (_id, rect) = ui.allocate_space(egui::vec2(total_width, total_height));
-        let top_left = rect.min;
+        // 我们已经在前面分配了空间，直接使用保存的 rect
+        let rect = egui::Rect::from_min_size(table_top_left, egui::vec2(total_width, total_height));
+        let top_left = table_top_left;
         
         // 获取painter用于绘制
         let painter = ui.painter_at(rect);
