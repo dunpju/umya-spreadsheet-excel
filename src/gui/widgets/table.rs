@@ -503,9 +503,7 @@ pub fn draw_table_content(
         // 获取painter用于绘制
         let painter = ui.painter_at(rect);
         
-        // 保存标题区域尺寸（用于冻结窗格）
-        let header_row_height = get_row_height(0);
-        let header_col_width = header_width;
+        // 保存标题区域尺寸（用于冻结窗格）- 现在使用累积数组方式，不再需要这些变量
         
         // 创建交互区域来处理点击事件（使用同一个rect）
         let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
@@ -997,28 +995,35 @@ pub fn draw_table_content(
         // ========== 冻结窗格：固定列标题和行标题 ==========
         // 将冻结窗格绘制移到不可变借用作用域结束前
         let viewport_rect = ui.clip_rect();
+        
+        // 使用与主渲染相同的尺寸计算方式，确保冻结窗格与主表格对齐
+        // 左上角固定区域（行号列和列标题的交叉区域）
         let frozen_corner_rect = egui::Rect::from_min_max(
             egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
-            egui::Pos2::new(tl_x + header_col_width + border_width, tl_y + header_row_height + border_width),
+            egui::Pos2::new(viewport_rect.min.x + header_width + border_width, viewport_rect.min.y + get_row_height(0) + border_width),
         );
         
-        // 绘制左上角固定区域背景
+        // 绘制左上角固定区域背景（不绘制边框，避免与主表格边框叠加产生阴影）
         painter.rect_filled(
             frozen_corner_rect,
             0.0,
             egui::Color32::LIGHT_GRAY,
         );
         
-        // 绘制固定列标题（顶部）
-        let mut col_x = tl_x + header_col_width + border_width;
+        // 绘制固定列标题（顶部）- 使用与主渲染相同的累积宽度计算
         for col in 1..=sheet.max_col {
+            // 使用累积宽度数组获取列的X位置（与主渲染一致）
+            let col_x = tl_x + border_width + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
+            let col_height = get_row_height(0);
+            
             let col_rect = egui::Rect::from_min_size(
                 egui::Pos2::new(col_x, viewport_rect.min.y),
-                egui::vec2(col_width, header_row_height),
+                egui::vec2(col_width, col_height),
             );
             
             if col_rect.max.x > viewport_rect.min.x && col_rect.min.x < viewport_rect.max.x {
+                // 只绘制背景和文字，不绘制边框（边框由主表格绘制）
                 painter.rect_filled(col_rect, 0.0, egui::Color32::LIGHT_GRAY);
                 painter.text(
                     egui::Pos2::new(col_rect.center().x, col_rect.center().y),
@@ -1027,21 +1032,23 @@ pub fn draw_table_content(
                     egui::FontId::default(),
                     egui::Color32::BLACK,
                 );
-                painter.rect_stroke(col_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::DARK_GRAY));
             }
-            col_x += col_width + border_width;
         }
         
-        // 绘制固定行标题（左侧）
-        let mut row_y = tl_y + header_row_height + border_width;
+        // 绘制固定行标题（左侧）- 使用与主渲染相同的累积高度计算
         for row in 1..=sheet.max_row {
+            // 使用累积高度数组获取行的Y位置（与主渲染一致）
+            let row_y = tl_y + border_width + row_cumulative_height[row as usize];
+            let row_width = header_width;
             let row_height = get_row_height(row);
+            
             let row_rect = egui::Rect::from_min_size(
                 egui::Pos2::new(viewport_rect.min.x, row_y),
-                egui::vec2(header_col_width, row_height),
+                egui::vec2(row_width, row_height),
             );
             
             if row_rect.max.y > viewport_rect.min.y && row_rect.min.y < viewport_rect.max.y {
+                // 只绘制背景和文字，不绘制边框（边框由主表格绘制）
                 painter.rect_filled(row_rect, 0.0, egui::Color32::LIGHT_GRAY);
                 painter.text(
                     egui::Pos2::new(row_rect.center().x, row_rect.center().y),
@@ -1050,9 +1057,7 @@ pub fn draw_table_content(
                     egui::FontId::default(),
                     egui::Color32::BLACK,
                 );
-                painter.rect_stroke(row_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::DARK_GRAY));
             }
-            row_y += row_height + border_width;
         }
     }
     
