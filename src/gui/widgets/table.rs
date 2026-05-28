@@ -125,6 +125,16 @@ pub fn draw_table_content(
         clip_rect.contains(cell_rect.min) && clip_rect.contains(cell_rect.max)
     };
     
+    // 获取单元格的全局坐标（用于滚动）
+    let get_cell_global_rect = |col: u32, row: u32| -> egui::Rect {
+        let (x, y, width, height) = get_cell_rect(col, row);
+        // 转换为全局坐标
+        egui::Rect::from_min_size(
+            egui::Pos2::new(x + table_top_left.x, y + table_top_left.y),
+            egui::vec2(width, height)
+        )
+    };
+    
     // 键盘事件处理
     let input = ui.input(|i| i.clone());
     let mut save_current_edit = false;
@@ -150,6 +160,9 @@ pub fn draw_table_content(
         if let Some((col, row)) = *selected_cell {
             let mut new_col = col;
             let mut new_row = row;
+            let direction = if input.modifiers.shift { "Shift+Tab (左)" } else { "Tab (右)" };
+            
+            println!("[Tab键处理] 当前单元格: ({},{}), 方向: {}", col, row, direction);
             
             // 获取sheet用于检查合并单元格
             let sheet = excel_data.get_sheet(current_sheet);
@@ -224,25 +237,34 @@ pub fn draw_table_content(
             
             if new_col != col || new_row != row {
                 new_selected_cell = Some((new_col, new_row));
+                println!("[Tab键处理] 新单元格: ({},{}), 是否在视口内: {}", new_col, new_row, is_cell_in_viewport(new_col, new_row));
                 
                 // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
                 if !is_cell_in_viewport(new_col, new_row) {
-                    let (x, y, width, height) = get_cell_rect(new_col, new_row);
-                    let target_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(x, y),
-                        egui::vec2(width, height)
-                    );
-                    scroll_to_rect = Some(target_rect);
+                    println!("[Tab键处理] 触发滚动到单元格 ({},{})", new_col, new_row);
                     
-                    let visible_rect = ui.clip_rect();
-                    let align = if target_rect.min.x < visible_rect.min.x {
+                    // 使用全局坐标进行滚动
+                    let target_rect = get_cell_global_rect(new_col, new_row);
+                    println!("[Tab键处理] 滚动目标矩形(全局): {:?}", target_rect);
+                    
+                    // 根据移动方向选择对齐方式，实现逐单元格滚动效果
+                    let align = if input.modifiers.shift {
+                        // Shift+Tab: 向左（或向上换行），对齐到左侧/顶部
                         egui::Align::Min
                     } else {
+                        // Tab: 向右（或向下换行），对齐到右侧/底部
                         egui::Align::Max
                     };
+                    
                     ui.scroll_to_rect(target_rect, Some(align));
+                    ui.ctx().request_repaint();
+                    scroll_to_rect = Some(target_rect);
                 }
+            } else {
+                println!("[Tab键处理] 单元格位置未变化");
             }
+        } else {
+            println!("[Tab键处理] 未选中任何单元格");
         }
         // 消费Tab键事件，防止传递到菜单栏
         ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Tab));
@@ -253,11 +275,13 @@ pub fn draw_table_content(
         if let Some((col, row)) = *selected_cell {
             let mut new_col = col;
             let mut new_row = row;
+            let mut direction = String::new();
             
             // 获取sheet用于检查合并单元格
             let sheet = excel_data.get_sheet(current_sheet);
             
             if input.key_pressed(egui::Key::ArrowUp) {
+                direction = "上".to_string();
                 // 向上移动
                 if row > 1 {
                     new_row = row - 1;
@@ -269,6 +293,7 @@ pub fn draw_table_content(
                     }
                 }
             } else if input.key_pressed(egui::Key::ArrowDown) {
+                direction = "下".to_string();
                 // 向下移动
                 if row < max_row {
                     new_row = row + 1;
@@ -280,6 +305,7 @@ pub fn draw_table_content(
                     }
                 }
             } else if input.key_pressed(egui::Key::ArrowLeft) {
+                direction = "左".to_string();
                 // 向左移动
                 if col > 1 {
                     // 检查当前单元格是否是合并单元格的一部分
@@ -304,6 +330,7 @@ pub fn draw_table_content(
                     }
                 }
             } else if input.key_pressed(egui::Key::ArrowRight) {
+                direction = "右".to_string();
                 // 向右移动
                 // 检查当前单元格是否是合并单元格的一部分
                 let current_col = if let Some(s) = sheet {
@@ -327,45 +354,55 @@ pub fn draw_table_content(
                 }
             }
             
-            if new_col != col || new_row != row {
-                new_selected_cell = Some((new_col, new_row));
+            if !direction.is_empty() {
+                println!("[方向键处理] 当前单元格: ({},{}), 方向: {}", col, row, direction);
                 
-                // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
-                if !is_cell_in_viewport(new_col, new_row) {
-                    let (x, y, width, height) = get_cell_rect(new_col, new_row);
-                    let target_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(x, y),
-                        egui::vec2(width, height)
-                    );
-                    scroll_to_rect = Some(target_rect);
+                if new_col != col || new_row != row {
+                    new_selected_cell = Some((new_col, new_row));
+                    println!("[方向键处理] 新单元格: ({},{}), 是否在视口内: {}", new_col, new_row, is_cell_in_viewport(new_col, new_row));
                     
-                    let visible_rect = ui.clip_rect();
-                    
-                    // 根据滚动方向选择对齐方式，实现逐单元格滚动效果
-                    let align = if target_rect.min.x < visible_rect.min.x || target_rect.min.y < visible_rect.min.y {
-                        // 向左或向上滚动，对齐到顶部/左侧
-                        egui::Align::Min
-                    } else {
-                        // 向右或向下滚动，对齐到底部/右侧
-                        egui::Align::Max
-                    };
-                    
-                    // 执行滚动
-                    ui.scroll_to_rect(target_rect, Some(align));
-                }
-                
-                // 消费方向键事件
-                ui.input_mut(|i| {
-                    if input.key_pressed(egui::Key::ArrowUp) {
-                        i.consume_key(input.modifiers, egui::Key::ArrowUp);
-                    } else if input.key_pressed(egui::Key::ArrowDown) {
-                        i.consume_key(input.modifiers, egui::Key::ArrowDown);
-                    } else if input.key_pressed(egui::Key::ArrowLeft) {
-                        i.consume_key(input.modifiers, egui::Key::ArrowLeft);
-                    } else if input.key_pressed(egui::Key::ArrowRight) {
-                        i.consume_key(input.modifiers, egui::Key::ArrowRight);
+                    // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
+                    if !is_cell_in_viewport(new_col, new_row) {
+                        println!("[方向键处理] 触发滚动到单元格 ({},{})", new_col, new_row);
+                        
+                        // 使用全局坐标进行滚动
+                        let target_rect = get_cell_global_rect(new_col, new_row);
+                        println!("[方向键处理] 滚动目标矩形(全局): {:?}", target_rect);
+                        println!("[方向键处理] 当前 clip_rect: {:?}", ui.clip_rect());
+                        
+                        // 根据移动方向选择对齐方式，实现逐单元格滚动效果
+                        let align = if input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::ArrowRight) {
+                            // 向下或向右滚动，对齐到底部/右侧（实现逐行/逐列滚动）
+                            egui::Align::Max
+                        } else {
+                            // 向上或向左滚动，对齐到顶部/左侧（实现逐行/逐列滚动）
+                            egui::Align::Min
+                        };
+                        
+                        println!("[方向键处理] 在 table.rs 内调用 scroll_to_rect, align={:?}", align);
+                        ui.scroll_to_rect(target_rect, Some(align));
+                        
+                        // 请求立即重绘，确保滚动生效
+                        ui.ctx().request_repaint();
+                        
+                        scroll_to_rect = Some(target_rect);
                     }
-                });
+                    
+                    // 消费方向键事件
+                    ui.input_mut(|i| {
+                        if input.key_pressed(egui::Key::ArrowUp) {
+                            i.consume_key(input.modifiers, egui::Key::ArrowUp);
+                        } else if input.key_pressed(egui::Key::ArrowDown) {
+                            i.consume_key(input.modifiers, egui::Key::ArrowDown);
+                        } else if input.key_pressed(egui::Key::ArrowLeft) {
+                            i.consume_key(input.modifiers, egui::Key::ArrowLeft);
+                        } else if input.key_pressed(egui::Key::ArrowRight) {
+                            i.consume_key(input.modifiers, egui::Key::ArrowRight);
+                        }
+                    });
+                } else {
+                    println!("[方向键处理] 单元格位置未变化（已达边界）");
+                }
             }
         }
     }

@@ -196,6 +196,8 @@ impl eframe::App for ExcelViewer {
                 
                 ui.separator();
                 
+                // 超简单方案：直接绘制，所有滚动在 table.rs 内部处理！
+                println!("[Viewer] 开始绘制表格");
                 egui::ScrollArea::both()
                     .show(ui, |ui| {
                         draw_table_content(
@@ -208,6 +210,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.just_entered_edit_mode,
                         );
                     });
+                println!("[Viewer] 完成绘制表格");
                 
                 ui.separator();
                 ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
