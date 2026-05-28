@@ -503,6 +503,10 @@ pub fn draw_table_content(
         // 获取painter用于绘制
         let painter = ui.painter_at(rect);
         
+        // 保存标题区域尺寸（用于冻结窗格）
+        let header_row_height = get_row_height(0);
+        let header_col_width = header_width;
+        
         // 创建交互区域来处理点击事件（使用同一个rect）
         let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
         
@@ -982,18 +986,84 @@ pub fn draw_table_content(
                 );
                 
                 // 在闭包外部处理状态更新
-                if save_cell {
-                    if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
-                        let cell = sheet.cells.entry((edit_row, edit_col))
-                            .or_insert_with(CellData::default);
-                        cell.value = edit_value.clone();
-                    }
-                }
                 if clear_edit {
                     *editing_cell = None;
                     edit_value.clear();
                     *just_entered_edit_mode = false;
                 }
+            }
+        }
+        
+        // ========== 冻结窗格：固定列标题和行标题 ==========
+        // 将冻结窗格绘制移到不可变借用作用域结束前
+        let viewport_rect = ui.clip_rect();
+        let frozen_corner_rect = egui::Rect::from_min_max(
+            egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+            egui::Pos2::new(tl_x + header_col_width + border_width, tl_y + header_row_height + border_width),
+        );
+        
+        // 绘制左上角固定区域背景
+        painter.rect_filled(
+            frozen_corner_rect,
+            0.0,
+            egui::Color32::LIGHT_GRAY,
+        );
+        
+        // 绘制固定列标题（顶部）
+        let mut col_x = tl_x + header_col_width + border_width;
+        for col in 1..=sheet.max_col {
+            let col_width = get_col_width(col);
+            let col_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(col_x, viewport_rect.min.y),
+                egui::vec2(col_width, header_row_height),
+            );
+            
+            if col_rect.max.x > viewport_rect.min.x && col_rect.min.x < viewport_rect.max.x {
+                painter.rect_filled(col_rect, 0.0, egui::Color32::LIGHT_GRAY);
+                painter.text(
+                    egui::Pos2::new(col_rect.center().x, col_rect.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    col_to_letter(col),
+                    egui::FontId::default(),
+                    egui::Color32::BLACK,
+                );
+                painter.rect_stroke(col_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::DARK_GRAY));
+            }
+            col_x += col_width + border_width;
+        }
+        
+        // 绘制固定行标题（左侧）
+        let mut row_y = tl_y + header_row_height + border_width;
+        for row in 1..=sheet.max_row {
+            let row_height = get_row_height(row);
+            let row_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(viewport_rect.min.x, row_y),
+                egui::vec2(header_col_width, row_height),
+            );
+            
+            if row_rect.max.y > viewport_rect.min.y && row_rect.min.y < viewport_rect.max.y {
+                painter.rect_filled(row_rect, 0.0, egui::Color32::LIGHT_GRAY);
+                painter.text(
+                    egui::Pos2::new(row_rect.center().x, row_rect.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    row.to_string(),
+                    egui::FontId::default(),
+                    egui::Color32::BLACK,
+                );
+                painter.rect_stroke(row_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::DARK_GRAY));
+            }
+            row_y += row_height + border_width;
+        }
+    }
+    
+    // 编辑模式处理使用独立的可变借用（在不可变借用作用域外）
+    // 如果正在编辑且编辑值已更改，保存到单元格
+    if editing_cell.is_some() && !edit_value.is_empty() {
+        if let Some((edit_col, edit_row)) = *editing_cell {
+            if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                let cell = sheet.cells.entry((edit_row, edit_col))
+                    .or_insert_with(CellData::default);
+                cell.value = edit_value.clone();
             }
         }
     }

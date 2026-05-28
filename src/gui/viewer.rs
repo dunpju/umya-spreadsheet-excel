@@ -196,20 +196,33 @@ impl eframe::App for ExcelViewer {
                 
                 ui.separator();
                 
-                // 超简单方案：直接绘制，所有滚动在 table.rs 内部处理！
+                // 冻结窗格布局：列标题固定顶部，行标题固定左侧
                 println!("[Viewer] 开始绘制表格");
-                egui::ScrollArea::both()
+                
+                // 创建滚动状态
+                let vertical_scroll_id = ui.make_persistent_id("table_vertical_scroll");
+                let horizontal_scroll_id = ui.make_persistent_id("table_horizontal_scroll");
+                
+                // 外层垂直滚动
+                egui::ScrollArea::vertical()
+                    .id_salt(vertical_scroll_id)
                     .show(ui, |ui| {
-                        draw_table_content(
-                            ui, 
-                            excel_data, 
-                            self.current_sheet, 
-                            &mut self.selected_cell,
-                            &mut self.editing_cell,
-                            &mut self.edit_value,
-                            &mut self.just_entered_edit_mode,
-                        );
+                        // 内层水平滚动
+                        egui::ScrollArea::horizontal()
+                            .id_salt(horizontal_scroll_id)
+                            .show(ui, |ui| {
+                                draw_table_content(
+                                    ui, 
+                                    excel_data, 
+                                    self.current_sheet, 
+                                    &mut self.selected_cell,
+                                    &mut self.editing_cell,
+                                    &mut self.edit_value,
+                                    &mut self.just_entered_edit_mode,
+                                );
+                            });
                     });
+                
                 println!("[Viewer] 完成绘制表格");
                 
                 ui.separator();
