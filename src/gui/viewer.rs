@@ -10,7 +10,6 @@ use crate::gui::widgets::{
     draw_menu_bar,
     draw_import_dialog,
     draw_table_content,
-    draw_sheet_selector,
     draw_empty_state,
     draw_name_box,
     NameBoxState,
@@ -159,7 +158,11 @@ impl eframe::App for ExcelViewer {
         // 检查异步加载结果
         self.check_load_result();
 
-        // 底部状态栏：在 CentralPanel 之前渲染，确保 CentralPanel 自动留出空间
+        // 底部区域：工作表选择器 + 文件路径状态栏
+        // 注意：TopBottomPanel 按代码顺序从下往上堆叠，先渲染的在最底部
+        // 先渲染 status_bar（最底部），再渲染 sheet_bar（其上方），CentralPanel 在最上面
+
+        // 文件路径状态栏（最底部）
         egui::TopBottomPanel::bottom("status_bar")
             .exact_height(20.0)
             .show(ctx, |ui| {
@@ -174,6 +177,23 @@ impl eframe::App for ExcelViewer {
                     }
                 });
             });
+
+        // 工作表选择器（状态栏上方）
+        if self.excel_data.is_some() {
+            egui::TopBottomPanel::bottom("sheet_bar")
+                .exact_height(28.0)
+                .show(ctx, |ui| {
+                    ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
+                    ui.horizontal(|ui| {
+                        for (i, sheet) in self.excel_data.as_ref().unwrap().sheets.iter().enumerate() {
+                            if ui.selectable_label(self.current_sheet == i, &sheet.name).clicked() {
+                                self.current_sheet = i;
+                                self.selected_cell = None;
+                            }
+                        }
+                    });
+                });
+        }
 
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -233,10 +253,6 @@ impl eframe::App for ExcelViewer {
                         );
                     });
                 
-                ui.separator();
-                ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
-                draw_sheet_selector(ui, excel_data, &mut self.current_sheet, &mut self.selected_cell);
-
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {
                     if let Some((col, row)) = self.selected_cell {
