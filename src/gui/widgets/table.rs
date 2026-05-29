@@ -1386,6 +1386,7 @@ pub fn draw_table_content(
         }
 
         // 冻结左侧数据列（rows > fr，cols 1..=fc）
+        // 注意：这些单元格按滚动 y 绘制，可能向上溢出到冻结顶部区域（如 A15 遮盖 A14）
         for row in (fr + 1)..=sheet.max_row {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
@@ -1396,6 +1397,83 @@ pub fn draw_table_content(
                     fixed_x += get_col_width(c) + border_width;
                 }
                 draw_frozen_cell(&painter, col, row, fixed_x, row_y);
+            }
+        }
+
+        // === 第4步：白色重填左上角区域，覆盖左侧数据列向上溢出的部分 ===
+        // 然后重绘左上角区域内容（角落数据量小，重绘代价低）
+        if frozen_left_width > 0.0 && frozen_top_height > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+                    egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.min.y + frozen_top_height),
+                ),
+                0.0,
+                egui::Color32::WHITE,
+            );
+            // 重绘左上角背景
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+                    egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.min.y + frozen_top_height),
+                ),
+                0.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            // 重绘冻结列标题
+            for col in 1..=fc {
+                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                for c in 1..col {
+                    fixed_x += get_col_width(c) + border_width;
+                }
+                let col_width = get_col_width(col);
+                let col_height = get_row_height(0);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                    0.0,
+                    egui::Color32::LIGHT_GRAY,
+                );
+                painter.text(
+                    egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
+                    egui::Align2::CENTER_CENTER,
+                    col_to_letter(col),
+                    egui::FontId::default(),
+                    egui::Color32::BLACK,
+                );
+            }
+            // 重绘冻结行号
+            for row in 1..=fr {
+                let mut fixed_y = viewport_rect.min.y;
+                for r in 0..row {
+                    fixed_y += get_row_height(r) + border_width;
+                }
+                let row_height = get_row_height(row);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
+                    0.0,
+                    egui::Color32::LIGHT_GRAY,
+                );
+                painter.text(
+                    egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),
+                    egui::Align2::CENTER_CENTER,
+                    row.to_string(),
+                    egui::FontId::default(),
+                    egui::Color32::BLACK,
+                );
+            }
+            // 重绘角落冻结数据单元格
+            for row in 1..=fr {
+                let mut fixed_y = viewport_rect.min.y;
+                for r in 0..row {
+                    fixed_y += get_row_height(r) + border_width;
+                }
+                for col in 1..=fc {
+                    let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                    for c in 1..col {
+                        fixed_x += get_col_width(c) + border_width;
+                    }
+                    draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+                }
             }
         }
 
