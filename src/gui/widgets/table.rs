@@ -668,8 +668,22 @@ pub fn draw_table_content(
         // 处理点击事件
         if response.clicked() {
             if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                let click_x = pos.x - tl_x;
-                let click_y = pos.y - tl_y;
+                // 冻结区域在视口上位置固定，不随滚动变化
+                // 因此需要根据点击位置是否在冻结区域内，选择不同的坐标参考系
+                let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
+
+                // 冻结区域使用视口相对坐标（不随滚动变化），非冻结区域使用表格内容坐标
+                let click_x = if in_frozen_left {
+                    pos.x - viewport_rect.min.x
+                } else {
+                    pos.x - tl_x
+                };
+                let click_y = if in_frozen_top {
+                    pos.y - viewport_rect.min.y
+                } else {
+                    pos.y - tl_y
+                };
 
                 // 查找被点击的列（使用 < 确保边界位置归属于后一列）
                 let mut clicked_col: Option<u32> = None;
@@ -994,98 +1008,7 @@ pub fn draw_table_content(
             }
         }
 
-        // ========== 编辑模式：显示输入框 ==========
-        // 复制编辑单元格坐标，避免在闭包中借用冲突
-        let editing_coords = editing_cell.map(|(c, r)| (c, r));
-        if let Some((edit_col, edit_row)) = editing_coords {
-            // 检查是否在可见范围内
-            if edit_col >= visible_cols_start && edit_col <= visible_cols_end &&
-               edit_row >= visible_rows_start && edit_row <= visible_rows_end {
-                
-                // 计算编辑单元格的位置
-                let mut x = tl_x + border_width;
-                for c in 0..edit_col {
-                    x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
-                }
-                let y = tl_y + border_width + row_cumulative_height[edit_row as usize];
-                
-                // 检查是否是合并单元格，如果是则计算合并区域的尺寸
-                let (cell_width, cell_height) = if let Some(merged_range) = sheet.get_merged_range(edit_col, edit_row) {
-                    // 合并单元格：计算整个合并区域的宽度和高度
-                    let mut merged_width = 0.0;
-                    for c in merged_range.start_col..=merged_range.end_col {
-                        merged_width += get_col_width(c) + border_width;
-                    }
-                    merged_width -= border_width;
-                    
-                    let mut merged_height = 0.0;
-                    for r in merged_range.start_row..=merged_range.end_row {
-                        merged_height += get_row_height(r) + border_width;
-                    }
-                    merged_height -= border_width;
-                    
-                    (merged_width, merged_height)
-                } else {
-                    // 普通单元格：使用单个单元格的尺寸
-                    (get_col_width(edit_col), get_row_height(edit_row))
-                };
-                
-                // 限制输入框尺寸，避免超出单元格
-                // 使用更小的内边距，避免输入框超出单元格边界
-                let input_width = (cell_width - 4.0).max(10.0);
-                let input_height = (cell_height - 6.0).max(16.0);
-                
-                // 保存编辑状态用于闭包
-                let mut save_cell = false;
-                let mut clear_edit = false;
-                
-                // 创建输入框响应区域
-                let rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x + 2.0, y + 2.0),
-                    egui::vec2(input_width, input_height)
-                );
-                let builder = egui::UiBuilder::new().max_rect(rect);
-                ui.allocate_new_ui(builder, |ui| {
-                        let text_edit = egui::TextEdit::singleline(edit_value)
-                            .font(egui::FontId::default())
-                            .desired_width(input_width)
-                            .min_size(egui::vec2(input_width, input_height));
-                        
-                        let response = ui.add(text_edit);
-                        
-                        // 自动聚焦输入框
-                        if !response.has_focus() {
-                            response.request_focus();
-                        }
-                        
-                        // 处理键盘事件
-                        if response.has_focus() {
-                            // 如果刚进入编辑模式，忽略Enter键（避免同一帧中进入又退出）
-                            if !*just_entered_edit_mode && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                save_cell = true;
-                                clear_edit = true;
-                            }
-                            // 处理 ESC 键，取消编辑
-                            else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                clear_edit = true;
-                            }
-                            // 点击其他地方时退出编辑
-                            else if ui.input(|i| i.pointer.any_click() && !response.rect.contains(i.pointer.hover_pos().unwrap_or_default())) {
-                                save_cell = true;
-                                clear_edit = true;
-                            }
-                        }
-                    }
-                );
-                
-                // 在闭包外部处理状态更新
-                if clear_edit {
-                    *editing_cell = None;
-                    edit_value.clear();
-                    *just_entered_edit_mode = false;
-                }
-            }
-        }
+        // （编辑输入框已移至冻结覆盖层之后，防止覆盖层遮挡输入框）
         
         // ========== 冻结窗格：固定列标题、行标题和冻结数据区域 ==========
         let viewport_rect = ui.clip_rect();
@@ -1518,6 +1441,120 @@ pub fn draw_table_content(
                 [egui::Pos2::new(line_x, viewport_rect.min.y), egui::Pos2::new(line_x, viewport_rect.max.y)],
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 100)),
             );
+        }
+
+        // ========== 编辑模式：显示输入框（在冻结覆盖层之后绘制，防止覆盖层遮挡） ==========
+        // 复制编辑单元格坐标，避免在闭包中借用冲突
+        let editing_coords = editing_cell.map(|(c, r)| (c, r));
+        if let Some((edit_col, edit_row)) = editing_coords {
+            // 检查是否在可见范围内
+            if edit_col >= visible_cols_start && edit_col <= visible_cols_end &&
+               edit_row >= visible_rows_start && edit_row <= visible_rows_end {
+
+                // 计算编辑单元格的位置
+                // 冻结区域使用固定视口坐标，非冻结区域使用表格内容坐标
+                let x = if edit_col <= fc {
+                    // 冻结列：使用固定视口位置
+                    let mut fx = viewport_rect.min.x + header_width + border_width;
+                    for c in 1..edit_col {
+                        fx += get_col_width(c) + border_width;
+                    }
+                    fx
+                } else {
+                    // 非冻结列：使用表格内容坐标
+                    let mut x = tl_x + border_width;
+                    for c in 0..edit_col {
+                        x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
+                    }
+                    x
+                };
+                let y = if edit_row <= fr {
+                    // 冻结行：使用固定视口位置
+                    let mut fy = viewport_rect.min.y;
+                    for r in 0..edit_row {
+                        fy += get_row_height(r) + border_width;
+                    }
+                    fy
+                } else {
+                    // 非冻结行：使用表格内容坐标
+                    tl_y + border_width + row_cumulative_height[edit_row as usize]
+                };
+
+                // 检查是否是合并单元格，如果是则计算合并区域的尺寸
+                let (cell_width, cell_height) = if let Some(merged_range) = sheet.get_merged_range(edit_col, edit_row) {
+                    // 合并单元格：计算整个合并区域的宽度和高度
+                    let mut merged_width = 0.0;
+                    for c in merged_range.start_col..=merged_range.end_col {
+                        merged_width += get_col_width(c) + border_width;
+                    }
+                    merged_width -= border_width;
+
+                    let mut merged_height = 0.0;
+                    for r in merged_range.start_row..=merged_range.end_row {
+                        merged_height += get_row_height(r) + border_width;
+                    }
+                    merged_height -= border_width;
+
+                    (merged_width, merged_height)
+                } else {
+                    // 普通单元格：使用单个单元格的尺寸
+                    (get_col_width(edit_col), get_row_height(edit_row))
+                };
+
+                // 限制输入框尺寸，避免超出单元格
+                let input_width = (cell_width - 4.0).max(10.0);
+                let input_height = (cell_height - 6.0).max(16.0);
+
+                // 保存编辑状态用于闭包
+                let mut save_cell = false;
+                let mut clear_edit = false;
+
+                // 创建输入框响应区域
+                let edit_rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(x + 2.0, y + 2.0),
+                    egui::vec2(input_width, input_height)
+                );
+                let builder = egui::UiBuilder::new().max_rect(edit_rect);
+                ui.allocate_new_ui(builder, |ui| {
+                        let text_edit = egui::TextEdit::singleline(edit_value)
+                            .font(egui::FontId::default())
+                            .desired_width(input_width)
+                            .min_size(egui::vec2(input_width, input_height));
+
+                        let response = ui.add(text_edit);
+
+                        // 自动聚焦输入框
+                        if !response.has_focus() {
+                            response.request_focus();
+                        }
+
+                        // 处理键盘事件
+                        if response.has_focus() {
+                            // 如果刚进入编辑模式，忽略Enter键（避免同一帧中进入又退出）
+                            if !*just_entered_edit_mode && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                save_cell = true;
+                                clear_edit = true;
+                            }
+                            // 处理 ESC 键，取消编辑
+                            else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                clear_edit = true;
+                            }
+                            // 点击其他地方时退出编辑
+                            else if ui.input(|i| i.pointer.any_click() && !response.rect.contains(i.pointer.hover_pos().unwrap_or_default())) {
+                                save_cell = true;
+                                clear_edit = true;
+                            }
+                        }
+                    }
+                );
+
+                // 在闭包外部处理状态更新
+                if clear_edit {
+                    *editing_cell = None;
+                    edit_value.clear();
+                    *just_entered_edit_mode = false;
+                }
+            }
         }
     }
     
