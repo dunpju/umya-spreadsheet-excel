@@ -151,9 +151,36 @@ pub fn draw_table_content(
     };
     
     // 获取单元格的全局坐标（用于滚动）
+    // 如果目标单元格属于合并范围，返回合并区域的完整矩形
     let get_cell_global_rect = |col: u32, row: u32| -> egui::Rect {
+        // 检查目标单元格是否属于合并单元格，如果是则使用合并区域的完整矩形
+        if let Some(s) = sheet {
+            if let Some(merged_range) = s.get_merged_range(col, row) {
+                // 从合并区域的左上角开始计算位置
+                let (x, y, _, _) = get_cell_rect(merged_range.start_col, merged_range.start_row);
+
+                // 累加合并区域所有列的宽度
+                let mut total_width = 0.0f32;
+                for c in merged_range.start_col..=merged_range.end_col {
+                    total_width += get_col_width(c) + border_width;
+                }
+                total_width -= border_width;
+
+                // 累加合并区域所有行的高度
+                let mut total_height = 0.0f32;
+                for r in merged_range.start_row..=merged_range.end_row {
+                    total_height += get_row_height(r) + border_width;
+                }
+                total_height -= border_width;
+
+                return egui::Rect::from_min_size(
+                    egui::Pos2::new(x + table_top_left.x, y + table_top_left.y),
+                    egui::vec2(total_width, total_height)
+                );
+            }
+        }
+        // 非合并单元格，使用原有逻辑
         let (x, y, width, height) = get_cell_rect(col, row);
-        // 转换为全局坐标
         egui::Rect::from_min_size(
             egui::Pos2::new(x + table_top_left.x, y + table_top_left.y),
             egui::vec2(width, height)
