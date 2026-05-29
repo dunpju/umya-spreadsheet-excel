@@ -6,6 +6,18 @@ use eframe::egui;
 use crate::excel::reader::{CellAlignment, CellData, ExcelData, col_to_letter};
 use crate::gui::alignment::alignment_to_egui;
 
+/// 获取单元格的显示文本，处理日期格式转换
+fn cell_display_text(cell: &CellData) -> String {
+    if let Some(ref fmt) = cell.number_format {
+        if ExcelData::is_date_format(fmt) {
+            if let Ok(serial) = cell.value.parse::<f64>() {
+                return ExcelData::format_date(serial, fmt);
+            }
+        }
+    }
+    cell.value.clone()
+}
+
 /// 绘制表格内容
 /// 
 /// 使用虚拟渲染技术，只绘制可见区域的单元格，提高性能
@@ -486,7 +498,19 @@ pub fn draw_table_content(
                 if is_formula {
                     cell.formula = edit_value.clone();
                 } else {
-                    cell.value = edit_value.clone();
+                    // 检查是否为日期格式单元格，转换日期字符串为序列号
+                    let save_value = if let Some(ref fmt) = cell.number_format {
+                        if ExcelData::is_date_format(fmt) {
+                            ExcelData::parse_date_string(edit_value)
+                                .map(|serial| serial.to_string())
+                                .unwrap_or_else(|| edit_value.clone())
+                        } else {
+                            edit_value.clone()
+                        }
+                    } else {
+                        edit_value.clone()
+                    };
+                    cell.value = save_value;
                     cell.formula.clear();
                 }
             }
@@ -519,12 +543,12 @@ pub fn draw_table_content(
                 
                 *editing_cell = Some((edit_col, edit_row));
                 *edit_value = sheet.get_cell(edit_row, edit_col)
-                    .map(|cell| cell.value.clone())
+                    .map(|cell| cell_display_text(cell))
                     .unwrap_or_default();
             }
         }
     }
-    
+
     // 现在开始渲染（获取不可变借用）
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
@@ -733,9 +757,9 @@ pub fn draw_table_content(
                             };
                             
                             *editing_cell = Some((edit_col, edit_row));
-                            // 获取单元格当前值作为编辑初始值
+                            // 获取单元格显示文本作为编辑初始值（日期格式会转换为可读文本）
                             *edit_value = sheet.get_cell(edit_row, edit_col)
-                                .map(|cell| cell.value.clone())
+                                .map(|cell| cell_display_text(cell))
                                 .unwrap_or_default();
                         }
                     }
@@ -913,7 +937,7 @@ pub fn draw_table_content(
                         if merged_range.is_top_left(col, row) {
                             is_merged_top_left = true;
                             if let Some(cell) = sheet.get_cell(row, col) {
-                                cell_content = cell.value.clone();
+                                cell_content = cell_display_text(cell);
                                 alignment = cell.alignment.clone();
                                 font_size = cell.font_size.map(|s| s as f32);
                                 font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -924,7 +948,7 @@ pub fn draw_table_content(
                     } else {
                         // 普通单元格
                         if let Some(cell) = sheet.get_cell(row, col) {
-                            cell_content = cell.value.clone();
+                            cell_content = cell_display_text(cell);
                             alignment = cell.alignment.clone();
                             font_size = cell.font_size.map(|s| s as f32);
                             font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -1098,7 +1122,8 @@ pub fn draw_table_content(
 
                     // 绘制内容
                     if let Some(cell) = sheet.get_cell(row, col) {
-                        if !cell.value.is_empty() {
+                        let display = cell_display_text(cell);
+                        if !display.is_empty() {
                             let egui_align = alignment_to_egui(&cell.alignment);
                             let font_id = cell.font_size.map(|s| egui::FontId::proportional(s as f32)).unwrap_or(egui::FontId::default());
                             let font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -1113,7 +1138,7 @@ pub fn draw_table_content(
                                 egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + mw - 4.0, y + mh / 2.0),
                                 egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + mw - 4.0, y + mh - 4.0),
                             };
-                            painter.text(text_pos, egui_align, &cell.value, font_id, font_color);
+                            painter.text(text_pos, egui_align, &display, font_id, font_color);
                         }
                     }
                 }
@@ -1133,7 +1158,8 @@ pub fn draw_table_content(
 
                 // 绘制内容
                 if let Some(cell) = sheet.get_cell(row, col) {
-                    if !cell.value.is_empty() {
+                    let display = cell_display_text(cell);
+                    if !display.is_empty() {
                         let egui_align = alignment_to_egui(&cell.alignment);
                         let font_id = cell.font_size.map(|s| egui::FontId::proportional(s as f32)).unwrap_or(egui::FontId::default());
                         let font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -1148,7 +1174,7 @@ pub fn draw_table_content(
                             egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height / 2.0),
                             egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height - 4.0),
                         };
-                        painter.text(text_pos, egui_align, &cell.value, font_id, font_color);
+                        painter.text(text_pos, egui_align, &display, font_id, font_color);
                     }
                 }
             }
@@ -1598,7 +1624,19 @@ pub fn draw_table_content(
                         if is_formula {
                             cell.formula = edit_value.clone();
                         } else {
-                            cell.value = edit_value.clone();
+                            // 检查是否为日期格式单元格，如果是则将日期字符串转回序列号
+                            let save_value = if let Some(ref fmt) = cell.number_format {
+                                if ExcelData::is_date_format(fmt) {
+                                    ExcelData::parse_date_string(edit_value)
+                                        .map(|serial| serial.to_string())
+                                        .unwrap_or_else(|| edit_value.clone())
+                                } else {
+                                    edit_value.clone()
+                                }
+                            } else {
+                                edit_value.clone()
+                            };
+                            cell.value = save_value;
                             cell.formula.clear();
                         }
                     }
@@ -1622,12 +1660,18 @@ pub fn draw_table_content(
     if editing_cell.is_some() && !edit_value.is_empty() {
         if let Some((edit_col, edit_row)) = *editing_cell {
             // 记录编辑前的值，用于判断是否需要重算
-            let prev_value = excel_data.sheets.get(current_sheet)
+            let prev_display = excel_data.sheets.get(current_sheet)
                 .and_then(|s| s.cells.get(&(edit_row, edit_col)))
-                .map(|c| if edit_value.starts_with('=') { c.formula.clone() } else { c.value.clone() })
+                .map(|c| {
+                    if edit_value.starts_with('=') {
+                        c.formula.clone()
+                    } else {
+                        cell_display_text(c)
+                    }
+                })
                 .unwrap_or_default();
 
-            if edit_value != &prev_value {
+            if edit_value != &prev_display {
                 let is_formula = edit_value.starts_with('=');
                 if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
                     let cell = sheet.cells.entry((edit_row, edit_col))
@@ -1635,7 +1679,19 @@ pub fn draw_table_content(
                     if is_formula {
                         cell.formula = edit_value.clone();
                     } else {
-                        cell.value = edit_value.clone();
+                        // 检查是否为日期格式单元格，转换日期字符串为序列号
+                        let save_value = if let Some(ref fmt) = cell.number_format {
+                            if ExcelData::is_date_format(fmt) {
+                                ExcelData::parse_date_string(edit_value)
+                                    .map(|serial| serial.to_string())
+                                    .unwrap_or_else(|| edit_value.clone())
+                            } else {
+                                edit_value.clone()
+                            }
+                        } else {
+                            edit_value.clone()
+                        };
+                        cell.value = save_value;
                     }
                 }
                 // 编辑中实时重算依赖公式

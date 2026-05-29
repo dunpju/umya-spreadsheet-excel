@@ -211,9 +211,19 @@ impl eframe::App for ExcelViewer {
                         };
                         sheet.get_cell(target_row, target_col).map(|cell| {
                             if !cell.formula.is_empty() {
-                                cell.formula.as_str()
+                                cell.formula.clone()
+                            } else if let Some(ref fmt) = cell.number_format {
+                                if ExcelData::is_date_format(fmt) {
+                                    if let Ok(serial) = cell.value.parse::<f64>() {
+                                        ExcelData::format_date(serial, fmt)
+                                    } else {
+                                        cell.value.clone()
+                                    }
+                                } else {
+                                    cell.value.clone()
+                                }
                             } else {
-                                cell.value.as_str()
+                                cell.value.clone()
                             }
                         })
                     })
@@ -226,7 +236,7 @@ impl eframe::App for ExcelViewer {
                     ui,
                     &mut self.name_box_state,
                     self.selected_cell,  // 直接使用选中的单元格，不转换为合并单元格的左上角
-                    display_text,
+                    display_text.as_deref(),
                     max_col,
                     max_row,
                     &mut self.pending_formula_save,
@@ -264,7 +274,19 @@ impl eframe::App for ExcelViewer {
                             // 公式变更需要全量求值（依赖图结构变化）
                             crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                         } else {
-                            cell.value = formula_value;
+                            // 检查是否为日期格式单元格，转换日期字符串为序列号
+                            let save_value = if let Some(ref fmt) = cell.number_format {
+                                if ExcelData::is_date_format(fmt) {
+                                    ExcelData::parse_date_string(&formula_value)
+                                        .map(|serial| serial.to_string())
+                                        .unwrap_or(formula_value)
+                                } else {
+                                    formula_value
+                                }
+                            } else {
+                                formula_value
+                            };
+                            cell.value = save_value;
                             cell.formula.clear();
                             // 值变更只需增量求值受影响的公式
                             crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);

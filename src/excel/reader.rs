@@ -60,6 +60,8 @@ pub struct CellData {
     pub font_size: Option<f64>,
     /// 字体颜色（RGB）
     pub font_color: Option<(u8, u8, u8)>,
+    /// 数字格式代码（如日期格式 "yyyy/m/d"）
+    pub number_format: Option<String>,
 }
 
 /// CellData 的默认实现，创建空值和空公式的单元格
@@ -72,6 +74,7 @@ impl Default for CellData {
             background_color: None,
             font_size: None,
             font_color: None,
+            number_format: None,
         }
     }
 }
@@ -239,8 +242,8 @@ impl ExcelData {
                     if let Some(cell) = worksheet.get_cell((col_idx, row_idx)) {
                         let value = cell.get_value().to_string();
                         let style = worksheet.get_style((col_idx, row_idx));
-                        let (alignment, background_color, font_size, font_color) = Self::parse_style(style, theme);
-                        
+                        let (alignment, background_color, font_size, font_color, number_format) = Self::parse_style(style, theme);
+
                         let cell_data = CellData {
                             value,
                             formula: cell.get_formula().to_string(),
@@ -248,6 +251,7 @@ impl ExcelData {
                             background_color,
                             font_size,
                             font_color,
+                            number_format,
                         };
                         // 内部存储仍使用 (row, col) 顺序
                         sheet.cells.insert((row_idx, col_idx), cell_data);
@@ -348,11 +352,12 @@ impl ExcelData {
     ///
     /// # 返回值
     /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB))
-    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>) {
+    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>) {
         let mut alignment = CellAlignment::default();
         let mut background_color: Option<(u8, u8, u8)> = None;
         let mut font_size: Option<f64> = None;
         let mut font_color: Option<(u8, u8, u8)> = None;
+        let mut number_format: Option<String> = None;
 
         // 解析对齐方式
         if let Some(align) = style.get_alignment() {
@@ -406,7 +411,15 @@ impl ExcelData {
             }
         }
 
-        (alignment, background_color, font_size, font_color)
+        // 解析数字格式
+        if let Some(num_fmt) = style.get_number_format() {
+            let fmt = num_fmt.get_format_code();
+            if !fmt.is_empty() && fmt != "General" {
+                number_format = Some(fmt.to_string());
+            }
+        }
+
+        (alignment, background_color, font_size, font_color, number_format)
     }
     
     /// 将十六进制颜色字符串转换为 RGB 元组
@@ -442,6 +455,248 @@ impl ExcelData {
             // 不支持的格式
             _ => Err(()),
         }
+    }
+
+    /// 检测数字格式代码是否为日期格式
+    ///
+    /// Excel 日期格式包含 y(年)、d(日) 等标记，或包含 m(月) 但不包含 h(时)/s(秒)
+    pub fn is_date_format(fmt: &str) -> bool {
+        if fmt.is_empty() { return false; }
+        // 只取分号前的第一个格式段
+        let fmt_part = fmt.split(';').next().unwrap_or(fmt);
+        // 去除方括号区域（如 [$-404]）和引号内容
+        let mut cleaned = String::new();
+        let mut in_bracket = false;
+        let mut in_quote = false;
+        for ch in fmt_part.chars() {
+            match ch {
+                '[' => in_bracket = true,
+                ']' => { in_bracket = false; continue; }
+                '"' => { in_quote = !in_quote; continue; }
+                _ if in_bracket || in_quote => continue,
+                _ => cleaned.push(ch),
+            }
+        }
+        let lower = cleaned.to_lowercase();
+        let has_year = lower.contains('y') || lower.contains('e');
+        let has_day = lower.contains('d');
+        let has_month = lower.contains('m') && !lower.contains('h') && !lower.contains('s');
+        has_year || has_day || has_month
+    }
+
+    /// 将 Excel 日期序列号转换为格式化日期字符串
+    ///
+    /// # 参数
+    /// * `serial` - Excel 日期序列号（如 46927）
+    /// * `fmt` - 数字格式代码（如 "yyyy/m/d"），用于确定输出格式
+    pub fn format_date(serial: f64, fmt: &str) -> String {
+        let (year, month, day) = Self::serial_to_date(serial);
+        // 只取分号前的第一个格式段（忽略 ;@ 等文本格式段）
+        let fmt_part = fmt.split(';').next().unwrap_or(fmt);
+        let lower = fmt_part.to_lowercase();
+        // 去除方括号区域内容，但保留引号内的字面文本（仅去除引号标记本身）
+        let cleaned;
+        {
+            let mut s = String::new();
+            let mut in_bracket = false;
+            let mut in_quote = false;
+            for ch in lower.chars() {
+                match ch {
+                    '[' => in_bracket = true,
+                    ']' => { in_bracket = false; continue; }
+                    '"' => { in_quote = !in_quote; continue; }
+                    _ if in_bracket => continue,
+                    _ => s.push(ch), // in_quote 时保留字面文本（如 年、月、日）
+                }
+            }
+            cleaned = s;
+        }
+
+        // 检测美式日期格式模式 (m/d/yyyy, mm/dd/yyyy 等)，重新排列为 yyyy/m/d
+        // 中文 Excel 会按 locale 覆盖标准格式的显示顺序
+        let cleaned = Self::normalize_date_format_order(&cleaned);
+
+        // 逐字符解析格式生成输出
+        let mut result = String::new();
+        let chars: Vec<char> = cleaned.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                'y' => {
+                    let count = Self::count_consecutive(&chars, i, 'y');
+                    if count >= 4 { result.push_str(&format!("{}", year)); }
+                    else if count >= 2 { result.push_str(&format!("{:02}", year % 100)); }
+                    else { result.push_str(&format!("{}", year % 100)); }
+                    i += count;
+                }
+                'm' => {
+                    let count = Self::count_consecutive(&chars, i, 'm');
+                    if count >= 3 {
+                        // mmm 简写月份名
+                        let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                        result.push_str(names.get(month as usize - 1).unwrap_or(&""));
+                    } else if count >= 2 {
+                        result.push_str(&format!("{:02}", month));
+                    } else {
+                        result.push_str(&format!("{}", month));
+                    }
+                    i += count;
+                }
+                'd' => {
+                    let count = Self::count_consecutive(&chars, i, 'd');
+                    if count >= 3 {
+                        // 已知1970-01-01是周四，用 Unix days mod 7 计算星期几
+                        let unix_days = (serial as i64) - 25569;
+                        let dow = ((unix_days % 7 + 7) % 7) as usize; // 0=Thu
+                        let names = ["Thu","Fri","Sat","Sun","Mon","Tue","Wed"];
+                        result.push_str(names.get(dow).unwrap_or(&""));
+                    } else if count >= 2 {
+                        result.push_str(&format!("{:02}", day));
+                    } else {
+                        result.push_str(&format!("{}", day));
+                    }
+                    i += count;
+                }
+                _ => {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+        if result.is_empty() {
+            format!("{}/{}/{}", year, month, day)
+        } else {
+            result
+        }
+    }
+
+    /// 将美式日期格式 (m/d/yyyy) 重新排列为中文格式 (yyyy/m/d)
+    /// 检测格式中以 m/d 开头、以 yyyy 结尾的模式，将年份移到前面
+    fn normalize_date_format_order(fmt: &str) -> String {
+        let chars: Vec<char> = fmt.chars().collect();
+        // 找到 y/m/d 各段的位置和长度
+        let mut y_pos: Option<(usize, usize)> = None; // (start, count)
+        let mut m_pos: Option<(usize, usize)> = None;
+        let mut d_pos: Option<(usize, usize)> = None;
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'y' {
+                let start = i;
+                let count = Self::count_consecutive(&chars, i, 'y');
+                y_pos = Some((start, count));
+                i += count;
+            } else if chars[i] == 'm' {
+                let start = i;
+                let count = Self::count_consecutive(&chars, i, 'm');
+                m_pos = Some((start, count));
+                i += count;
+            } else if chars[i] == 'd' {
+                let start = i;
+                let count = Self::count_consecutive(&chars, i, 'd');
+                d_pos = Some((start, count));
+                i += count;
+            } else {
+                i += 1;
+            }
+        }
+
+        // 如果格式同时包含 y、m、d，检查是否需要重排
+        if let (Some((y_start, y_count)), Some((m_start, m_count)), Some((d_start, d_count))) = (y_pos, m_pos, d_pos) {
+            // 如果 m 在 y 前面（美式格式如 m/d/yyyy），则重排为 yyyy/m/d
+            if m_start < y_start {
+                // 提取分隔符（m 和 d 之间的字符）
+                let sep_idx = m_start + m_count;
+                let sep = if sep_idx < chars.len() && chars[sep_idx] != 'd' {
+                    chars[sep_idx]
+                } else {
+                    '/'
+                };
+                // 构建新格式: yyyy + sep + mm + sep + dd
+                let y_part: String = chars[y_start..y_start + y_count].iter().collect();
+                let m_part: String = chars[m_start..m_start + m_count].iter().collect();
+                let d_part: String = chars[d_start..d_start + d_count].iter().collect();
+                return format!("{}{}{}{}{}", y_part, sep, m_part, sep, d_part);
+            }
+        }
+        fmt.to_string()
+    }
+
+    /// Excel 序列号转公历日期 (year, month, day)
+    fn serial_to_date(serial: f64) -> (u32, u32, u32) {
+        // Excel serial 1 = 1900-01-01, 但 Excel 错误地认为 1900-02-29 存在 (serial=60)
+        // Unix epoch 1970-01-01 = Excel serial 25569
+        let unix_days = (serial as i64) - 25569;
+        // Howard Hinnant 的 civil_from_days 算法
+        let z = unix_days + 719468;
+        let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+        let y = if m <= 2 { y + 1 } else { y };
+        (y as u32, m, d)
+    }
+
+    /// 将 (year, month, day) 转换为 Excel 日期序列号
+    pub fn date_to_serial(year: u32, month: u32, day: u32) -> f64 {
+        // Howard Hinnant 的 civil_from_days 逆算法
+        let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+        let m = if month <= 2 { month as i64 + 9 } else { month as i64 - 3 };
+        let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+        let yoe = y - era * 400;
+        let doy = (153 * m + 2) / 5 + day as i64 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let unix_days = era * 146097 + doe - 719468;
+        (unix_days + 25569) as f64
+    }
+
+    /// 尝试将格式化日期字符串解析回序列号
+    /// 支持格式: yyyy/m/d, yyyy/m/dd, yyyy/mm/d, yyyy/mm/dd,
+    ///           yyyy年m月d日, m/d/yyyy, m/d/yy 等
+    pub fn parse_date_string(s: &str) -> Option<f64> {
+        let s = s.trim();
+        // 尝试用常见分隔符分割
+        let owned;
+        let parts: Vec<&str> = if s.contains('年') {
+            // yyyy年m月d日 格式
+            owned = s.replace("年", "/").replace("月", "/").replace("日", "");
+            owned.split('/').collect()
+        } else {
+            s.split(|c: char| c == '/' || c == '-').collect()
+        };
+        if parts.len() != 3 { return None; }
+        let nums: Vec<Option<u32>> = parts.iter().map(|p| p.trim().parse::<u32>().ok()).collect();
+        if nums.iter().any(|n| n.is_none()) { return None; }
+        let nums: Vec<u32> = nums.into_iter().map(|n| n.unwrap()).collect();
+        // 判断格式：如果第一个数 > 31，认为是年份
+        let (year, month, day) = if nums[0] > 31 {
+            (nums[0], nums[1], nums[2])
+        } else if nums[2] > 31 {
+            (nums[2], nums[0], nums[1])
+        } else if nums[2] >= 100 {
+            // m/d/yy 或 m/d/yyyy
+            let y = if nums[2] < 100 { 2000 + nums[2] } else { nums[2] };
+            (y, nums[0], nums[1])
+        } else {
+            // 无法确定，假设 yyyy/m/d
+            (nums[0], nums[1], nums[2])
+        };
+        if month == 0 || month > 12 || day == 0 || day > 31 { return None; }
+        Some(Self::date_to_serial(year, month, day))
+    }
+
+    /// 计算从位置 i 开始连续出现字符 c 的次数
+    fn count_consecutive(chars: &[char], start: usize, c: char) -> usize {
+        let mut count = 0;
+        let mut i = start;
+        while i < chars.len() && chars[i] == c {
+            count += 1;
+            i += 1;
+        }
+        count
     }
 
     /// 根据索引获取工作表

@@ -593,7 +593,8 @@ fn collect_range_values(sheet: &SheetData, start_col: u32, start_row: u32, end_c
 }
 
 /// 求值 AST 节点
-fn eval_node(node: &FormulaNode, sheet: &SheetData) -> FormulaValue {
+/// eval_pos: 当前公式所在单元格位置 (row, col)，用于 ROW()、COLUMN() 等函数
+fn eval_node(node: &FormulaNode, sheet: &SheetData, eval_pos: (u32, u32)) -> FormulaValue {
     match node {
         FormulaNode::Number(n) => FormulaValue::Number(*n),
         FormulaNode::String(s) => FormulaValue::String(s.clone()),
@@ -605,14 +606,14 @@ fn eval_node(node: &FormulaNode, sheet: &SheetData) -> FormulaValue {
             let _ = (start_col, start_row, end_col, end_row);
             FormulaValue::Error("#VALUE!".to_string())
         }
-        FormulaNode::UnaryOp { op, operand } => eval_unary(op, operand, sheet),
-        FormulaNode::BinaryOp { op, left, right } => eval_binary(op, left, right, sheet),
-        FormulaNode::Function { name, args } => eval_function(name, args, sheet),
+        FormulaNode::UnaryOp { op, operand } => eval_unary(op, operand, sheet, eval_pos),
+        FormulaNode::BinaryOp { op, left, right } => eval_binary(op, left, right, sheet, eval_pos),
+        FormulaNode::Function { name, args } => eval_function(name, args, sheet, eval_pos),
     }
 }
 
-fn eval_unary(op: &UnOp, operand: &FormulaNode, sheet: &SheetData) -> FormulaValue {
-    let val = eval_node(operand, sheet);
+fn eval_unary(op: &UnOp, operand: &FormulaNode, sheet: &SheetData, eval_pos: (u32, u32)) -> FormulaValue {
+    let val = eval_node(operand, sheet, eval_pos);
     if val.is_error() { return val; }
     match op {
         UnOp::Negate => {
@@ -630,9 +631,9 @@ fn eval_unary(op: &UnOp, operand: &FormulaNode, sheet: &SheetData) -> FormulaVal
     }
 }
 
-fn eval_binary(op: &BinOp, left: &FormulaNode, right: &FormulaNode, sheet: &SheetData) -> FormulaValue {
-    let lv = eval_node(left, sheet);
-    let rv = eval_node(right, sheet);
+fn eval_binary(op: &BinOp, left: &FormulaNode, right: &FormulaNode, sheet: &SheetData, eval_pos: (u32, u32)) -> FormulaValue {
+    let lv = eval_node(left, sheet, eval_pos);
+    let rv = eval_node(right, sheet, eval_pos);
     if lv.is_error() { return lv; }
     if rv.is_error() { return rv; }
 
@@ -710,23 +711,23 @@ fn val_to_string(v: &FormulaValue) -> String {
 // ========== 函数实现 ==========
 
 /// 收集参数中的所有值（展开范围引用）
-fn collect_args_values(args: &[FormulaNode], sheet: &SheetData) -> Vec<FormulaValue> {
+fn collect_args_values(args: &[FormulaNode], sheet: &SheetData, eval_pos: (u32, u32)) -> Vec<FormulaValue> {
     let mut values = Vec::new();
     for arg in args {
         match arg {
             FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
                 values.extend(collect_range_values(sheet, *start_col, *start_row, *end_col, *end_row));
             }
-            _ => values.push(eval_node(arg, sheet)),
+            _ => values.push(eval_node(arg, sheet, eval_pos)),
         }
     }
     values
 }
 
-fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> FormulaValue {
+fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData, eval_pos: (u32, u32)) -> FormulaValue {
     match name {
         "SUM" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             let mut sum = 0.0;
             for v in &values {
                 if v.is_error() { return v.clone(); }
@@ -735,7 +736,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             FormulaValue::Number(sum)
         }
         "AVERAGE" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             let mut sum = 0.0;
             let mut count = 0u32;
             for v in &values {
@@ -746,7 +747,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             else { FormulaValue::Number(sum / count as f64) }
         }
         "COUNT" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             let mut count = 0u32;
             for v in &values {
                 if matches!(v, FormulaValue::Number(_)) { count += 1; }
@@ -754,7 +755,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             FormulaValue::Number(count as f64)
         }
         "MAX" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             let mut max: Option<f64> = None;
             for v in &values {
                 if v.is_error() { return v.clone(); }
@@ -765,7 +766,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             max.map_or(FormulaValue::Number(0.0), FormulaValue::Number)
         }
         "MIN" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             let mut min: Option<f64> = None;
             for v in &values {
                 if v.is_error() { return v.clone(); }
@@ -777,17 +778,17 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
         }
         "IF" => {
             if args.len() < 2 { return FormulaValue::Error("#VALUE!".to_string()); }
-            let cond = eval_node(&args[0], sheet);
+            let cond = eval_node(&args[0], sheet, eval_pos);
             let cond_bool = cond.as_bool().unwrap_or(false);
             if cond_bool {
-                eval_node(&args[1], sheet)
+                eval_node(&args[1], sheet, eval_pos)
             } else {
-                if args.len() >= 3 { eval_node(&args[2], sheet) }
+                if args.len() >= 3 { eval_node(&args[2], sheet, eval_pos) }
                 else { FormulaValue::Boolean(false) }
             }
         }
         "AND" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             for v in &values {
                 if v.is_error() { return v.clone(); }
                 if !v.as_bool().unwrap_or(false) { return FormulaValue::Boolean(false); }
@@ -795,7 +796,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             FormulaValue::Boolean(true)
         }
         "OR" => {
-            let values = collect_args_values(args, sheet);
+            let values = collect_args_values(args, sheet, eval_pos);
             for v in &values {
                 if v.is_error() { return v.clone(); }
                 if v.as_bool().unwrap_or(false) { return FormulaValue::Boolean(true); }
@@ -804,7 +805,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
         }
         "NOT" => {
             if args.len() != 1 { return FormulaValue::Error("#VALUE!".to_string()); }
-            let val = eval_node(&args[0], sheet);
+            let val = eval_node(&args[0], sheet, eval_pos);
             if val.is_error() { return val; }
             FormulaValue::Boolean(!val.as_bool().unwrap_or(false))
         }
@@ -817,7 +818,7 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
                             result.push_str(&val_to_string(&v));
                         }
                     }
-                    _ => result.push_str(&val_to_string(&eval_node(arg, sheet))),
+                    _ => result.push_str(&val_to_string(&eval_node(arg, sheet, eval_pos))),
                 }
             }
             FormulaValue::String(result)
@@ -829,9 +830,9 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             }
             let mut i = 0;
             while i < args.len() {
-                let cond = eval_node(&args[i], sheet);
+                let cond = eval_node(&args[i], sheet, eval_pos);
                 if cond.as_bool().unwrap_or(false) {
-                    return eval_node(&args[i + 1], sheet);
+                    return eval_node(&args[i + 1], sheet, eval_pos);
                 }
                 i += 2;
             }
@@ -840,11 +841,11 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
         "SUMIF" => {
             // SUMIF(range, criteria, [sum_range])
             if args.len() < 2 { return FormulaValue::Error("#VALUE!".to_string()); }
-            let criteria_val = eval_node(&args[1], sheet);
+            let criteria_val = eval_node(&args[1], sheet, eval_pos);
             let criteria_str = val_to_string(&criteria_val);
-            let check_values = extract_range_values_from_node(&args[0], sheet);
+            let check_values = extract_range_values_from_node(&args[0], sheet, eval_pos);
             let sum_values = if args.len() >= 3 {
-                extract_range_values_from_node(&args[2], sheet)
+                extract_range_values_from_node(&args[2], sheet, eval_pos)
             } else {
                 check_values.clone()
             };
@@ -858,6 +859,29 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             }
             FormulaValue::Number(sum)
         }
+        "TODAY" => {
+            // TODAY() 返回今天日期的 Excel 序列号
+            // Excel 序列号：1900-01-01 = 1，Unix epoch 1970-01-01 = 25569
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let days = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() / 86400;
+            FormulaValue::Number(days as f64 + 25569.0)
+        }
+        "ROW" => {
+            if args.is_empty() {
+                // ROW() - 返回当前公式所在单元格的行号
+                FormulaValue::Number(eval_pos.0 as f64)
+            } else {
+                // ROW(cell_ref) - 返回引用单元格的行号
+                match &args[0] {
+                    FormulaNode::CellRef { row, .. } => FormulaValue::Number(*row as f64),
+                    FormulaNode::RangeRef { start_row, .. } => FormulaValue::Number(*start_row as f64),
+                    _ => FormulaValue::Error("#VALUE!".to_string()),
+                }
+            }
+        }
         _ => FormulaValue::Error(format!("#NAME?")),
     }
 }
@@ -865,12 +889,12 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
 // ========== SUMIF 辅助函数 ==========
 
 /// 从 AST 节点提取范围值（支持 RangeRef 和普通表达式）
-fn extract_range_values_from_node(arg: &FormulaNode, sheet: &SheetData) -> Vec<FormulaValue> {
+fn extract_range_values_from_node(arg: &FormulaNode, sheet: &SheetData, eval_pos: (u32, u32)) -> Vec<FormulaValue> {
     match arg {
         FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
             collect_range_values(sheet, *start_col, *start_row, *end_col, *end_row)
         }
-        _ => vec![eval_node(arg, sheet)],
+        _ => vec![eval_node(arg, sheet, eval_pos)],
     }
 }
 
@@ -1021,11 +1045,11 @@ fn topo_eval(
         }
     }
 
-    // 按拓扑顺序求值
-    for pos in &eval_order {
-        if let Some(ast) = formula_cells.get(pos) {
-            let result = eval_node(ast, sheet);
-            if let Some(cell) = sheet.cells.get_mut(pos) {
+    // 按拓扑顺序求值（传入公式所在单元格位置，供 ROW() 等函数使用）
+    for &pos in &eval_order {
+        if let Some(ast) = formula_cells.get(&pos) {
+            let result = eval_node(ast, sheet, pos);
+            if let Some(cell) = sheet.cells.get_mut(&pos) {
                 cell.value = result.to_display();
             }
         }
@@ -1175,7 +1199,7 @@ mod tests {
     fn test_eval_arithmetic() {
         let sheet = make_sheet(vec![]);
         let ast = parse_formula("=1+2*3").unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "7");
     }
 
@@ -1183,7 +1207,7 @@ mod tests {
     fn test_eval_cell_ref() {
         let sheet = make_sheet(vec![((1, 1), "10"), ((1, 2), "20")]);
         let ast = parse_formula("=A1+B1").unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "30");
     }
 
@@ -1194,7 +1218,7 @@ mod tests {
             ((4, 1), "4"), ((5, 1), "5"),
         ]);
         let ast = parse_formula("=SUM(A1:A5)").unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "15");
     }
 
@@ -1202,7 +1226,7 @@ mod tests {
     fn test_eval_if() {
         let sheet = make_sheet(vec![((1, 1), "10")]);
         let ast = parse_formula(r#"=IF(A1>5,"big","small")"#).unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "big");
     }
 
@@ -1233,7 +1257,7 @@ mod tests {
     fn test_eval_div_zero() {
         let sheet = make_sheet(vec![]);
         let ast = parse_formula("=1/0").unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "#DIV/0!");
     }
 
@@ -1241,7 +1265,7 @@ mod tests {
     fn test_eval_concatenate() {
         let sheet = make_sheet(vec![((1, 1), "hello"), ((1, 2), "world")]);
         let ast = parse_formula("=CONCATENATE(A1,\" \",B1)").unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "hello world");
     }
 
@@ -1333,7 +1357,7 @@ mod tests {
     fn test_eval_ifs() {
         let sheet = make_sheet(vec![((1, 1), "100")]);
         let ast = parse_formula(r#"=IFS(A1<50,"small",A1<200,"medium",A1>=200,"large")"#).unwrap();
-        let result = eval_node(&ast, &sheet);
+        let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "medium");
     }
 
@@ -1354,5 +1378,32 @@ mod tests {
         sheet.cells.get_mut(&(20, 3)).unwrap().value = "80".to_string();
         evaluate_dependents(&mut sheet, 20, 3);
         assert_eq!(sheet.cells.get(&(13, 2)).unwrap().value, "140"); // 10+20+30+80
+    }
+
+    #[test]
+    fn test_eval_today() {
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula("=TODAY()").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        // TODAY() 应返回一个大于 45000 的数字（2023年之后的日期序列号）
+        match result {
+            FormulaValue::Number(n) => assert!(n > 45000.0, "TODAY serial should be > 45000, got {}", n),
+            other => panic!("Expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_row() {
+        let sheet = make_sheet(vec![]);
+
+        // ROW() 返回当前公式所在行号
+        let ast = parse_formula("=ROW()").unwrap();
+        let result = eval_node(&ast, &sheet, (5, 3)); // 第5行第3列
+        assert_eq!(result.to_display(), "5");
+
+        // ROW(A10) 返回引用的行号
+        let ast = parse_formula("=ROW(A10)").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "10");
     }
 }
