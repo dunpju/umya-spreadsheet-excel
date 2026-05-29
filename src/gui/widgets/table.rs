@@ -814,33 +814,21 @@ pub fn draw_table_content(
                         }
                         merged_row_height -= border_width;
 
-                        let is_selected = selected_cell.is_some() &&
-                            merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
-
                         painter.rect_filled(
                             egui::Rect::from_min_size(
                                 egui::Pos2::new(x, y),
                                 egui::vec2(merged_col_width, merged_row_height),
                             ),
                             0.0,
-                            if is_selected {
-                                egui::Color32::from_rgb(173, 216, 230)
-                            } else {
-                                bg_color
-                            },
+                            bg_color,
                         );
                     }
                 } else {
                     // 绘制普通单元格背景
-                    let is_selected = *selected_cell == Some((col, row));
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
                         0.0,
-                        if is_selected {
-                            egui::Color32::from_rgb(173, 216, 230)
-                        } else {
-                            bg_color
-                        },
+                        bg_color,
                     );
                 }
 
@@ -1082,13 +1070,10 @@ pub fn draw_table_content(
                     }
                     mh -= border_width;
 
-                    let is_selected = selected_cell.is_some() &&
-                        merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
-
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(mw, mh)),
                         0.0,
-                        if is_selected { egui::Color32::from_rgb(173, 216, 230) } else { bg_color },
+                        bg_color,
                     );
 
                     // 绘制合并单元格边框
@@ -1120,11 +1105,10 @@ pub fn draw_table_content(
                     }
                 }
             } else {
-                let is_selected = *selected_cell == Some((col, row));
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
                     0.0,
-                    if is_selected { egui::Color32::from_rgb(173, 216, 230) } else { bg_color },
+                    bg_color,
                 );
 
                 // 绘制单元格边框
@@ -1440,6 +1424,49 @@ pub fn draw_table_content(
             painter.line_segment(
                 [egui::Pos2::new(line_x, viewport_rect.min.y), egui::Pos2::new(line_x, viewport_rect.max.y)],
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 100)),
+            );
+        }
+
+        // ========== 选中单元格高亮边框（最后绘制，确保在所有单元格之上） ==========
+        if let Some((sel_col, sel_row)) = *selected_cell {
+            // 确定选中单元格的实际矩形（处理合并单元格）
+            let (start_col, start_row, end_col, end_row) = if let Some(merged_range) = sheet.get_merged_range(sel_col, sel_row) {
+                (merged_range.start_col, merged_range.start_row, merged_range.end_col, merged_range.end_row)
+            } else {
+                (sel_col, sel_row, sel_col, sel_row)
+            };
+
+            // 计算选中单元格位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
+            let sel_x = if start_col <= fc {
+                let mut fx = viewport_rect.min.x + header_width + border_width;
+                for c in 1..start_col { fx += get_col_width(c) + border_width; }
+                fx
+            } else {
+                let mut sx = tl_x + border_width;
+                for c in 0..start_col { sx += if c == 0 { header_width } else { get_col_width(c) } + border_width; }
+                sx
+            };
+            let sel_y = if start_row <= fr {
+                let mut fy = viewport_rect.min.y;
+                for r in 0..start_row { fy += get_row_height(r) + border_width; }
+                fy
+            } else {
+                tl_y + border_width + row_cumulative_height[start_row as usize]
+            };
+
+            // 计算选中区域宽高
+            let mut sel_w = 0.0f32;
+            for c in start_col..=end_col { sel_w += get_col_width(c) + border_width; }
+            sel_w -= border_width;
+            let mut sel_h = 0.0f32;
+            for r in start_row..=end_row { sel_h += get_row_height(r) + border_width; }
+            sel_h -= border_width;
+
+            // 绘制2px蓝色选中边框
+            painter.rect_stroke(
+                egui::Rect::from_min_size(egui::Pos2::new(sel_x, sel_y), egui::vec2(sel_w, sel_h)),
+                0.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 112, 192)),
             );
         }
 
