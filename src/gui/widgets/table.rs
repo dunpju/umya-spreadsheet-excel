@@ -1207,36 +1207,13 @@ pub fn draw_table_content(
             }
         };
 
-        // 左上角固定区域（行号列 + 冻结列标题 + 冻结数据行/列交叉区域）
-        let frozen_corner_rect = egui::Rect::from_min_max(
-            egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
-            egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.min.y + frozen_top_height),
-        );
-        painter.rect_filled(frozen_corner_rect, 0.0, egui::Color32::LIGHT_GRAY);
+        // ===== 绘制顺序说明 =====
+        // 关键：冻结顶部数据行的合并单元格（如 N1:O1）可能向左溢出到冻结左侧区域
+        // 因此必须先画顶部区域，再白色重填左侧区域覆盖溢出，最后画左侧区域内容
 
-        // 绘制左上角区域的行号（冻结行范围内的行号）
-        for row in 1..=fr {
-            // 计算在冻结区域内的 y 偏移
-            let mut fixed_y = viewport_rect.min.y;
-            for r in 0..row {
-                fixed_y += get_row_height(r) + border_width;
-            }
-            let row_height = get_row_height(row);
-            painter.rect_filled(
-                egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
-                0.0,
-                egui::Color32::LIGHT_GRAY,
-            );
-            painter.text(
-                egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),
-                egui::Align2::CENTER_CENTER,
-                row.to_string(),
-                egui::FontId::default(),
-                egui::Color32::BLACK,
-            );
-        }
+        // === 第1步：绘制顶部冻结区域（列标题行 + 冻结数据行）===
 
-        // 绘制左上角区域的列标题（冻结列范围内的列标题）
+        // 绘制冻结列范围内的列标题（row 0，cols 1..=fc）
         for col in 1..=fc {
             let mut fixed_x = viewport_rect.min.x + header_width + border_width;
             for c in 1..col {
@@ -1258,22 +1235,7 @@ pub fn draw_table_content(
             );
         }
 
-        // 绘制左上角冻结数据单元格（冻结行 ∩ 冻结列）
-        for row in 1..=fr {
-            let mut fixed_y = viewport_rect.min.y;
-            for r in 0..row {
-                fixed_y += get_row_height(r) + border_width;
-            }
-            for col in 1..=fc {
-                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                for c in 1..col {
-                    fixed_x += get_col_width(c) + border_width;
-                }
-                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
-            }
-        }
-
-        // 绘制固定列标题（顶部）- 列标题行（row 0），所有数据列
+        // 绘制非冻结列的列标题（row 0，cols > fc）- scroll-dependent x
         for col in (fc + 1).max(1)..=sheet.max_col {
             let col_x = tl_x + border_width + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
@@ -1297,21 +1259,109 @@ pub fn draw_table_content(
             }
         }
 
-        // 绘制冻结顶部数据行（rows 1..=fr，cols > fc）
+        // 绘制冻结顶部数据行（rows 1..=fr，所有数据列）
+        // 注意：合并单元格可能向左溢出到冻结左侧区域
         for row in 1..=fr {
             let mut fixed_y = viewport_rect.min.y;
             for r in 0..row {
                 fixed_y += get_row_height(r) + border_width;
             }
+            // 冻结列部分（cols 1..=fc）
+            for col in 1..=fc {
+                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                for c in 1..col {
+                    fixed_x += get_col_width(c) + border_width;
+                }
+                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+            }
+            // 非冻结列部分（cols > fc）- scroll-dependent x
             for col in (fc + 1)..=sheet.max_col {
                 let col_x = tl_x + border_width + col_cumulative_width[col as usize];
-                if col_x + get_col_width(col) <= viewport_rect.min.x + frozen_left_width { continue; }
                 if col_x >= viewport_rect.max.x { break; }
                 draw_frozen_cell(&painter, col, row, col_x, fixed_y);
             }
         }
 
-        // 绘制固定行标题（左侧）- 行号列（col 0），所有数据行
+        // === 第2步：白色重填左侧冻结区域，覆盖顶部数据行合并单元格的溢出 ===
+        if frozen_left_width > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+                    egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.max.y),
+                ),
+                0.0,
+                egui::Color32::WHITE,
+            );
+        }
+
+        // === 第3步：绘制左侧冻结区域内容 ===
+
+        // 左上角固定区域背景
+        let frozen_corner_rect = egui::Rect::from_min_max(
+            egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+            egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.min.y + frozen_top_height),
+        );
+        painter.rect_filled(frozen_corner_rect, 0.0, egui::Color32::LIGHT_GRAY);
+
+        // 左上角冻结列范围内的列标题（row 0，cols 1..=fc）
+        for col in 1..=fc {
+            let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+            for c in 1..col {
+                fixed_x += get_col_width(c) + border_width;
+            }
+            let col_width = get_col_width(col);
+            let col_height = get_row_height(0);
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                0.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            painter.text(
+                egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
+                egui::Align2::CENTER_CENTER,
+                col_to_letter(col),
+                egui::FontId::default(),
+                egui::Color32::BLACK,
+            );
+        }
+
+        // 左上角冻结行范围内的行号（rows 1..=fr）
+        for row in 1..=fr {
+            let mut fixed_y = viewport_rect.min.y;
+            for r in 0..row {
+                fixed_y += get_row_height(r) + border_width;
+            }
+            let row_height = get_row_height(row);
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
+                0.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            painter.text(
+                egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),
+                egui::Align2::CENTER_CENTER,
+                row.to_string(),
+                egui::FontId::default(),
+                egui::Color32::BLACK,
+            );
+        }
+
+        // 左上角冻结数据单元格（冻结行 ∩ 冻结列）
+        for row in 1..=fr {
+            let mut fixed_y = viewport_rect.min.y;
+            for r in 0..row {
+                fixed_y += get_row_height(r) + border_width;
+            }
+            for col in 1..=fc {
+                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                for c in 1..col {
+                    fixed_x += get_col_width(c) + border_width;
+                }
+                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+            }
+        }
+
+        // 非冻结行的行号（col 0，rows > fr）
         for row in (fr + 1).max(1)..=sheet.max_row {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             let row_width = header_width;
@@ -1335,7 +1385,7 @@ pub fn draw_table_content(
             }
         }
 
-        // 绘制冻结左侧数据列（rows > fr，cols 1..=fc）
+        // 冻结左侧数据列（rows > fr，cols 1..=fc）
         for row in (fr + 1)..=sheet.max_row {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
@@ -1351,7 +1401,6 @@ pub fn draw_table_content(
 
         // 绘制冻结窗格分隔线
         if frozen_top_height > 0.0 {
-            // 水平分隔线（冻结行下方）
             let line_y = viewport_rect.min.y + frozen_top_height;
             painter.line_segment(
                 [egui::Pos2::new(viewport_rect.min.x, line_y), egui::Pos2::new(viewport_rect.max.x, line_y)],
@@ -1359,7 +1408,6 @@ pub fn draw_table_content(
             );
         }
         if frozen_left_width > 0.0 {
-            // 垂直分隔线（冻结列右方）
             let line_x = viewport_rect.min.x + frozen_left_width;
             painter.line_segment(
                 [egui::Pos2::new(line_x, viewport_rect.min.y), egui::Pos2::new(line_x, viewport_rect.max.y)],
