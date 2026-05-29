@@ -149,6 +149,10 @@ pub struct SheetData {
     pub column_widths: HashMap<u32, f64>,
     /// 行高数据，键为行号，值为高度
     pub row_heights: HashMap<u32, f64>,
+    /// 冻结行数（Excel 冻结窗格中的水平分割值，0 表示无冻结）
+    pub frozen_rows: u32,
+    /// 冻结列数（Excel 冻结窗格中的垂直分割值，0 表示无冻结）
+    pub frozen_cols: u32,
 }
 
 impl SheetData {
@@ -165,6 +169,8 @@ impl SheetData {
             max_col: 0,
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            frozen_rows: 0,
+            frozen_cols: 0,
         }
     }
 
@@ -295,6 +301,21 @@ impl ExcelData {
                 // 只保存高度大于0的行
                 if *height > 0.0 {
                     sheet.row_heights.insert(row_num, *height);
+                }
+            }
+
+            // 解析冻结窗格信息
+            if let Some(sheet_view) = worksheet.get_sheets_views().get_sheet_view_list().first() {
+                if let Some(pane) = sheet_view.get_pane() {
+                    use umya_spreadsheet::PaneStateValues;
+                    let state = pane.get_state();
+                    if matches!(state, PaneStateValues::Frozen | PaneStateValues::FrozenSplit) {
+                        // umya-spreadsheet 命名与 OOXML 对照：
+                        // horizontal_split → XML xSplit → 冻结列数（水平位置）
+                        // vertical_split   → XML ySplit → 冻结行数（垂直位置）
+                        sheet.frozen_cols = *pane.get_horizontal_split() as u32;
+                        sheet.frozen_rows = *pane.get_vertical_split() as u32;
+                    }
                 }
             }
 

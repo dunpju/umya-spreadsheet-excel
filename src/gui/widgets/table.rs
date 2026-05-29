@@ -31,8 +31,8 @@ pub fn draw_table_content(
     just_entered_edit_mode: &mut bool,
 ) -> Option<egui::Rect> {
     // 先获取必要的数据用于键盘处理
-    let (max_col, max_row) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
-        (sheet.max_col, sheet.max_row)
+    let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+        (sheet.max_col, sheet.max_row, sheet.frozen_rows, sheet.frozen_cols)
     } else {
         return None;
     };
@@ -111,9 +111,26 @@ pub fn draw_table_content(
         (x, y, width, height)
     };
     
+    // 计算冻结区域的总尺寸（行标题列 + 冻结数据列，列标题行 + 冻结数据行）
+    // 用于 is_cell_in_viewport 和滚动补偿计算
+    let frozen_left_width: f32 = {
+        let mut w = header_width + border_width; // col 0 (行号列)
+        for c in 1..=frozen_cols {
+            w += get_col_width(c) + border_width;
+        }
+        w
+    };
+    let frozen_top_height: f32 = {
+        let mut h = 0.0f32;
+        for r in 0..=frozen_rows {
+            h += get_row_height(r) + border_width;
+        }
+        h
+    };
+
     // 检查单元格是否在可视区域内（使用全局坐标）
-    // 有效可见区域 = clip_rect 减去冻结窗格的行标题（左）和列标题（上）
-    // 检查逻辑：单元格左/上边缘必须在标题之后，右/下边缘在视口之内
+    // 有效可见区域 = clip_rect 减去冻结窗格区域（左侧冻结列 + 顶部冻结行）
+    // 检查逻辑：单元格左/上边缘必须在冻结区域之后，右/下边缘在视口之内
     let is_cell_in_viewport = |col: u32, row: u32| -> bool {
         let (x, y, width, height) = get_cell_rect(col, row);
         let cell_rect = egui::Rect::from_min_size(
@@ -122,9 +139,9 @@ pub fn draw_table_content(
         );
         let clip_rect = ui.clip_rect();
 
-        // 有效数据区域：左边界 = 行标题右边缘，上边界 = 列标题下边缘
-        let effective_min_x = clip_rect.min.x + header_width + border_width;
-        let effective_min_y = clip_rect.min.y + get_row_height(0) + border_width;
+        // 有效数据区域：左边界 = 冻结左侧区域右边缘，上边界 = 冻结顶部区域下边缘
+        let effective_min_x = clip_rect.min.x + frozen_left_width;
+        let effective_min_y = clip_rect.min.y + frozen_top_height;
 
         // 单元格四条边都必须在有效区域内
         cell_rect.min.x >= effective_min_x
@@ -258,16 +275,14 @@ pub fn draw_table_content(
 
                     // Excel行为：滚动最小距离使新单元格可见（滚动1行/列）
                     // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
-                    let col_header_height = get_row_height(0) + border_width;
-                    let row_header_width = header_width + border_width;
-                    let effective_min_x = clip_rect.min.x + row_header_width;
-                    let effective_min_y = clip_rect.min.y + col_header_height;
+                    let effective_min_x = clip_rect.min.x + frozen_left_width;
+                    let effective_min_y = clip_rect.min.y + frozen_top_height;
                     let mut scroll_rect = target_rect;
                     if target_rect.min.x < effective_min_x {
-                        scroll_rect.min.x = target_rect.min.x - row_header_width;
+                        scroll_rect.min.x = target_rect.min.x - frozen_left_width;
                     }
                     if target_rect.min.y < effective_min_y {
-                        scroll_rect.min.y = target_rect.min.y - col_header_height;
+                        scroll_rect.min.y = target_rect.min.y - frozen_top_height;
                     }
                     ui.scroll_to_rect(scroll_rect, None);
                     ui.ctx().request_repaint();
@@ -386,16 +401,14 @@ pub fn draw_table_content(
 
                         // Excel行为：滚动最小距离使新单元格可见（即滚动1行/列）
                         // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
-                        let col_header_height = get_row_height(0) + border_width;
-                        let row_header_width = header_width + border_width;
-                        let effective_min_x = clip_rect.min.x + row_header_width;
-                        let effective_min_y = clip_rect.min.y + col_header_height;
+                        let effective_min_x = clip_rect.min.x + frozen_left_width;
+                        let effective_min_y = clip_rect.min.y + frozen_top_height;
                         let mut scroll_rect = target_rect;
                         if target_rect.min.x < effective_min_x {
-                            scroll_rect.min.x = target_rect.min.x - row_header_width;
+                            scroll_rect.min.x = target_rect.min.x - frozen_left_width;
                         }
                         if target_rect.min.y < effective_min_y {
-                            scroll_rect.min.y = target_rect.min.y - col_header_height;
+                            scroll_rect.min.y = target_rect.min.y - frozen_top_height;
                         }
                         ui.scroll_to_rect(scroll_rect, None);
 
@@ -499,7 +512,23 @@ pub fn draw_table_content(
                 default_row_height
             }
         };
-        
+
+        // 计算冻结区域总尺寸（用于冻结窗格覆盖层渲染）
+        let frozen_left_width: f32 = {
+            let mut w = header_width + border_width; // col 0 (行号列)
+            for c in 1..=sheet.frozen_cols {
+                w += get_col_width(c) + border_width;
+            }
+            w
+        };
+        let frozen_top_height: f32 = {
+            let mut h = 0.0f32;
+            for r in 0..=sheet.frozen_rows {
+                h += get_row_height(r) + border_width;
+            }
+            h
+        };
+
         // 重新计算 total_width 和 total_height（因为之前的变量可能不在作用域）
         let mut total_width = header_width;
         for col in 1..=sheet.max_col {
@@ -1009,38 +1038,209 @@ pub fn draw_table_content(
             }
         }
         
-        // ========== 冻结窗格：固定列标题和行标题 ==========
-        // 将冻结窗格绘制移到不可变借用作用域结束前
+        // ========== 冻结窗格：固定列标题、行标题和冻结数据区域 ==========
         let viewport_rect = ui.clip_rect();
-        
-        // 使用与主渲染相同的尺寸计算方式，确保冻结窗格与主表格对齐
-        // 左上角固定区域（行号列和列标题的交叉区域）
+        let fr = sheet.frozen_rows; // 冻结数据行数
+        let fc = sheet.frozen_cols; // 冻结数据列数
+
+        // 辅助函数：在指定位置绘制数据单元格（背景+内容）
+        let draw_frozen_cell = |painter: &egui::Painter, col: u32, row: u32, x: f32, y: f32| {
+            let cell_width = get_col_width(col);
+            let cell_height = get_row_height(row);
+
+            // 检查合并单元格
+            let mut is_merged_top_left = false;
+            let mut is_merged_part = false;
+            if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                if merged_range.is_top_left(col, row) {
+                    is_merged_top_left = true;
+                } else {
+                    is_merged_part = true;
+                }
+            }
+
+            if is_merged_part {
+                return;
+            }
+
+            // 获取背景色
+            let bg_color = if let Some(cell) = sheet.get_cell(row, col) {
+                if let Some((r, g, b)) = cell.background_color {
+                    egui::Color32::from_rgb(r, g, b)
+                } else {
+                    egui::Color32::WHITE
+                }
+            } else {
+                egui::Color32::WHITE
+            };
+
+            // 绘制背景
+            if is_merged_top_left {
+                if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                    let mut mw = 0.0;
+                    for c in merged_range.start_col..=merged_range.end_col {
+                        mw += get_col_width(c) + border_width;
+                    }
+                    mw -= border_width;
+                    let mut mh = 0.0;
+                    for r in merged_range.start_row..=merged_range.end_row {
+                        mh += get_row_height(r) + border_width;
+                    }
+                    mh -= border_width;
+
+                    let is_selected = selected_cell.is_some() &&
+                        merged_range.contains(selected_cell.unwrap().0, selected_cell.unwrap().1);
+
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(mw, mh)),
+                        0.0,
+                        if is_selected { egui::Color32::from_rgb(173, 216, 230) } else { bg_color },
+                    );
+
+                    // 绘制合并单元格边框
+                    painter.rect_stroke(
+                        egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(mw, mh)),
+                        0.0,
+                        egui::Stroke::new(border_width, egui::Color32::GRAY),
+                    );
+
+                    // 绘制内容
+                    if let Some(cell) = sheet.get_cell(row, col) {
+                        if !cell.value.is_empty() {
+                            let egui_align = alignment_to_egui(&cell.alignment);
+                            let font_id = cell.font_size.map(|s| egui::FontId::proportional(s as f32)).unwrap_or(egui::FontId::default());
+                            let font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
+                            let text_pos = match egui_align {
+                                egui::Align2::LEFT_TOP       => egui::Pos2::new(x + 4.0, y + 4.0),
+                                egui::Align2::LEFT_CENTER    => egui::Pos2::new(x + 4.0, y + mh / 2.0),
+                                egui::Align2::LEFT_BOTTOM    => egui::Pos2::new(x + 4.0, y + mh - 4.0),
+                                egui::Align2::CENTER_TOP     => egui::Pos2::new(x + mw / 2.0, y + 4.0),
+                                egui::Align2::CENTER_CENTER  => egui::Pos2::new(x + mw / 2.0, y + mh / 2.0),
+                                egui::Align2::CENTER_BOTTOM  => egui::Pos2::new(x + mw / 2.0, y + mh - 4.0),
+                                egui::Align2::RIGHT_TOP      => egui::Pos2::new(x + mw - 4.0, y + 4.0),
+                                egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + mw - 4.0, y + mh / 2.0),
+                                egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + mw - 4.0, y + mh - 4.0),
+                            };
+                            painter.text(text_pos, egui_align, &cell.value, font_id, font_color);
+                        }
+                    }
+                }
+            } else {
+                let is_selected = *selected_cell == Some((col, row));
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
+                    0.0,
+                    if is_selected { egui::Color32::from_rgb(173, 216, 230) } else { bg_color },
+                );
+
+                // 绘制单元格边框
+                painter.rect_stroke(
+                    egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
+                    0.0,
+                    egui::Stroke::new(border_width, egui::Color32::GRAY),
+                );
+
+                // 绘制内容
+                if let Some(cell) = sheet.get_cell(row, col) {
+                    if !cell.value.is_empty() {
+                        let egui_align = alignment_to_egui(&cell.alignment);
+                        let font_id = cell.font_size.map(|s| egui::FontId::proportional(s as f32)).unwrap_or(egui::FontId::default());
+                        let font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
+                        let text_pos = match egui_align {
+                            egui::Align2::LEFT_TOP       => egui::Pos2::new(x + 4.0, y + 4.0),
+                            egui::Align2::LEFT_CENTER    => egui::Pos2::new(x + 4.0, y + cell_height / 2.0),
+                            egui::Align2::LEFT_BOTTOM    => egui::Pos2::new(x + 4.0, y + cell_height - 4.0),
+                            egui::Align2::CENTER_TOP     => egui::Pos2::new(x + cell_width / 2.0, y + 4.0),
+                            egui::Align2::CENTER_CENTER  => egui::Pos2::new(x + cell_width / 2.0, y + cell_height / 2.0),
+                            egui::Align2::CENTER_BOTTOM  => egui::Pos2::new(x + cell_width / 2.0, y + cell_height - 4.0),
+                            egui::Align2::RIGHT_TOP      => egui::Pos2::new(x + cell_width - 4.0, y + 4.0),
+                            egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height / 2.0),
+                            egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height - 4.0),
+                        };
+                        painter.text(text_pos, egui_align, &cell.value, font_id, font_color);
+                    }
+                }
+            }
+        };
+
+        // 左上角固定区域（行号列 + 冻结列标题 + 冻结数据行/列交叉区域）
         let frozen_corner_rect = egui::Rect::from_min_max(
             egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
-            egui::Pos2::new(viewport_rect.min.x + header_width + border_width, viewport_rect.min.y + get_row_height(0) + border_width),
+            egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.min.y + frozen_top_height),
         );
-        
-        // 绘制左上角固定区域背景（不绘制边框，避免与主表格边框叠加产生阴影）
-        painter.rect_filled(
-            frozen_corner_rect,
-            0.0,
-            egui::Color32::LIGHT_GRAY,
-        );
-        
-        // 绘制固定列标题（顶部）- 使用与主渲染相同的累积宽度计算
-        for col in 1..=sheet.max_col {
-            // 使用累积宽度数组获取列的X位置（与主渲染一致）
+        painter.rect_filled(frozen_corner_rect, 0.0, egui::Color32::LIGHT_GRAY);
+
+        // 绘制左上角区域的行号（冻结行范围内的行号）
+        for row in 1..=fr {
+            // 计算在冻结区域内的 y 偏移
+            let mut fixed_y = viewport_rect.min.y;
+            for r in 0..row {
+                fixed_y += get_row_height(r) + border_width;
+            }
+            let row_height = get_row_height(row);
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
+                0.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            painter.text(
+                egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),
+                egui::Align2::CENTER_CENTER,
+                row.to_string(),
+                egui::FontId::default(),
+                egui::Color32::BLACK,
+            );
+        }
+
+        // 绘制左上角区域的列标题（冻结列范围内的列标题）
+        for col in 1..=fc {
+            let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+            for c in 1..col {
+                fixed_x += get_col_width(c) + border_width;
+            }
+            let col_width = get_col_width(col);
+            let col_height = get_row_height(0);
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                0.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            painter.text(
+                egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
+                egui::Align2::CENTER_CENTER,
+                col_to_letter(col),
+                egui::FontId::default(),
+                egui::Color32::BLACK,
+            );
+        }
+
+        // 绘制左上角冻结数据单元格（冻结行 ∩ 冻结列）
+        for row in 1..=fr {
+            let mut fixed_y = viewport_rect.min.y;
+            for r in 0..row {
+                fixed_y += get_row_height(r) + border_width;
+            }
+            for col in 1..=fc {
+                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                for c in 1..col {
+                    fixed_x += get_col_width(c) + border_width;
+                }
+                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+            }
+        }
+
+        // 绘制固定列标题（顶部）- 列标题行（row 0），所有数据列
+        for col in (fc + 1).max(1)..=sheet.max_col {
             let col_x = tl_x + border_width + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
-            
+
             let col_rect = egui::Rect::from_min_size(
                 egui::Pos2::new(col_x, viewport_rect.min.y),
                 egui::vec2(col_width, col_height),
             );
-            
-            if col_rect.max.x > viewport_rect.min.x && col_rect.min.x < viewport_rect.max.x {
-                // 只绘制背景和文字，不绘制边框（边框由主表格绘制）
+
+            if col_rect.max.x > viewport_rect.min.x + frozen_left_width && col_rect.min.x < viewport_rect.max.x {
                 painter.rect_filled(col_rect, 0.0, egui::Color32::LIGHT_GRAY);
                 painter.text(
                     egui::Pos2::new(col_rect.center().x, col_rect.center().y),
@@ -1051,21 +1251,33 @@ pub fn draw_table_content(
                 );
             }
         }
-        
-        // 绘制固定行标题（左侧）- 使用与主渲染相同的累积高度计算
-        for row in 1..=sheet.max_row {
-            // 使用累积高度数组获取行的Y位置（与主渲染一致）
+
+        // 绘制冻结顶部数据行（rows 1..=fr，cols > fc）
+        for row in 1..=fr {
+            let mut fixed_y = viewport_rect.min.y;
+            for r in 0..row {
+                fixed_y += get_row_height(r) + border_width;
+            }
+            for col in (fc + 1)..=sheet.max_col {
+                let col_x = tl_x + border_width + col_cumulative_width[col as usize];
+                if col_x + get_col_width(col) <= viewport_rect.min.x + frozen_left_width { continue; }
+                if col_x >= viewport_rect.max.x { break; }
+                draw_frozen_cell(&painter, col, row, col_x, fixed_y);
+            }
+        }
+
+        // 绘制固定行标题（左侧）- 行号列（col 0），所有数据行
+        for row in (fr + 1).max(1)..=sheet.max_row {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             let row_width = header_width;
             let row_height = get_row_height(row);
-            
+
             let row_rect = egui::Rect::from_min_size(
                 egui::Pos2::new(viewport_rect.min.x, row_y),
                 egui::vec2(row_width, row_height),
             );
-            
-            if row_rect.max.y > viewport_rect.min.y && row_rect.min.y < viewport_rect.max.y {
-                // 只绘制背景和文字，不绘制边框（边框由主表格绘制）
+
+            if row_rect.max.y > viewport_rect.min.y + frozen_top_height && row_rect.min.y < viewport_rect.max.y {
                 painter.rect_filled(row_rect, 0.0, egui::Color32::LIGHT_GRAY);
                 painter.text(
                     egui::Pos2::new(row_rect.center().x, row_rect.center().y),
@@ -1075,6 +1287,38 @@ pub fn draw_table_content(
                     egui::Color32::BLACK,
                 );
             }
+        }
+
+        // 绘制冻结左侧数据列（rows > fr，cols 1..=fc）
+        for row in (fr + 1)..=sheet.max_row {
+            let row_y = tl_y + border_width + row_cumulative_height[row as usize];
+            if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
+            if row_y >= viewport_rect.max.y { break; }
+            for col in 1..=fc {
+                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
+                for c in 1..col {
+                    fixed_x += get_col_width(c) + border_width;
+                }
+                draw_frozen_cell(&painter, col, row, fixed_x, row_y);
+            }
+        }
+
+        // 绘制冻结窗格分隔线
+        if frozen_top_height > 0.0 {
+            // 水平分隔线（冻结行下方）
+            let line_y = viewport_rect.min.y + frozen_top_height;
+            painter.line_segment(
+                [egui::Pos2::new(viewport_rect.min.x, line_y), egui::Pos2::new(viewport_rect.max.x, line_y)],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 100)),
+            );
+        }
+        if frozen_left_width > 0.0 {
+            // 垂直分隔线（冻结列右方）
+            let line_x = viewport_rect.min.x + frozen_left_width;
+            painter.line_segment(
+                [egui::Pos2::new(line_x, viewport_rect.min.y), egui::Pos2::new(line_x, viewport_rect.max.y)],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 100)),
+            );
         }
     }
     
