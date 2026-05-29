@@ -479,10 +479,23 @@ pub fn draw_table_content(
     // 执行状态更新（在借用之前完成）
     if save_current_edit {
         if let Some((edit_col, edit_row)) = editing_cell_for_save {
+            let is_formula = edit_value.starts_with('=');
             if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
                 let cell = sheet.cells.entry((edit_row, edit_col))
                     .or_insert_with(CellData::default);
-                cell.value = edit_value.clone();
+                if is_formula {
+                    cell.formula = edit_value.clone();
+                } else {
+                    cell.value = edit_value.clone();
+                    cell.formula.clear();
+                }
+            }
+            if is_formula {
+                // 公式变更需要全量求值
+                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+            } else {
+                // 值变更只需增量求值受影响的公式
+                crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
             }
         }
     }
@@ -1576,6 +1589,25 @@ pub fn draw_table_content(
                 );
 
                 // 在闭包外部处理状态更新
+                if save_cell {
+                    // 保存编辑值并触发公式重算
+                    let is_formula = edit_value.starts_with('=');
+                    if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                        let cell = sheet.cells.entry((edit_row, edit_col))
+                            .or_insert_with(CellData::default);
+                        if is_formula {
+                            cell.formula = edit_value.clone();
+                        } else {
+                            cell.value = edit_value.clone();
+                            cell.formula.clear();
+                        }
+                    }
+                    if is_formula {
+                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+                    } else {
+                        crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
+                    }
+                }
                 if clear_edit {
                     *editing_cell = None;
                     edit_value.clear();
@@ -1585,14 +1617,33 @@ pub fn draw_table_content(
         }
     }
     
-    // 编辑模式处理使用独立的可变借用（在不可变借用作用域外）
-    // 如果正在编辑且编辑值已更改，保存到单元格
+    // 编辑模式处理：实时更新单元格值并触发公式重算
+    // 仅在编辑值实际发生变化时触发（避免每帧重复重算）
     if editing_cell.is_some() && !edit_value.is_empty() {
         if let Some((edit_col, edit_row)) = *editing_cell {
-            if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
-                let cell = sheet.cells.entry((edit_row, edit_col))
-                    .or_insert_with(CellData::default);
-                cell.value = edit_value.clone();
+            // 记录编辑前的值，用于判断是否需要重算
+            let prev_value = excel_data.sheets.get(current_sheet)
+                .and_then(|s| s.cells.get(&(edit_row, edit_col)))
+                .map(|c| if edit_value.starts_with('=') { c.formula.clone() } else { c.value.clone() })
+                .unwrap_or_default();
+
+            if edit_value != &prev_value {
+                let is_formula = edit_value.starts_with('=');
+                if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                    let cell = sheet.cells.entry((edit_row, edit_col))
+                        .or_insert_with(CellData::default);
+                    if is_formula {
+                        cell.formula = edit_value.clone();
+                    } else {
+                        cell.value = edit_value.clone();
+                    }
+                }
+                // 编辑中实时重算依赖公式
+                if is_formula {
+                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+                } else {
+                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
+                }
             }
         }
     }

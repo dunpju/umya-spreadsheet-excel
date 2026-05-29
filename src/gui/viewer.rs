@@ -243,7 +243,16 @@ impl eframe::App for ExcelViewer {
                         let cell = excel_data.sheets[self.current_sheet]
                             .cells.entry((row, col))
                             .or_insert_with(|| crate::excel::reader::CellData::default());
-                        cell.value = formula_value;
+                        if formula_value.starts_with('=') {
+                            cell.formula = formula_value;
+                            // 公式变更需要全量求值（依赖图结构变化）
+                            crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                        } else {
+                            cell.value = formula_value;
+                            cell.formula.clear();
+                            // 值变更只需增量求值受影响的公式
+                            crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
+                        }
                     }
                 }
             } else {

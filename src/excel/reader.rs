@@ -51,7 +51,6 @@ pub struct CellData {
     /// 单元格的显示值
     pub value: String,
     /// 单元格的公式（如存在）
-    #[allow(dead_code)]
     pub formula: String,
     /// 单元格对齐方式
     pub alignment: CellAlignment,
@@ -329,6 +328,11 @@ impl ExcelData {
         // 检查是否有工作表
         if sheets.is_empty() {
             return Err("Excel文件中没有找到工作表".to_string());
+        }
+
+        // 文件加载后立即求值所有公式
+        for sheet in &mut sheets {
+            crate::excel::formula::evaluate_sheet(sheet);
         }
 
         Ok(Self { sheets })

@@ -1,0 +1,1183 @@
+//! Excel 公式求值器
+//!
+//! 负责解析和计算 Excel 公式，支持基本运算符、单元格引用、范围引用和常用函数。
+//! 使用递归下降解析器将公式字符串解析为 AST，然后通过拓扑排序处理依赖关系并求值。
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use crate::excel::reader::SheetData;
+
+// ========== AST 类型定义 ==========
+
+/// 公式 AST 节点
+#[derive(Debug, Clone)]
+pub enum FormulaNode {
+    /// 数字字面量
+    Number(f64),
+    /// 字符串字面量
+    String(String),
+    /// 布尔值
+    Boolean(bool),
+    /// 单元格引用 (col, row)，均为 1-based
+    CellRef { col: u32, row: u32 },
+    /// 范围引用
+    RangeRef { start_col: u32, start_row: u32, end_col: u32, end_row: u32 },
+    /// 二元运算
+    BinaryOp { op: BinOp, left: Box<FormulaNode>, right: Box<FormulaNode> },
+    /// 一元运算
+    UnaryOp { op: UnOp, operand: Box<FormulaNode> },
+    /// 函数调用
+    Function { name: String, args: Vec<FormulaNode> },
+}
+
+/// 二元运算符
+#[derive(Debug, Clone, Copy)]
+pub enum BinOp {
+    Add, Sub, Mul, Div, Pow,
+    Concat,        // &
+    Eq, Neq, Lt, Le, Gt, Ge,
+}
+
+/// 一元运算符
+#[derive(Debug, Clone, Copy)]
+pub enum UnOp {
+    Negate,   // -
+    Percent,  // %
+}
+
+/// 公式求值结果
+#[derive(Debug, Clone)]
+pub enum FormulaValue {
+    Number(f64),
+    String(String),
+    Boolean(bool),
+    Error(String),
+    Blank,
+}
+
+impl FormulaValue {
+    /// 转换为显示字符串
+    pub fn to_display(&self) -> String {
+        match self {
+            FormulaValue::Number(n) => format_number(*n),
+            FormulaValue::String(s) => s.clone(),
+            FormulaValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+            FormulaValue::Error(e) => e.clone(),
+            FormulaValue::Blank => String::new(),
+        }
+    }
+
+    /// 尝试转换为 f64
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            FormulaValue::Number(n) => Some(*n),
+            FormulaValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+            FormulaValue::Blank => None,
+            FormulaValue::String(s) => s.parse::<f64>().ok(),
+            FormulaValue::Error(_) => None,
+        }
+    }
+
+    /// 尝试转换为布尔值
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            FormulaValue::Boolean(b) => Some(*b),
+            FormulaValue::Number(n) => Some(*n != 0.0),
+            FormulaValue::String(s) => {
+                let upper = s.to_uppercase();
+                match upper.as_str() {
+                    "TRUE" => Some(true),
+                    "FALSE" => Some(false),
+                    _ => None,
+                }
+            }
+            FormulaValue::Blank => Some(false),
+            FormulaValue::Error(_) => None,
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, FormulaValue::Error(_))
+    }
+}
+
+/// 格式化数字：去除不必要的尾零
+fn format_number(n: f64) -> String {
+    if n.is_nan() { return "#VALUE!".to_string(); }
+    if n.is_infinite() { return "#DIV/0!".to_string(); }
+    if n == n.trunc() && n.abs() < i64::MAX as f64 {
+        format!("{}", n as i64)
+    } else {
+        // 最多保留10位小数，去除尾零
+        let s = format!("{:.10}", n);
+        let s = s.trim_end_matches('0');
+        s.trim_end_matches('.').to_string()
+    }
+}
+
+// ========== 词法分析器 ==========
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Number(f64),
+    StringLit(String),
+    Ident(String),     // 函数名或关键字 (SUM, IF, TRUE, FALSE)
+    CellRef(String),   // A1, $A$1 等
+    Plus, Minus, Star, Slash, Caret, Ampersand, Percent,
+    Eq, Lt, Gt, Le, Ge, Neq,
+    LParen, RParen, Comma, Colon,
+}
+
+struct Lexer {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl Lexer {
+    fn new(input: &str) -> Self {
+        Lexer { chars: input.chars().collect(), pos: 0 }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let ch = self.chars.get(self.pos).copied();
+        if ch.is_some() { self.pos += 1; }
+        ch
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.peek().map_or(false, |c| c.is_whitespace()) {
+            self.advance();
+        }
+    }
+
+    fn tokenize(&mut self) -> Result<Vec<Token>, String> {
+        let mut tokens = Vec::new();
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                None => break,
+                Some(ch) => {
+                    let tok = match ch {
+                        '+' => { self.advance(); Token::Plus }
+                        '-' => { self.advance(); Token::Minus }
+                        '*' => { self.advance(); Token::Star }
+                        '/' => { self.advance(); Token::Slash }
+                        '^' => { self.advance(); Token::Caret }
+                        '&' => { self.advance(); Token::Ampersand }
+                        '%' => { self.advance(); Token::Percent }
+                        '(' => { self.advance(); Token::LParen }
+                        ')' => { self.advance(); Token::RParen }
+                        ',' => { self.advance(); Token::Comma }
+                        ':' => { self.advance(); Token::Colon }
+                        '=' => { self.advance(); Token::Eq }
+                        '<' => {
+                            self.advance();
+                            if self.peek() == Some('>') { self.advance(); Token::Neq }
+                            else if self.peek() == Some('=') { self.advance(); Token::Le }
+                            else { Token::Lt }
+                        }
+                        '>' => {
+                            self.advance();
+                            if self.peek() == Some('=') { self.advance(); Token::Ge }
+                            else { Token::Gt }
+                        }
+                        '"' => self.lex_string()?,
+                        '$' | 'A'..='Z' => self.lex_ident_or_cellref()?,
+                        '0'..='9' | '.' => self.lex_number()?,
+                        _ => return Err(format!("无法识别的字符: '{}'", ch)),
+                    };
+                    tokens.push(tok);
+                }
+            }
+        }
+        Ok(tokens)
+    }
+
+    fn lex_string(&mut self) -> Result<Token, String> {
+        self.advance(); // skip opening "
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                None => return Err("字符串未闭合".to_string()),
+                Some('"') => break,
+                Some(ch) => s.push(ch),
+            }
+        }
+        Ok(Token::StringLit(s))
+    }
+
+    fn lex_number(&mut self) -> Result<Token, String> {
+        let mut s = String::new();
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() || ch == '.' {
+                s.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let n: f64 = s.parse().map_err(|_| format!("无效数字: {}", s))?;
+        Ok(Token::Number(n))
+    }
+
+    /// 解析标识符或单元格引用
+    /// 以 $ 或字母开头，可能是：$A$1, A1, SUM, TRUE, FALSE 等
+    fn lex_ident_or_cellref(&mut self) -> Result<Token, String> {
+        let mut s = String::new();
+        let mut _has_dollar = false;
+        let mut alpha_part = String::new();
+        let mut digit_part = String::new();
+        let mut phase = 0; // 0=前导$, 1=字母, 2=中间$, 3=数字
+
+        // 收集整个 token
+        while let Some(ch) = self.peek() {
+            match ch {
+                '$' => {
+                    _has_dollar = true;
+                    s.push(ch);
+                    self.advance();
+                    phase = if phase < 2 { 2 } else { break };
+                }
+                'A'..='Z' | 'a'..='z' => {
+                    let upper = ch.to_ascii_uppercase();
+                    s.push(ch);
+                    if phase < 2 { alpha_part.push(upper); }
+                    else { break; } // $A$1 之后的字母不属于此 token
+                    self.advance();
+                    phase = 1;
+                }
+                '0'..='9' => {
+                    s.push(ch);
+                    digit_part.push(ch);
+                    self.advance();
+                    phase = 3;
+                }
+                '_' => {
+                    s.push(ch);
+                    self.advance();
+                    phase = 1;
+                }
+                _ => break,
+            }
+        }
+
+        // 判断是单元格引用还是标识符
+        if !alpha_part.is_empty() && !digit_part.is_empty() {
+            // 看起来像 A1, $A1, A$1, $A$1
+            // 验证列字母部分是否是有效的列引用
+            if alpha_part.len() <= 3 && alpha_part.chars().all(|c| c.is_ascii_uppercase()) {
+                return Ok(Token::CellRef(s.to_uppercase()));
+            }
+        }
+
+        // 是标识符（函数名、TRUE、FALSE 等）
+        let upper = s.to_uppercase();
+        Ok(Token::Ident(upper))
+    }
+}
+
+// ========== 递归下降解析器 ==========
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Parser { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<Token> {
+        let tok = self.tokens.get(self.pos).cloned();
+        if tok.is_some() { self.pos += 1; }
+        tok
+    }
+
+    fn expect(&mut self, expected: &Token) -> Result<(), String> {
+        match self.advance() {
+            Some(ref tok) if tok == expected => Ok(()),
+            other => Err(format!("期望 {:?}, 得到 {:?}", expected, other)),
+        }
+    }
+
+    fn parse(&mut self) -> Result<FormulaNode, String> {
+        let node = self.parse_comparison()?;
+        if self.peek().is_some() {
+            return Err(format!("意外的 token: {:?}", self.peek()));
+        }
+        Ok(node)
+    }
+
+    // comparison = addition (('='|'<>'|'<'|'<='|'>'|'>=') addition)*
+    fn parse_comparison(&mut self) -> Result<FormulaNode, String> {
+        let mut left = self.parse_addition()?;
+        loop {
+            let op = match self.peek() {
+                Some(Token::Eq) => BinOp::Eq,
+                Some(Token::Neq) => BinOp::Neq,
+                Some(Token::Lt) => BinOp::Lt,
+                Some(Token::Le) => BinOp::Le,
+                Some(Token::Gt) => BinOp::Gt,
+                Some(Token::Ge) => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_addition()?;
+            left = FormulaNode::BinaryOp { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    // addition = multiplication (('+'|'-') multiplication)*
+    fn parse_addition(&mut self) -> Result<FormulaNode, String> {
+        let mut left = self.parse_multiplication()?;
+        loop {
+            let op = match self.peek() {
+                Some(Token::Plus) => BinOp::Add,
+                Some(Token::Minus) => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplication()?;
+            left = FormulaNode::BinaryOp { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    // multiplication = power (('*'|'/') power)*
+    fn parse_multiplication(&mut self) -> Result<FormulaNode, String> {
+        let mut left = self.parse_power()?;
+        loop {
+            let op = match self.peek() {
+                Some(Token::Star) => BinOp::Mul,
+                Some(Token::Slash) => BinOp::Div,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_power()?;
+            left = FormulaNode::BinaryOp { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    // power = concat ('^' concat)*
+    fn parse_power(&mut self) -> Result<FormulaNode, String> {
+        let mut left = self.parse_concat()?;
+        loop {
+            if matches!(self.peek(), Some(Token::Caret)) {
+                self.advance();
+                let right = self.parse_concat()?;
+                left = FormulaNode::BinaryOp { op: BinOp::Pow, left: Box::new(left), right: Box::new(right) };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    // concat = unary ('&' unary)*
+    fn parse_concat(&mut self) -> Result<FormulaNode, String> {
+        let mut left = self.parse_unary()?;
+        loop {
+            if matches!(self.peek(), Some(Token::Ampersand)) {
+                self.advance();
+                let right = self.parse_unary()?;
+                left = FormulaNode::BinaryOp { op: BinOp::Concat, left: Box::new(left), right: Box::new(right) };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    // unary = ('-'|'%')? primary
+    fn parse_unary(&mut self) -> Result<FormulaNode, String> {
+        match self.peek() {
+            Some(Token::Minus) => {
+                self.advance();
+                let operand = self.parse_primary()?;
+                Ok(FormulaNode::UnaryOp { op: UnOp::Negate, operand: Box::new(operand) })
+            }
+            Some(Token::Percent) => {
+                self.advance();
+                let operand = self.parse_primary()?;
+                Ok(FormulaNode::UnaryOp { op: UnOp::Percent, operand: Box::new(operand) })
+            }
+            _ => self.parse_primary(),
+        }
+    }
+
+    // primary = function_call | cell_or_range | number | string | boolean | '(' expression ')'
+    fn parse_primary(&mut self) -> Result<FormulaNode, String> {
+        match self.peek().cloned() {
+            Some(Token::LParen) => {
+                self.advance();
+                let node = self.parse_comparison()?;
+                self.expect(&Token::RParen).map_err(|e| format!("括号未闭合: {}", e))?;
+                Ok(node)
+            }
+            Some(Token::Number(n)) => {
+                self.advance();
+                Ok(FormulaNode::Number(n))
+            }
+            Some(Token::StringLit(s)) => {
+                self.advance();
+                Ok(FormulaNode::String(s))
+            }
+            Some(Token::Ident(name)) => {
+                // 检查是否是布尔值
+                match name.as_str() {
+                    "TRUE" => { self.advance(); return Ok(FormulaNode::Boolean(true)); }
+                    "FALSE" => { self.advance(); return Ok(FormulaNode::Boolean(false)); }
+                    _ => {}
+                }
+                // 函数调用
+                if matches!(self.tokens.get(self.pos + 1), Some(Token::LParen)) {
+                    return self.parse_function(&name);
+                }
+                // 否则当作未知名称
+                self.advance();
+                Err(format!("未知名称: {}", name))
+            }
+            Some(Token::CellRef(_)) => self.parse_cell_or_range(),
+            other => Err(format!("意外的 token: {:?}", other)),
+        }
+    }
+
+    // cell_or_range = CELLREF (':' CELLREF)?
+    fn parse_cell_or_range(&mut self) -> Result<FormulaNode, String> {
+        let first = match self.advance() {
+            Some(Token::CellRef(s)) => s,
+            _ => unreachable!(),
+        };
+        let (col1, row1) = parse_cell_ref_str(&first)?;
+
+        if matches!(self.peek(), Some(Token::Colon)) {
+            self.advance();
+            let second = match self.advance() {
+                Some(Token::CellRef(s)) => s,
+                other => return Err(format!("范围引用缺少结束单元格: {:?}", other)),
+            };
+            let (col2, row2) = parse_cell_ref_str(&second)?;
+            return Ok(FormulaNode::RangeRef {
+                start_col: col1.min(col2), start_row: row1.min(row2),
+                end_col: col1.max(col2), end_row: row1.max(row2),
+            });
+        }
+        Ok(FormulaNode::CellRef { col: col1, row: row1 })
+    }
+
+    // function_call = IDENT '(' arg_list? ')'
+    fn parse_function(&mut self, name: &str) -> Result<FormulaNode, String> {
+        self.advance(); // consume IDENT
+        self.advance(); // consume '('
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Some(Token::RParen)) {
+            args.push(self.parse_comparison()?);
+            while matches!(self.peek(), Some(Token::Comma)) {
+                self.advance();
+                args.push(self.parse_comparison()?);
+            }
+        }
+        self.expect(&Token::RParen).map_err(|e| format!("函数 {} 括号未闭合: {}", name, e))?;
+        Ok(FormulaNode::Function { name: name.to_uppercase(), args })
+    }
+}
+
+/// 解析单元格引用字符串（如 "A1", "$A$1"）为 (col, row)
+fn parse_cell_ref_str(s: &str) -> Result<(u32, u32), String> {
+    let s = s.replace('$', "");
+    let mut col_str = String::new();
+    let mut row_str = String::new();
+    let mut in_digits = false;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            in_digits = true;
+            row_str.push(ch);
+        } else if ch.is_ascii_alphabetic() {
+            if in_digits { return Err(format!("无效的单元格引用: {}", s)); }
+            col_str.push(ch.to_ascii_uppercase());
+        }
+    }
+    if col_str.is_empty() || row_str.is_empty() {
+        return Err(format!("无效的单元格引用: {}", s));
+    }
+    let col = letter_to_col(&col_str)?;
+    let row: u32 = row_str.parse().map_err(|_| format!("无效行号: {}", row_str))?;
+    Ok((col, row))
+}
+
+/// 列字母转列号 (A=1, B=2, ..., Z=26, AA=27)
+fn letter_to_col(s: &str) -> Result<u32, String> {
+    let mut col = 0u32;
+    for ch in s.chars() {
+        if !ch.is_ascii_alphabetic() { return Err(format!("无效列字母: {}", s)); }
+        col = col * 26 + (ch as u32 - 'A' as u32 + 1);
+    }
+    if col == 0 { return Err("列号不能为0".to_string()); }
+    Ok(col)
+}
+
+// ========== 公式解析入口 ==========
+
+/// 解析公式字符串为 AST（去掉前导 '='）
+pub fn parse_formula(input: &str) -> Result<FormulaNode, String> {
+    let trimmed = input.trim();
+    let formula_str = if trimmed.starts_with('=') { &trimmed[1..] } else { trimmed };
+    let mut lexer = Lexer::new(formula_str);
+    let tokens = lexer.tokenize()?;
+    let mut parser = Parser::new(tokens);
+    parser.parse()
+}
+
+// ========== 求值器 ==========
+
+/// 从 SheetData 获取单元格的值
+fn get_cell_value(sheet: &SheetData, row: u32, col: u32) -> FormulaValue {
+    match sheet.get_cell(row, col) {
+        Some(cell) => {
+            if cell.value.is_empty() {
+                FormulaValue::Blank
+            } else if let Ok(n) = cell.value.parse::<f64>() {
+                FormulaValue::Number(n)
+            } else {
+                match cell.value.to_uppercase().as_str() {
+                    "TRUE" => FormulaValue::Boolean(true),
+                    "FALSE" => FormulaValue::Boolean(false),
+                    _ => FormulaValue::String(cell.value.clone()),
+                }
+            }
+        }
+        None => FormulaValue::Blank,
+    }
+}
+
+/// 收集范围中的所有值
+fn collect_range_values(sheet: &SheetData, start_col: u32, start_row: u32, end_col: u32, end_row: u32) -> Vec<FormulaValue> {
+    let mut values = Vec::new();
+    for r in start_row..=end_row {
+        for c in start_col..=end_col {
+            values.push(get_cell_value(sheet, r, c));
+        }
+    }
+    values
+}
+
+/// 求值 AST 节点
+fn eval_node(node: &FormulaNode, sheet: &SheetData) -> FormulaValue {
+    match node {
+        FormulaNode::Number(n) => FormulaValue::Number(*n),
+        FormulaNode::String(s) => FormulaValue::String(s.clone()),
+        FormulaNode::Boolean(b) => FormulaValue::Boolean(*b),
+        FormulaNode::CellRef { col, row } => get_cell_value(sheet, *row, *col),
+        FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
+            // 独立的范围引用在表达式上下文中无效（如 =A1:B5），返回错误
+            // 但在函数调用中会被特殊处理
+            let _ = (start_col, start_row, end_col, end_row);
+            FormulaValue::Error("#VALUE!".to_string())
+        }
+        FormulaNode::UnaryOp { op, operand } => eval_unary(op, operand, sheet),
+        FormulaNode::BinaryOp { op, left, right } => eval_binary(op, left, right, sheet),
+        FormulaNode::Function { name, args } => eval_function(name, args, sheet),
+    }
+}
+
+fn eval_unary(op: &UnOp, operand: &FormulaNode, sheet: &SheetData) -> FormulaValue {
+    let val = eval_node(operand, sheet);
+    if val.is_error() { return val; }
+    match op {
+        UnOp::Negate => {
+            match val.as_number() {
+                Some(n) => FormulaValue::Number(-n),
+                None => FormulaValue::Error("#VALUE!".to_string()),
+            }
+        }
+        UnOp::Percent => {
+            match val.as_number() {
+                Some(n) => FormulaValue::Number(n / 100.0),
+                None => FormulaValue::Error("#VALUE!".to_string()),
+            }
+        }
+    }
+}
+
+fn eval_binary(op: &BinOp, left: &FormulaNode, right: &FormulaNode, sheet: &SheetData) -> FormulaValue {
+    let lv = eval_node(left, sheet);
+    let rv = eval_node(right, sheet);
+    if lv.is_error() { return lv; }
+    if rv.is_error() { return rv; }
+
+    match op {
+        BinOp::Concat => {
+            let ls = val_to_string(&lv);
+            let rs = val_to_string(&rv);
+            FormulaValue::String(format!("{}{}", ls, rs))
+        }
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
+            let ln = match lv.as_number() {
+                Some(n) => n,
+                None => return FormulaValue::Error("#VALUE!".to_string()),
+            };
+            let rn = match rv.as_number() {
+                Some(n) => n,
+                None => return FormulaValue::Error("#VALUE!".to_string()),
+            };
+            let result = match op {
+                BinOp::Add => ln + rn,
+                BinOp::Sub => ln - rn,
+                BinOp::Mul => ln * rn,
+                BinOp::Div => {
+                    if rn == 0.0 { return FormulaValue::Error("#DIV/0!".to_string()); }
+                    ln / rn
+                }
+                BinOp::Pow => ln.powf(rn),
+                _ => unreachable!(),
+            };
+            FormulaValue::Number(result)
+        }
+        BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            // 尝试数值比较，否则字符串比较
+            let result = match (lv.as_number(), rv.as_number()) {
+                (Some(ln), Some(rn)) => {
+                    match op {
+                        BinOp::Eq => ln == rn,
+                        BinOp::Neq => ln != rn,
+                        BinOp::Lt => ln < rn,
+                        BinOp::Le => ln <= rn,
+                        BinOp::Gt => ln > rn,
+                        BinOp::Ge => ln >= rn,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => {
+                    let ls = val_to_string(&lv);
+                    let rs = val_to_string(&rv);
+                    match op {
+                        BinOp::Eq => ls.eq_ignore_ascii_case(&rs),
+                        BinOp::Neq => !ls.eq_ignore_ascii_case(&rs),
+                        BinOp::Lt => ls < rs,
+                        BinOp::Le => ls <= rs,
+                        BinOp::Gt => ls > rs,
+                        BinOp::Ge => ls >= rs,
+                        _ => unreachable!(),
+                    }
+                }
+            };
+            FormulaValue::Boolean(result)
+        }
+    }
+}
+
+fn val_to_string(v: &FormulaValue) -> String {
+    match v {
+        FormulaValue::Blank => String::new(),
+        FormulaValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        FormulaValue::Number(n) => format_number(*n),
+        FormulaValue::String(s) => s.clone(),
+        FormulaValue::Error(e) => e.clone(),
+    }
+}
+
+// ========== 函数实现 ==========
+
+/// 收集参数中的所有值（展开范围引用）
+fn collect_args_values(args: &[FormulaNode], sheet: &SheetData) -> Vec<FormulaValue> {
+    let mut values = Vec::new();
+    for arg in args {
+        match arg {
+            FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
+                values.extend(collect_range_values(sheet, *start_col, *start_row, *end_col, *end_row));
+            }
+            _ => values.push(eval_node(arg, sheet)),
+        }
+    }
+    values
+}
+
+fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> FormulaValue {
+    match name {
+        "SUM" => {
+            let values = collect_args_values(args, sheet);
+            let mut sum = 0.0;
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if let Some(n) = v.as_number() { sum += n; }
+            }
+            FormulaValue::Number(sum)
+        }
+        "AVERAGE" => {
+            let values = collect_args_values(args, sheet);
+            let mut sum = 0.0;
+            let mut count = 0u32;
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if let Some(n) = v.as_number() { sum += n; count += 1; }
+            }
+            if count == 0 { FormulaValue::Error("#DIV/0!".to_string()) }
+            else { FormulaValue::Number(sum / count as f64) }
+        }
+        "COUNT" => {
+            let values = collect_args_values(args, sheet);
+            let mut count = 0u32;
+            for v in &values {
+                if matches!(v, FormulaValue::Number(_)) { count += 1; }
+            }
+            FormulaValue::Number(count as f64)
+        }
+        "MAX" => {
+            let values = collect_args_values(args, sheet);
+            let mut max: Option<f64> = None;
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if let Some(n) = v.as_number() {
+                    max = Some(max.map_or(n, |m: f64| m.max(n)));
+                }
+            }
+            max.map_or(FormulaValue::Number(0.0), FormulaValue::Number)
+        }
+        "MIN" => {
+            let values = collect_args_values(args, sheet);
+            let mut min: Option<f64> = None;
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if let Some(n) = v.as_number() {
+                    min = Some(min.map_or(n, |m: f64| m.min(n)));
+                }
+            }
+            min.map_or(FormulaValue::Number(0.0), FormulaValue::Number)
+        }
+        "IF" => {
+            if args.len() < 2 { return FormulaValue::Error("#VALUE!".to_string()); }
+            let cond = eval_node(&args[0], sheet);
+            let cond_bool = cond.as_bool().unwrap_or(false);
+            if cond_bool {
+                eval_node(&args[1], sheet)
+            } else {
+                if args.len() >= 3 { eval_node(&args[2], sheet) }
+                else { FormulaValue::Boolean(false) }
+            }
+        }
+        "AND" => {
+            let values = collect_args_values(args, sheet);
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if !v.as_bool().unwrap_or(false) { return FormulaValue::Boolean(false); }
+            }
+            FormulaValue::Boolean(true)
+        }
+        "OR" => {
+            let values = collect_args_values(args, sheet);
+            for v in &values {
+                if v.is_error() { return v.clone(); }
+                if v.as_bool().unwrap_or(false) { return FormulaValue::Boolean(true); }
+            }
+            FormulaValue::Boolean(false)
+        }
+        "NOT" => {
+            if args.len() != 1 { return FormulaValue::Error("#VALUE!".to_string()); }
+            let val = eval_node(&args[0], sheet);
+            if val.is_error() { return val; }
+            FormulaValue::Boolean(!val.as_bool().unwrap_or(false))
+        }
+        "CONCATENATE" => {
+            let mut result = String::new();
+            for arg in args {
+                match arg {
+                    FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
+                        for v in collect_range_values(sheet, *start_col, *start_row, *end_col, *end_row) {
+                            result.push_str(&val_to_string(&v));
+                        }
+                    }
+                    _ => result.push_str(&val_to_string(&eval_node(arg, sheet))),
+                }
+            }
+            FormulaValue::String(result)
+        }
+        _ => FormulaValue::Error(format!("#NAME?")),
+    }
+}
+
+// ========== 依赖分析和拓扑排序 ==========
+
+/// 从 AST 中提取所有被引用的单元格
+fn extract_dependencies(node: &FormulaNode) -> HashSet<(u32, u32)> {
+    let mut deps = HashSet::new();
+    match node {
+        FormulaNode::CellRef { col, row } => { deps.insert((*row, *col)); }
+        FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
+            for r in *start_row..=*end_row {
+                for c in *start_col..=*end_col {
+                    deps.insert((r, c));
+                }
+            }
+        }
+        FormulaNode::BinaryOp { left, right, .. } => {
+            deps.extend(extract_dependencies(left));
+            deps.extend(extract_dependencies(right));
+        }
+        FormulaNode::UnaryOp { operand, .. } => {
+            deps.extend(extract_dependencies(operand));
+        }
+        FormulaNode::Function { args, .. } => {
+            for arg in args { deps.extend(extract_dependencies(arg)); }
+        }
+        _ => {}
+    }
+    deps
+}
+
+// ========== 顶层 API ==========
+
+/// 解析所有公式单元格，返回 (AST表, 公式位置集合, 正向依赖, 反向依赖)
+fn build_formula_graph(sheet: &SheetData) -> (
+    HashMap<(u32, u32), FormulaNode>,   // ASTs
+    HashSet<(u32, u32)>,                 // formula_positions
+    HashMap<(u32, u32), HashSet<(u32, u32)>>, // forward: cell -> its formula deps
+    HashMap<(u32, u32), HashSet<(u32, u32)>>, // reverse: any cell -> formula cells depending on it
+) {
+    let formula_cells: HashMap<(u32, u32), FormulaNode> = sheet.cells.iter()
+        .filter(|(_, cell)| !cell.formula.is_empty())
+        .filter_map(|(&key, cell)| {
+            parse_formula(&cell.formula).ok().map(|ast| (key, ast))
+        })
+        .collect();
+
+    let formula_positions: HashSet<(u32, u32)> = formula_cells.keys().copied().collect();
+
+    let mut forward_deps: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
+    let mut reverse_deps: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
+
+    for (&pos, ast) in &formula_cells {
+        let deps = extract_dependencies(ast);
+        // 正向依赖：只保留公式间依赖
+        let formula_deps: HashSet<(u32, u32)> = deps.intersection(&formula_positions).copied().collect();
+        forward_deps.insert(pos, formula_deps);
+
+        // 反向依赖：任何被引用的单元格 -> 引用它的公式单元格
+        for &dep in &deps {
+            reverse_deps.entry(dep).or_default().insert(pos);
+        }
+    }
+
+    (formula_cells, formula_positions, forward_deps, reverse_deps)
+}
+
+/// 对给定的公式单元格集合进行拓扑排序并求值
+fn topo_eval(
+    sheet: &mut SheetData,
+    formula_cells: &HashMap<(u32, u32), FormulaNode>,
+    cells_to_eval: &HashSet<(u32, u32)>,
+    forward_deps: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    reverse_deps: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
+) {
+    // 在待求值子集中进行拓扑排序
+    let mut in_deg: HashMap<(u32, u32), u32> = HashMap::new();
+    for &pos in cells_to_eval {
+        let deps_in_subset = forward_deps.get(&pos)
+            .map(|d| d.intersection(cells_to_eval).count())
+            .unwrap_or(0);
+        in_deg.insert(pos, deps_in_subset as u32);
+    }
+
+    let mut queue: VecDeque<(u32, u32)> = in_deg.iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&pos, _)| pos)
+        .collect();
+
+    let mut eval_order = Vec::new();
+    while let Some(pos) = queue.pop_front() {
+        eval_order.push(pos);
+        // 通过反向依赖表直接找到依赖 pos 的公式单元格
+        if let Some(dependents) = reverse_deps.get(&pos) {
+            for &dep in dependents {
+                if !cells_to_eval.contains(&dep) { continue; }
+                if let Some(d) = in_deg.get_mut(&dep) {
+                    *d -= 1;
+                    if *d == 0 { queue.push_back(dep); }
+                }
+            }
+        }
+    }
+
+    // 按拓扑顺序求值
+    for pos in &eval_order {
+        if let Some(ast) = formula_cells.get(pos) {
+            let result = eval_node(ast, sheet);
+            if let Some(cell) = sheet.cells.get_mut(pos) {
+                cell.value = result.to_display();
+            }
+        }
+    }
+
+    // 未处理的单元格（循环依赖）标记为 #CIRC!
+    let processed: HashSet<(u32, u32)> = eval_order.into_iter().collect();
+    for &pos in cells_to_eval {
+        if !processed.contains(&pos) {
+            if let Some(cell) = sheet.cells.get_mut(&pos) {
+                cell.value = "#CIRC!".to_string();
+            }
+        }
+    }
+}
+
+/// 求值工作表中的所有公式，将结果写入 cell.value
+/// 用于初始加载或公式本身发生变更时
+pub fn evaluate_sheet(sheet: &mut SheetData) {
+    let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
+    if formula_cells.is_empty() { return; }
+
+    let all_cells: HashSet<(u32, u32)> = formula_cells.keys().copied().collect();
+    topo_eval(sheet, &formula_cells, &all_cells, &forward_deps, &reverse_deps);
+}
+
+/// 增量求值：仅重新计算受影响的公式单元格
+/// 当某个单元格的值发生变化时，只重新计算直接或间接依赖该单元格的公式
+///
+/// # 参数
+/// * `sheet` - 工作表数据
+/// * `changed_row` - 发生变化的单元格行号
+/// * `changed_col` - 发生变化的单元格列号
+pub fn evaluate_dependents(sheet: &mut SheetData, changed_row: u32, changed_col: u32) {
+    let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
+    if formula_cells.is_empty() { return; }
+
+    let changed = (changed_row, changed_col);
+
+    // BFS 查找所有受影响的公式单元格
+    let mut affected: HashSet<(u32, u32)> = HashSet::new();
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+
+    // 从变更单元格出发，找到直接依赖它的公式单元格
+    if let Some(direct_deps) = reverse_deps.get(&changed) {
+        for &dep in direct_deps {
+            if affected.insert(dep) {
+                queue.push_back(dep);
+            }
+        }
+    }
+
+    // 沿公式链传播
+    while let Some(pos) = queue.pop_front() {
+        if let Some(next_deps) = reverse_deps.get(&pos) {
+            for &dep in next_deps {
+                if affected.insert(dep) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+    }
+
+    if affected.is_empty() { return; }
+
+    topo_eval(sheet, &formula_cells, &affected, &forward_deps, &reverse_deps);
+}
+
+// ========== 单元格引用解析工具 ==========
+
+/// 解析用户输入的单元格引用字符串（如 "A1"）为 (col, row)
+#[allow(dead_code)]
+pub fn parse_cell_ref_input(s: &str) -> Option<(u32, u32)> {
+    parse_cell_ref_str(s).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::excel::reader::{CellData, SheetData};
+
+    fn make_sheet(cells: Vec<((u32, u32), &str)>) -> SheetData {
+        let mut sheet = SheetData::new("Test".to_string());
+        for ((row, col), value) in cells {
+            sheet.cells.insert((row, col), CellData {
+                value: value.to_string(),
+                formula: String::new(),
+                ..CellData::default()
+            });
+        }
+        sheet
+    }
+
+    fn make_formula_sheet(cells: Vec<((u32, u32), &str, &str)>) -> SheetData {
+        let mut sheet = SheetData::new("Test".to_string());
+        for ((row, col), value, formula) in cells {
+            sheet.cells.insert((row, col), CellData {
+                value: value.to_string(),
+                formula: formula.to_string(),
+                ..CellData::default()
+            });
+        }
+        sheet
+    }
+
+    #[test]
+    fn test_parse_number() {
+        let ast = parse_formula("=42").unwrap();
+        assert!(matches!(ast, FormulaNode::Number(42.0)));
+    }
+
+    #[test]
+    fn test_parse_arithmetic() {
+        let ast = parse_formula("=1+2*3").unwrap();
+        match ast {
+            FormulaNode::BinaryOp { op: BinOp::Add, .. } => {}
+            other => panic!("Expected Add, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_cell_ref() {
+        let ast = parse_formula("=A1+B2").unwrap();
+        match ast {
+            FormulaNode::BinaryOp { op: BinOp::Add, left, right } => {
+                assert!(matches!(*left, FormulaNode::CellRef { col: 1, row: 1 }));
+                assert!(matches!(*right, FormulaNode::CellRef { col: 2, row: 2 }));
+            }
+            other => panic!("Expected BinaryOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_range() {
+        let ast = parse_formula("=SUM(A1:A10)").unwrap();
+        match ast {
+            FormulaNode::Function { name, args } => {
+                assert_eq!(name, "SUM");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], FormulaNode::RangeRef { start_col: 1, start_row: 1, end_col: 1, end_row: 10 }));
+            }
+            other => panic!("Expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_arithmetic() {
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula("=1+2*3").unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "7");
+    }
+
+    #[test]
+    fn test_eval_cell_ref() {
+        let sheet = make_sheet(vec![((1, 1), "10"), ((1, 2), "20")]);
+        let ast = parse_formula("=A1+B1").unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "30");
+    }
+
+    #[test]
+    fn test_eval_sum() {
+        let sheet = make_sheet(vec![
+            ((1, 1), "1"), ((2, 1), "2"), ((3, 1), "3"),
+            ((4, 1), "4"), ((5, 1), "5"),
+        ]);
+        let ast = parse_formula("=SUM(A1:A5)").unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "15");
+    }
+
+    #[test]
+    fn test_eval_if() {
+        let sheet = make_sheet(vec![((1, 1), "10")]);
+        let ast = parse_formula(r#"=IF(A1>5,"big","small")"#).unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "big");
+    }
+
+    #[test]
+    fn test_eval_circular() {
+        let mut sheet = make_formula_sheet(vec![
+            ((1, 1), "0", "=B1"),
+            ((1, 2), "0", "=A1"),
+        ]);
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(1, 1)).unwrap().value, "#CIRC!");
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "#CIRC!");
+    }
+
+    #[test]
+    fn test_eval_chain() {
+        let mut sheet = make_formula_sheet(vec![
+            ((1, 1), "5", ""),
+            ((1, 2), "0", "=A1+1"),
+            ((1, 3), "0", "=B1+1"),
+        ]);
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "6");
+        assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "7");
+    }
+
+    #[test]
+    fn test_eval_div_zero() {
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula("=1/0").unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "#DIV/0!");
+    }
+
+    #[test]
+    fn test_eval_concatenate() {
+        let sheet = make_sheet(vec![((1, 1), "hello"), ((1, 2), "world")]);
+        let ast = parse_formula("=CONCATENATE(A1,\" \",B1)").unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "hello world");
+    }
+
+    #[test]
+    fn test_evaluate_dependents() {
+        // B1=SUM(A1:A5), C1=B1+1
+        let mut sheet = make_formula_sheet(vec![
+            ((1, 1), "1", ""),   // A1=1
+            ((2, 1), "2", ""),   // A2=2
+            ((3, 1), "3", ""),   // A3=3
+            ((4, 1), "4", ""),   // A4=4
+            ((5, 1), "5", ""),   // A5=5
+            ((1, 2), "15", "=SUM(A1:A5)"),  // B1=SUM(A1:A5)
+            ((1, 3), "16", "=B1+1"),         // C1=B1+1
+        ]);
+        // 先全量求值
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "15");
+        assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "16");
+
+        // 修改 A1 为 10，增量求值
+        sheet.cells.get_mut(&(1, 1)).unwrap().value = "10".to_string();
+        evaluate_dependents(&mut sheet, 1, 1);
+
+        // A1=10 → SUM(A1:A5)=10+2+3+4+5=24 → C1=24+1=25
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "24");
+        assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "25");
+    }
+
+    #[test]
+    fn test_evaluate_dependents_unaffected() {
+        // A1=1, B1=A1+1, C1=99 (no formula)
+        // D1=SUM(E1:E5), E1=10
+        let mut sheet = make_formula_sheet(vec![
+            ((1, 1), "1", ""),          // A1
+            ((1, 2), "2", "=A1+1"),     // B1=A1+1
+            ((1, 3), "99", ""),         // C1=99 (plain)
+            ((1, 4), "0", "=SUM(E1:E5)"), // D1=SUM(E1:E5)
+            ((1, 5), "10", ""),         // E1=10
+        ]);
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "2");
+        assert_eq!(sheet.cells.get(&(1, 4)).unwrap().value, "10");
+
+        // 修改 E1 为 20，B1 不应受影响
+        sheet.cells.get_mut(&(1, 5)).unwrap().value = "20".to_string();
+        evaluate_dependents(&mut sheet, 1, 5);
+
+        // D1 应更新，B1 不变
+        assert_eq!(sheet.cells.get(&(1, 4)).unwrap().value, "20");
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "2");
+    }
+}
