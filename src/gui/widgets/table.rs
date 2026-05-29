@@ -634,6 +634,10 @@ pub fn draw_table_content(
         let visible_rows_start = 0;
         let visible_rows_end = sheet.max_row;
 
+        // 冻结区域边界：主网格渲染跳过这些行列，由冻结覆盖层单独绘制
+        let fr = sheet.frozen_rows;
+        let fc = sheet.frozen_cols;
+
         // 处理点击事件
         if response.clicked() {
             if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
@@ -687,6 +691,10 @@ pub fn draw_table_content(
 
         // ========== 第一遍：绘制所有单元格背景 ==========
         for row in visible_rows_start..=visible_rows_end {
+            // 跳过冻结区域内的行（由冻结覆盖层单独绘制，避免重影）
+            if row <= fr {
+                continue;
+            }
             let mut x = tl_x + border_width;
             // 跳过不可见的左侧列
             for c in 0..visible_cols_start {
@@ -698,6 +706,11 @@ pub fn draw_table_content(
 
             // 绘制可见列
             for col in visible_cols_start..=visible_cols_end {
+                // 跳过冻结区域内的列（由冻结覆盖层单独绘制，避免重影）
+                if col <= fc {
+                    x += if col == 0 { header_width } else { get_col_width(col) } + border_width;
+                    continue;
+                }
                 let cell_width = if col == 0 {
                     header_width
                 } else {
@@ -797,6 +810,10 @@ pub fn draw_table_content(
 
         // ========== 第二遍：绘制所有单元格内容 ==========
         for row in visible_rows_start..=visible_rows_end {
+            // 跳过冻结区域内的行（由冻结覆盖层单独绘制，避免重影）
+            if row <= fr {
+                continue;
+            }
             let mut x = tl_x + border_width;
             // 跳过不可见的左侧列
             for c in 0..visible_cols_start {
@@ -808,6 +825,11 @@ pub fn draw_table_content(
 
             // 绘制可见列
             for col in visible_cols_start..=visible_cols_end {
+                // 跳过冻结区域内的列（由冻结覆盖层单独绘制，避免重影）
+                if col <= fc {
+                    x += if col == 0 { header_width } else { get_col_width(col) } + border_width;
+                    continue;
+                }
                 let cell_width = if col == 0 {
                     header_width
                 } else {
@@ -1040,8 +1062,30 @@ pub fn draw_table_content(
         
         // ========== 冻结窗格：固定列标题、行标题和冻结数据区域 ==========
         let viewport_rect = ui.clip_rect();
-        let fr = sheet.frozen_rows; // 冻结数据行数
-        let fc = sheet.frozen_cols; // 冻结数据列数
+
+        // 先用背景色填充冻结覆盖区域，遮住主网格在滚动时透出的内容（消除重影）
+        // 顶部冻结区域（行标题行 + 冻结数据行，全宽）
+        if frozen_top_height > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+                    egui::Pos2::new(viewport_rect.max.x, viewport_rect.min.y + frozen_top_height),
+                ),
+                0.0,
+                egui::Color32::WHITE,
+            );
+        }
+        // 左侧冻结区域（行号列 + 冻结数据列，全高）
+        if frozen_left_width > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(viewport_rect.min.x, viewport_rect.min.y),
+                    egui::Pos2::new(viewport_rect.min.x + frozen_left_width, viewport_rect.max.y),
+                ),
+                0.0,
+                egui::Color32::WHITE,
+            );
+        }
 
         // 辅助函数：在指定位置绘制数据单元格（背景+内容）
         let draw_frozen_cell = |painter: &egui::Painter, col: u32, row: u32, x: f32, y: f32| {
@@ -1242,6 +1286,7 @@ pub fn draw_table_content(
 
             if col_rect.max.x > viewport_rect.min.x + frozen_left_width && col_rect.min.x < viewport_rect.max.x {
                 painter.rect_filled(col_rect, 0.0, egui::Color32::LIGHT_GRAY);
+                painter.rect_stroke(col_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY));
                 painter.text(
                     egui::Pos2::new(col_rect.center().x, col_rect.center().y),
                     egui::Align2::CENTER_CENTER,
@@ -1279,6 +1324,7 @@ pub fn draw_table_content(
 
             if row_rect.max.y > viewport_rect.min.y + frozen_top_height && row_rect.min.y < viewport_rect.max.y {
                 painter.rect_filled(row_rect, 0.0, egui::Color32::LIGHT_GRAY);
+                painter.rect_stroke(row_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY));
                 painter.text(
                     egui::Pos2::new(row_rect.center().x, row_rect.center().y),
                     egui::Align2::CENTER_CENTER,
