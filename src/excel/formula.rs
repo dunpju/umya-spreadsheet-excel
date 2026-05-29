@@ -185,7 +185,7 @@ impl Lexer {
                             else { Token::Gt }
                         }
                         '"' => self.lex_string()?,
-                        '$' | 'A'..='Z' => self.lex_ident_or_cellref()?,
+                        '$' | '_' | 'A'..='Z' => self.lex_ident_or_cellref()?,
                         '0'..='9' | '.' => self.lex_number()?,
                         _ => return Err(format!("无法识别的字符: '{}'", ch)),
                     };
@@ -224,50 +224,69 @@ impl Lexer {
     }
 
     /// 解析标识符或单元格引用
-    /// 以 $ 或字母开头，可能是：$A$1, A1, SUM, TRUE, FALSE 等
+    /// 以 $、_ 或字母开头，可能是：$A$1, A1, SUM, TRUE, _xlfn.IFS 等
+    /// 状态机：0=before_col, 1=in_col, 2=after_col, 3=in_row, 10=ident
     fn lex_ident_or_cellref(&mut self) -> Result<Token, String> {
         let mut s = String::new();
-        let mut _has_dollar = false;
         let mut alpha_part = String::new();
         let mut digit_part = String::new();
-        let mut phase = 0; // 0=前导$, 1=字母, 2=中间$, 3=数字
+        let mut state: u8 = 0;
+        let mut is_ident = false;
 
-        // 收集整个 token
         while let Some(ch) = self.peek() {
+            if is_ident {
+                // 标识符模式：接受字母、数字、下划线、点
+                match ch {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '.' => {
+                        s.push(ch);
+                        self.advance();
+                    }
+                    _ => break,
+                }
+                continue;
+            }
+
             match ch {
                 '$' => {
-                    _has_dollar = true;
                     s.push(ch);
                     self.advance();
-                    phase = if phase < 2 { 2 } else { break };
+                    if state == 0 {
+                        // 前导 $，仍处于"列前"状态，继续读列字母
+                    } else if state == 1 {
+                        state = 2; // 列后 $，期待行号
+                    } else {
+                        break; // 多余的 $
+                    }
                 }
                 'A'..='Z' | 'a'..='z' => {
-                    let upper = ch.to_ascii_uppercase();
-                    s.push(ch);
-                    if phase < 2 { alpha_part.push(upper); }
-                    else { break; } // $A$1 之后的字母不属于此 token
-                    self.advance();
-                    phase = 1;
+                    if state <= 1 {
+                        let upper = ch.to_ascii_uppercase();
+                        s.push(ch);
+                        alpha_part.push(upper);
+                        self.advance();
+                        state = 1; // 正在读列字母
+                    } else {
+                        break; // 列字母后不能再出现字母
+                    }
                 }
                 '0'..='9' => {
                     s.push(ch);
                     digit_part.push(ch);
                     self.advance();
-                    phase = 3;
+                    state = 3; // 正在读行号
                 }
-                '_' => {
+                '_' | '.' => {
+                    // 下划线或点号表示这是标识符（如 _xlfn.IFS）
                     s.push(ch);
                     self.advance();
-                    phase = 1;
+                    is_ident = true;
                 }
                 _ => break,
             }
         }
 
         // 判断是单元格引用还是标识符
-        if !alpha_part.is_empty() && !digit_part.is_empty() {
-            // 看起来像 A1, $A1, A$1, $A$1
-            // 验证列字母部分是否是有效的列引用
+        if !is_ident && state == 3 && !alpha_part.is_empty() && !digit_part.is_empty() {
             if alpha_part.len() <= 3 && alpha_part.chars().all(|c| c.is_ascii_uppercase()) {
                 return Ok(Token::CellRef(s.to_uppercase()));
             }
@@ -532,7 +551,9 @@ fn letter_to_col(s: &str) -> Result<u32, String> {
 pub fn parse_formula(input: &str) -> Result<FormulaNode, String> {
     let trimmed = input.trim();
     let formula_str = if trimmed.starts_with('=') { &trimmed[1..] } else { trimmed };
-    let mut lexer = Lexer::new(formula_str);
+    // 去除 OOXML 新版函数前缀 _xlfn.（如 _xlfn.IFS → IFS）
+    let preprocessed = formula_str.replace("_xlfn.", "");
+    let mut lexer = Lexer::new(&preprocessed);
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     parser.parse()
@@ -801,7 +822,100 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData) -> Formula
             }
             FormulaValue::String(result)
         }
+        "IFS" => {
+            // IFS(cond1, val1, cond2, val2, ...) 返回第一个为真的条件对应的值
+            if args.is_empty() || args.len() % 2 != 0 {
+                return FormulaValue::Error("#VALUE!".to_string());
+            }
+            let mut i = 0;
+            while i < args.len() {
+                let cond = eval_node(&args[i], sheet);
+                if cond.as_bool().unwrap_or(false) {
+                    return eval_node(&args[i + 1], sheet);
+                }
+                i += 2;
+            }
+            FormulaValue::Error("#N/A".to_string())
+        }
+        "SUMIF" => {
+            // SUMIF(range, criteria, [sum_range])
+            if args.len() < 2 { return FormulaValue::Error("#VALUE!".to_string()); }
+            let criteria_val = eval_node(&args[1], sheet);
+            let criteria_str = val_to_string(&criteria_val);
+            let check_values = extract_range_values_from_node(&args[0], sheet);
+            let sum_values = if args.len() >= 3 {
+                extract_range_values_from_node(&args[2], sheet)
+            } else {
+                check_values.clone()
+            };
+            let mut sum = 0.0;
+            for (i, cv) in check_values.iter().enumerate() {
+                if matches_criteria(cv, &criteria_str) {
+                    if let Some(sv) = sum_values.get(i) {
+                        if let Some(n) = sv.as_number() { sum += n; }
+                    }
+                }
+            }
+            FormulaValue::Number(sum)
+        }
         _ => FormulaValue::Error(format!("#NAME?")),
+    }
+}
+
+// ========== SUMIF 辅助函数 ==========
+
+/// 从 AST 节点提取范围值（支持 RangeRef 和普通表达式）
+fn extract_range_values_from_node(arg: &FormulaNode, sheet: &SheetData) -> Vec<FormulaValue> {
+    match arg {
+        FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
+            collect_range_values(sheet, *start_col, *start_row, *end_col, *end_row)
+        }
+        _ => vec![eval_node(arg, sheet)],
+    }
+}
+
+/// 判断单元格值是否匹配 SUMIF 条件
+/// 支持数值/字符串相等，以及 ">=", "<=", "<>", ">", "<", "=" 前缀比较
+fn matches_criteria(value: &FormulaValue, criteria: &str) -> bool {
+    // 比较运算符前缀
+    if let Some(rest) = criteria.strip_prefix(">=") {
+        return compare_value_to_str(value, rest, |a, b| a >= b);
+    }
+    if let Some(rest) = criteria.strip_prefix("<=") {
+        return compare_value_to_str(value, rest, |a, b| a <= b);
+    }
+    if let Some(rest) = criteria.strip_prefix("<>") {
+        return compare_value_to_str(value, rest, |a, b| a != b);
+    }
+    if let Some(rest) = criteria.strip_prefix(">") {
+        return compare_value_to_str(value, rest, |a, b| a > b);
+    }
+    if let Some(rest) = criteria.strip_prefix("<") {
+        return compare_value_to_str(value, rest, |a, b| a < b);
+    }
+    if let Some(rest) = criteria.strip_prefix("=") {
+        return compare_value_to_str(value, rest, |a, b| a == b);
+    }
+    // 直接相等比较
+    let val_str = val_to_string(value);
+    val_str.eq_ignore_ascii_case(criteria)
+}
+
+/// 数值比较辅助：尝试将值和阈值转为数字比较，否则字符串比较
+fn compare_value_to_str(value: &FormulaValue, threshold_str: &str, cmp: fn(f64, f64) -> bool) -> bool {
+    if let Some(n) = value.as_number() {
+        if let Ok(t) = threshold_str.parse::<f64>() {
+            return cmp(n, t);
+        }
+    }
+    let val_str = val_to_string(value);
+    cmp_str(&val_str, threshold_str, cmp)
+}
+
+fn cmp_str(a: &str, b: &str, cmp: fn(f64, f64) -> bool) -> bool {
+    match (a.parse::<f64>(), b.parse::<f64>()) {
+        (Ok(an), Ok(bn)) => cmp(an, bn),
+        _ => a.eq_ignore_ascii_case(b),
     }
 }
 
@@ -1179,5 +1293,66 @@ mod tests {
         // D1 应更新，B1 不变
         assert_eq!(sheet.cells.get(&(1, 4)).unwrap().value, "20");
         assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "2");
+    }
+
+    #[test]
+    fn test_parse_dollar_cell_ref() {
+        // $C$15 格式
+        let ast = parse_formula("=SUM($C$15:$C$45)").unwrap();
+        match ast {
+            FormulaNode::Function { name, args } => {
+                assert_eq!(name, "SUM");
+                assert!(matches!(&args[0], FormulaNode::RangeRef { start_col: 3, start_row: 15, end_col: 3, end_row: 45 }));
+            }
+            other => panic!("Expected Function, got {:?}", other),
+        }
+
+        // $A$1 格式
+        let ast = parse_formula("=$A$1+B1").unwrap();
+        match ast {
+            FormulaNode::BinaryOp { left, .. } => {
+                assert!(matches!(*left, FormulaNode::CellRef { col: 1, row: 1 }));
+            }
+            other => panic!("Expected BinaryOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_xlfn_prefix() {
+        // _xlfn.IFS 应被预处理为 IFS
+        let ast = parse_formula(r#"=IF(A1="","",_xlfn.IFS(A1<225,"low",A1>=225,"high"))"#).unwrap();
+        match ast {
+            FormulaNode::Function { name, .. } => {
+                assert_eq!(name, "IF");
+            }
+            other => panic!("Expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_ifs() {
+        let sheet = make_sheet(vec![((1, 1), "100")]);
+        let ast = parse_formula(r#"=IFS(A1<50,"small",A1<200,"medium",A1>=200,"large")"#).unwrap();
+        let result = eval_node(&ast, &sheet);
+        assert_eq!(result.to_display(), "medium");
+    }
+
+    #[test]
+    fn test_dollar_ref_chain() {
+        // B13=SUM($C$15:$C$45), 修改 C20 应触发 B13 重算
+        let mut sheet = make_formula_sheet(vec![
+            ((15, 3), "10", ""),   // C15=10
+            ((16, 3), "20", ""),   // C16=20
+            ((17, 3), "30", ""),   // C17=30
+            ((20, 3), "40", ""),   // C20=40
+            ((13, 2), "0", "SUM($C$15:$C$45)"), // B13=SUM($C$15:$C$45)
+        ]);
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(13, 2)).unwrap().value, "100"); // 10+20+30+40
+
+        // 修改 C20 为 80，增量求值
+        sheet.cells.get_mut(&(20, 3)).unwrap().value = "80".to_string();
+        evaluate_dependents(&mut sheet, 20, 3);
+        assert_eq!(sheet.cells.get(&(13, 2)).unwrap().value, "140"); // 10+20+30+80
     }
 }
