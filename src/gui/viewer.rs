@@ -45,6 +45,8 @@ pub struct ExcelViewer {
     pub name_box_state: NameBoxState,
     /// 待保存的公式值（由公式栏触发）
     pub pending_formula_save: Option<String>,
+    /// 当前加载的文件路径
+    pub file_path: Option<String>,
 }
 
 impl ExcelViewer {
@@ -64,6 +66,7 @@ impl ExcelViewer {
             rx: None,
             name_box_state: NameBoxState::default(),
             pending_formula_save: None,
+            file_path: None,
         }
     }
 
@@ -80,6 +83,7 @@ impl ExcelViewer {
         self.rx = Some(rx);
         self.load_state = LoadState::Loading;
         self.error_message = None;
+        self.file_path = Some(path.clone());
 
         // 启动后台线程加载文件
         std::thread::spawn(move || {
@@ -154,7 +158,23 @@ impl eframe::App for ExcelViewer {
         
         // 检查异步加载结果
         self.check_load_result();
-        
+
+        // 底部状态栏：在 CentralPanel 之前渲染，确保 CentralPanel 自动留出空间
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(20.0)
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(6.0);
+                    if let Some(path) = &self.file_path {
+                        ui.label(
+                            egui::RichText::new(path.as_str())
+                                .font(egui::FontId::proportional(12.0))
+                                .color(egui::Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
+                });
+            });
+
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(excel_data) = &mut self.excel_data {
@@ -216,7 +236,7 @@ impl eframe::App for ExcelViewer {
                 ui.separator();
                 ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
                 draw_sheet_selector(ui, excel_data, &mut self.current_sheet, &mut self.selected_cell);
-                
+
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {
                     if let Some((col, row)) = self.selected_cell {
