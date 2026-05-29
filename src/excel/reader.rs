@@ -219,6 +219,9 @@ impl ExcelData {
         let book = reader::xlsx::read(path)
             .map_err(|e| format!("读取失败: {}", e))?;
 
+        // 获取主题对象，用于解析主题颜色
+        let theme = book.get_theme();
+
         let mut sheets = Vec::new();
 
         // 遍历工作簿中的所有工作表
@@ -237,7 +240,7 @@ impl ExcelData {
                     if let Some(cell) = worksheet.get_cell((col_idx, row_idx)) {
                         let value = cell.get_value().to_string();
                         let style = worksheet.get_style((col_idx, row_idx));
-                        let (alignment, background_color, font_size, font_color) = Self::parse_style(style);
+                        let (alignment, background_color, font_size, font_color) = Self::parse_style(style, theme);
                         
                         let cell_data = CellData {
                             value,
@@ -332,20 +335,21 @@ impl ExcelData {
     }
 
     /// 解析 Excel 单元格样式
-    /// 
+    ///
     /// 从 umya-spreadsheet 的 Style 对象中提取对齐方式、背景颜色、字体大小和字体颜色
-    /// 
+    ///
     /// # 参数
     /// * `style` - Excel 单元格样式对象
-    /// 
+    /// * `theme` - 工作簿主题对象，用于解析主题颜色
+    ///
     /// # 返回值
     /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB))
-    fn parse_style(style: &umya_spreadsheet::Style) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>) {
+    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>) {
         let mut alignment = CellAlignment::default();
         let mut background_color: Option<(u8, u8, u8)> = None;
         let mut font_size: Option<f64> = None;
         let mut font_color: Option<(u8, u8, u8)> = None;
-        
+
         // 解析对齐方式
         if let Some(align) = style.get_alignment() {
             // 解析水平对齐方式
@@ -361,7 +365,7 @@ impl ExcelData {
                 "distributed" => HorizontalAlignment::Distributed,
                 _ => HorizontalAlignment::General,
             };
-            
+
             // 解析垂直对齐方式
             let vertical = align.get_vertical();
             let v_str = vertical.get_value_string();
@@ -373,33 +377,31 @@ impl ExcelData {
                 _ => VerticalAlignment::Bottom,
             };
         }
-        
-        // 解析背景颜色
+
+        // 解析背景颜色（使用 get_argb_with_theme 自动解析主题颜色和 tint）
         if let Some(bg_color) = style.get_background_color() {
-            let bg_argb = bg_color.get_argb();
-            // 跳过空值和透明色（00000000）
-            if !bg_argb.is_empty() && bg_argb != "00000000" {
-                if let Ok(rgb) = Self::parse_hex_color(bg_argb) {
+            let resolved = bg_color.get_argb_with_theme(theme);
+            if !resolved.is_empty() && resolved != "00000000" {
+                if let Ok(rgb) = Self::parse_hex_color(&resolved) {
                     background_color = Some(rgb);
                 }
             }
         }
-        
+
         // 解析字体信息（大小和颜色）
         if let Some(font) = style.get_font() {
             font_size = Some(*font.get_size());
-            
+
             // 解析字体颜色
             let color = font.get_color();
-            let argb = color.get_argb();
-            // 跳过空值和透明色（00000000）
-            if !argb.is_empty() && argb != "00000000" {
-                if let Ok(rgb) = Self::parse_hex_color(argb) {
+            let resolved = color.get_argb_with_theme(theme);
+            if !resolved.is_empty() && resolved != "00000000" {
+                if let Ok(rgb) = Self::parse_hex_color(&resolved) {
                     font_color = Some(rgb);
                 }
             }
         }
-        
+
         (alignment, background_color, font_size, font_color)
     }
     
