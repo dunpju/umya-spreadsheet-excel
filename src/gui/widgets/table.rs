@@ -252,47 +252,10 @@ pub fn draw_table_content(
                     
                     // 使用全局坐标进行滚动
                     let target_rect = get_cell_global_rect(new_col, new_row);
-                    let clip_rect = ui.clip_rect();
                     println!("[Tab键处理] 滚动目标矩形(全局): {:?}", target_rect);
-                    
-                    // 既然已经通过 is_cell_in_viewport 判断了需要滚动，就直接滚动
-                    // 创建足够大的临时矩形，但主要控制我们需要的方向
-                    
-                    if input.modifiers.shift {
-                        // Shift+Tab: 向左（或向上换行）
-                        if new_row != row {
-                            // 向上换行
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(clip_rect.min.x, target_rect.min.y),
-                                egui::Pos2::new(clip_rect.max.x, target_rect.max.y)
-                            );
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Max));
-                        } else {
-                            // 向左移动
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(target_rect.min.x, clip_rect.min.y),
-                                egui::Pos2::new(target_rect.max.x, clip_rect.max.y)
-                            );
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Max));
-                        }
-                    } else {
-                        // Tab: 向右（或向下换行）
-                        if new_row != row {
-                            // 向下换行
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(clip_rect.min.x, target_rect.min.y),
-                                egui::Pos2::new(clip_rect.max.x, target_rect.max.y)
-                            );
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Min));
-                        } else {
-                            // 向右移动
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(target_rect.min.x, clip_rect.min.y),
-                                egui::Pos2::new(target_rect.max.x, clip_rect.max.y)
-                            );
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Min));
-                        }
-                    }
+
+                    // Excel行为：滚动最小距离使新单元格可见（滚动1行/列）
+                    ui.scroll_to_rect(target_rect, None);
                     ui.ctx().request_repaint();
                     scroll_to_rect = Some(target_rect);
                 }
@@ -403,50 +366,18 @@ pub fn draw_table_content(
                         
                         // 使用全局坐标进行滚动
                         let target_rect = get_cell_global_rect(new_col, new_row);
-                        let clip_rect = ui.clip_rect();
                         println!("[方向键处理] 滚动目标矩形(全局): {:?}", target_rect);
-                        println!("[方向键处理] 视口: {:?}", clip_rect);
+                        println!("[方向键处理] 视口: {:?}", ui.clip_rect());
                         
-                        // 既然已经通过 is_cell_in_viewport 判断了需要滚动，就直接滚动
-                        // 创建足够大的临时矩形，但主要控制我们需要的方向
-                        
-                        if input.key_pressed(egui::Key::ArrowDown) {
-                            // 向下滚动：创建一个在Y方向上有大小的矩形
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(clip_rect.min.x, target_rect.min.y),
-                                egui::Pos2::new(clip_rect.max.x, target_rect.max.y)
-                            );
-                            println!("[方向键处理] 向下滚动，temp_rect = {:?}", temp_rect);
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Min));
-                        } else if input.key_pressed(egui::Key::ArrowUp) {
-                            // 向上滚动
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(clip_rect.min.x, target_rect.min.y),
-                                egui::Pos2::new(clip_rect.max.x, target_rect.max.y)
-                            );
-                            println!("[方向键处理] 向上滚动，temp_rect = {:?}", temp_rect);
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Max));
-                        } else if input.key_pressed(egui::Key::ArrowRight) {
-                            // 向右滚动
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(target_rect.min.x, clip_rect.min.y),
-                                egui::Pos2::new(target_rect.max.x, clip_rect.max.y)
-                            );
-                            println!("[方向键处理] 向右滚动，temp_rect = {:?}", temp_rect);
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Min));
-                        } else if input.key_pressed(egui::Key::ArrowLeft) {
-                            // 向左滚动
-                            let temp_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(target_rect.min.x, clip_rect.min.y),
-                                egui::Pos2::new(target_rect.max.x, clip_rect.max.y)
-                            );
-                            println!("[方向键处理] 向左滚动，temp_rect = {:?}", temp_rect);
-                            ui.scroll_to_rect(temp_rect, Some(egui::Align::Max));
-                        }
-                        
+                        // Excel行为：滚动最小距离使新单元格可见（即滚动1行/列）
+                        // 使用 None 对齐：egui 自动计算最小滚动量
+                        // - 向下/向右超出视口 → 滚到视口底边/右边 = 滚1行/列
+                        // - 向上/向左超出视口 → 滚到视口顶边/左边 = 滚1行/列
+                        ui.scroll_to_rect(target_rect, None);
+
                         // 请求立即重绘，确保滚动生效
                         ui.ctx().request_repaint();
-                        
+
                         scroll_to_rect = Some(target_rect);
                     }
                     

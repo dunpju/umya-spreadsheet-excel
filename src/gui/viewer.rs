@@ -197,33 +197,21 @@ impl eframe::App for ExcelViewer {
                 ui.separator();
                 
                 // 冻结窗格布局：列标题固定顶部，行标题固定左侧
-                println!("[Viewer] 开始绘制表格");
-                
-                // 创建滚动状态
-                let vertical_scroll_id = ui.make_persistent_id("table_vertical_scroll");
-                let horizontal_scroll_id = ui.make_persistent_id("table_horizontal_scroll");
-                
-                // 外层垂直滚动
-                egui::ScrollArea::vertical()
-                    .id_salt(vertical_scroll_id)
+                // 双向滚动区域（垂直+水平），替代嵌套 ScrollArea
+                // 嵌套 ScrollArea 会导致 scroll_to_rect 无法同时作用于两个方向
+                egui::ScrollArea::both()
+                    .id_salt("table_scroll")
                     .show(ui, |ui| {
-                        // 内层水平滚动
-                        egui::ScrollArea::horizontal()
-                            .id_salt(horizontal_scroll_id)
-                            .show(ui, |ui| {
-                                draw_table_content(
-                                    ui, 
-                                    excel_data, 
-                                    self.current_sheet, 
-                                    &mut self.selected_cell,
-                                    &mut self.editing_cell,
-                                    &mut self.edit_value,
-                                    &mut self.just_entered_edit_mode,
-                                );
-                            });
+                        draw_table_content(
+                            ui,
+                            excel_data,
+                            self.current_sheet,
+                            &mut self.selected_cell,
+                            &mut self.editing_cell,
+                            &mut self.edit_value,
+                            &mut self.just_entered_edit_mode,
+                        );
                     });
-                
-                println!("[Viewer] 完成绘制表格");
                 
                 ui.separator();
                 ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
