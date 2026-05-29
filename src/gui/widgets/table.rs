@@ -112,24 +112,25 @@ pub fn draw_table_content(
     };
     
     // 检查单元格是否在可视区域内（使用全局坐标）
-    // 使用单元格中心来判断，这样可以在单元格即将离开可视区域时就触发滚动
-    // 这符合Excel的行为：活动单元格必须始终保持可见
+    // 有效可见区域 = clip_rect 减去冻结窗格的行标题（左）和列标题（上）
+    // 检查逻辑：单元格左/上边缘必须在标题之后，右/下边缘在视口之内
     let is_cell_in_viewport = |col: u32, row: u32| -> bool {
         let (x, y, width, height) = get_cell_rect(col, row);
-        // 转换为全局坐标
         let cell_rect = egui::Rect::from_min_size(
             egui::Pos2::new(x + table_top_left.x, y + table_top_left.y),
             egui::vec2(width, height)
         );
         let clip_rect = ui.clip_rect();
-        
-        // 检查单元格中心是否在可视区域内（更宽松的判断条件）
-        // 这样滚动会在单元格即将离开视口时触发，而不是完全离开后
-        let cell_center = egui::Pos2::new(
-            cell_rect.center().x,
-            cell_rect.center().y
-        );
-        clip_rect.contains(cell_center)
+
+        // 有效数据区域：左边界 = 行标题右边缘，上边界 = 列标题下边缘
+        let effective_min_x = clip_rect.min.x + header_width + border_width;
+        let effective_min_y = clip_rect.min.y + get_row_height(0) + border_width;
+
+        // 单元格四条边都必须在有效区域内
+        cell_rect.min.x >= effective_min_x
+            && cell_rect.max.x <= clip_rect.max.x
+            && cell_rect.min.y >= effective_min_y
+            && cell_rect.max.y <= clip_rect.max.y
     };
     
     // 获取单元格的全局坐标（用于滚动）
@@ -252,10 +253,23 @@ pub fn draw_table_content(
                     
                     // 使用全局坐标进行滚动
                     let target_rect = get_cell_global_rect(new_col, new_row);
+                    let clip_rect = ui.clip_rect();
                     println!("[Tab键处理] 滚动目标矩形(全局): {:?}", target_rect);
 
                     // Excel行为：滚动最小距离使新单元格可见（滚动1行/列）
-                    ui.scroll_to_rect(target_rect, None);
+                    // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
+                    let col_header_height = get_row_height(0) + border_width;
+                    let row_header_width = header_width + border_width;
+                    let effective_min_x = clip_rect.min.x + row_header_width;
+                    let effective_min_y = clip_rect.min.y + col_header_height;
+                    let mut scroll_rect = target_rect;
+                    if target_rect.min.x < effective_min_x {
+                        scroll_rect.min.x = target_rect.min.x - row_header_width;
+                    }
+                    if target_rect.min.y < effective_min_y {
+                        scroll_rect.min.y = target_rect.min.y - col_header_height;
+                    }
+                    ui.scroll_to_rect(scroll_rect, None);
                     ui.ctx().request_repaint();
                     scroll_to_rect = Some(target_rect);
                 }
@@ -366,14 +380,24 @@ pub fn draw_table_content(
                         
                         // 使用全局坐标进行滚动
                         let target_rect = get_cell_global_rect(new_col, new_row);
+                        let clip_rect = ui.clip_rect();
                         println!("[方向键处理] 滚动目标矩形(全局): {:?}", target_rect);
-                        println!("[方向键处理] 视口: {:?}", ui.clip_rect());
-                        
+                        println!("[方向键处理] 视口: {:?}", clip_rect);
+
                         // Excel行为：滚动最小距离使新单元格可见（即滚动1行/列）
-                        // 使用 None 对齐：egui 自动计算最小滚动量
-                        // - 向下/向右超出视口 → 滚到视口底边/右边 = 滚1行/列
-                        // - 向上/向左超出视口 → 滚到视口顶边/左边 = 滚1行/列
-                        ui.scroll_to_rect(target_rect, None);
+                        // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
+                        let col_header_height = get_row_height(0) + border_width;
+                        let row_header_width = header_width + border_width;
+                        let effective_min_x = clip_rect.min.x + row_header_width;
+                        let effective_min_y = clip_rect.min.y + col_header_height;
+                        let mut scroll_rect = target_rect;
+                        if target_rect.min.x < effective_min_x {
+                            scroll_rect.min.x = target_rect.min.x - row_header_width;
+                        }
+                        if target_rect.min.y < effective_min_y {
+                            scroll_rect.min.y = target_rect.min.y - col_header_height;
+                        }
+                        ui.scroll_to_rect(scroll_rect, None);
 
                         // 请求立即重绘，确保滚动生效
                         ui.ctx().request_repaint();
