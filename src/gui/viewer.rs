@@ -299,60 +299,63 @@ impl eframe::App for ExcelViewer {
                                 }
                             }
                         }
-                    });
 
-                    // 绘制数据有效性校验错误弹窗
-                    if let Some((ref title, ref msg)) = self.validation_error {
-                        let title = title.clone();
-                        let msg = msg.clone();
-                        egui::Window::new("校验错误")
-                            .title_bar(false)
-                            .resizable(false)
-                            .collapsible(false)
-                            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                            .show(ui.ctx(), |ui| {
-                                ui.set_min_width(300.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(8.0);
-                                    // 红色错误图标 + 标题
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("✖").color(egui::Color32::RED).size(18.0));
-                                        ui.strong(egui::RichText::new(&title).size(14.0));
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.label(&msg);
-                                    ui.add_space(12.0);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("重试").clicked() {
-                                            self.validation_error = None;
-                                        }
-                                        if ui.button("取消").clicked() {
-                                            // 恢复原始单元格数据
-                                            if let Some(((col, row), ref orig_value, ref orig_formula)) = self.original_cell_data {
-                                                if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                                                    let cell = sheet.cells.entry((row, col))
-                                                        .or_insert_with(crate::excel::reader::CellData::default);
-                                                    cell.value = orig_value.clone();
-                                                    cell.formula = orig_formula.clone();
-                                                    // 触发公式重算
-                                                    if orig_formula.is_empty() {
-                                                        crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
-                                                    } else {
-                                                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                        // 绘制数据有效性校验错误弹窗（覆盖在提示框上方）
+                        if let Some(cell_rect) = cell_rect {
+                            if let Some((ref title, ref msg)) = self.validation_error {
+                                let title = title.clone();
+                                let msg = msg.clone();
+                                let pos = cell_rect.left_bottom() + egui::vec2(0.0, 2.0);
+                                let popup_width = cell_rect.width().max(200.0);
+                                egui::Area::new(egui::Id::new("data_validation_error_popup"))
+                                    .fixed_pos(pos)
+                                    .order(egui::Order::Foreground)
+                                    .show(ui.ctx(), |ui| {
+                                        egui::Frame::popup(ui.style())
+                                            .fill(egui::Color32::from_rgb(255, 255, 225))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 160, 0)))
+                                            .show(ui, |ui| {
+                                                ui.set_min_width(popup_width);
+                                                ui.set_max_width(popup_width.max(300.0));
+                                                // 红色错误图标 + 标题
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("✖").color(egui::Color32::RED).size(14.0));
+                                                    ui.strong(egui::RichText::new(&title).size(12.0));
+                                                });
+                                                ui.label(egui::RichText::new(&msg).size(11.0));
+                                                ui.add_space(4.0);
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("重试").clicked() {
+                                                        self.validation_error = None;
                                                     }
-                                                }
-                                            }
-                                            self.original_cell_data = None;
-                                            self.validation_error = None;
-                                            self.editing_cell = None;
-                                            self.edit_value.clear();
-                                            self.pending_formula_save = None;
-                                        }
+                                                    if ui.button("取消").clicked() {
+                                                        // 恢复原始单元格数据
+                                                        if let Some(((col, row), ref orig_value, ref orig_formula)) = self.original_cell_data {
+                                                            if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                                                                let cell = sheet.cells.entry((row, col))
+                                                                    .or_insert_with(crate::excel::reader::CellData::default);
+                                                                cell.value = orig_value.clone();
+                                                                cell.formula = orig_formula.clone();
+                                                                // 触发公式重算
+                                                                if orig_formula.is_empty() {
+                                                                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
+                                                                } else {
+                                                                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                                                                }
+                                                            }
+                                                        }
+                                                        self.original_cell_data = None;
+                                                        self.validation_error = None;
+                                                        self.editing_cell = None;
+                                                        self.edit_value.clear();
+                                                        self.pending_formula_save = None;
+                                                    }
+                                                });
+                                            });
                                     });
-                                    ui.add_space(4.0);
-                                });
-                            });
-                    }
+                            }
+                        }
+                    });
 
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {
@@ -423,30 +426,3 @@ impl eframe::App for ExcelViewer {
     }
 }
 
-impl ExcelViewer {
-    /// 保存单元格值（公式或普通值），触发公式重算
-    fn save_cell_value(&mut self, formula_value: &str, col: u32, row: u32, excel_data: &mut ExcelData) {
-        let cell = excel_data.sheets[self.current_sheet]
-            .cells.entry((row, col))
-            .or_insert_with(|| crate::excel::reader::CellData::default());
-        if formula_value.starts_with('=') {
-            cell.formula = formula_value.to_string();
-            crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
-        } else {
-            let save_value = if let Some(ref fmt) = cell.number_format {
-                if ExcelData::is_date_format(fmt) {
-                    ExcelData::parse_date_string(formula_value)
-                        .map(|serial| serial.to_string())
-                        .unwrap_or_else(|| formula_value.to_string())
-                } else {
-                    formula_value.to_string()
-                }
-            } else {
-                formula_value.to_string()
-            };
-            cell.value = save_value;
-            cell.formula.clear();
-            crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
-        }
-    }
-}
