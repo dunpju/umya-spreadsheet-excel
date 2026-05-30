@@ -120,7 +120,7 @@ pub fn draw_name_box(
         // 设置名称框样式
         let text_style = egui::TextStyle::Body;
         let font_id = ui.style().text_styles.get(&text_style).cloned().unwrap_or_default();
-        
+
         // 名称框输入区域
         let input_response = ui.add(
             egui::TextEdit::singleline(&mut state.input_text)
@@ -129,7 +129,19 @@ pub fn draw_name_box(
                 .desired_width(80.0)
                 .hint_text("名称框")
         );
-        
+
+        // Ctrl+A 全选
+        if input_response.has_focus() && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+            let text_len = state.input_text.chars().count();
+            if let Some(mut ts) = egui::TextEdit::load_state(ui.ctx(), input_response.id) {
+                ts.cursor = egui::text::CCursorRange::two(
+                    egui::text::CCursor::default(),
+                    egui::text::CCursor::new(text_len),
+                ).into();
+                egui::TextEdit::store_state(ui.ctx(), input_response.id, ts);
+            }
+        }
+
         // 检测焦点状态
         state.has_focus = input_response.has_focus();
         
@@ -186,7 +198,19 @@ pub fn draw_name_box(
                     .hint_text("输入公式...")
                     .desired_width(400.0)
             );
-            
+
+            // Ctrl+A 全选
+            if formula_response.has_focus() && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+                let text_len = state.formula_text.chars().count();
+                if let Some(mut ts) = egui::TextEdit::load_state(ui.ctx(), formula_response.id) {
+                    ts.cursor = egui::text::CCursorRange::two(
+                        egui::text::CCursor::default(),
+                        egui::text::CCursor::new(text_len),
+                    ).into();
+                    egui::TextEdit::store_state(ui.ctx(), formula_response.id, ts);
+                }
+            }
+
             // 检测公式输入框焦点状态
             state.formula_has_focus = formula_response.has_focus();
             

@@ -551,6 +551,8 @@ fn letter_to_col(s: &str) -> Result<u32, String> {
 pub fn parse_formula(input: &str) -> Result<FormulaNode, String> {
     let trimmed = input.trim();
     let formula_str = if trimmed.starts_with('=') { &trimmed[1..] } else { trimmed };
+    // 去除 Excel 隐式交叉运算符 @（如 @IF → IF）
+    let formula_str = if formula_str.starts_with('@') { &formula_str[1..] } else { formula_str };
     // 去除 OOXML 新版函数前缀 _xlfn.（如 _xlfn.IFS → IFS）
     let preprocessed = formula_str.replace("_xlfn.", "");
     let mut lexer = Lexer::new(&preprocessed);
@@ -627,13 +629,13 @@ fn eval_unary(op: &UnOp, operand: &FormulaNode, sheet: &SheetData, eval_pos: (u3
         UnOp::Negate => {
             match val.as_number() {
                 Some(n) => FormulaValue::Number(-n),
-                None => FormulaValue::Error("#VALUE!".to_string()),
+                None => FormulaValue::Number(0.0),
             }
         }
         UnOp::Percent => {
             match val.as_number() {
                 Some(n) => FormulaValue::Number(n / 100.0),
-                None => FormulaValue::Error("#VALUE!".to_string()),
+                None => FormulaValue::Number(0.0),
             }
         }
     }
@@ -652,13 +654,14 @@ fn eval_binary(op: &BinOp, left: &FormulaNode, right: &FormulaNode, sheet: &Shee
             FormulaValue::String(format!("{}{}", ls, rs))
         }
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
+            // Excel 行为：空单元格在算术运算中等同于 0
             let ln = match lv.as_number() {
                 Some(n) => n,
-                None => return FormulaValue::Error("#VALUE!".to_string()),
+                None => 0.0,
             };
             let rn = match rv.as_number() {
                 Some(n) => n,
-                None => return FormulaValue::Error("#VALUE!".to_string()),
+                None => 0.0,
             };
             let result = match op {
                 BinOp::Add => ln + rn,
@@ -1391,6 +1394,17 @@ mod tests {
             FormulaNode::Function { name, .. } => {
                 assert_eq!(name, "IF");
             }
+            other => panic!("Expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_at_prefix() {
+        // @ 前缀是 Excel 隐式交叉运算符，应被忽略
+        let ast = parse_formula("@IF(A1>0,1,0)").unwrap();
+        // 确认解析成功
+        match ast {
+            FormulaNode::Function { ref name, .. } => assert_eq!(name, "IF"),
             other => panic!("Expected Function, got {:?}", other),
         }
     }

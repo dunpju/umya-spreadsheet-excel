@@ -543,7 +543,19 @@ pub fn draw_table_content(
                 
                 *editing_cell = Some((edit_col, edit_row));
                 *edit_value = sheet.get_cell(edit_row, edit_col)
-                    .map(|cell| cell_display_text(cell))
+                    .map(|cell| {
+                        if !cell.formula.is_empty() {
+                            // 确保公式以 = 开头，使保存逻辑正确识别为公式
+                            let f = &cell.formula;
+                            if f.starts_with('=') {
+                                f.clone()
+                            } else {
+                                format!("={}", f)
+                            }
+                        } else {
+                            cell_display_text(cell)
+                        }
+                    })
                     .unwrap_or_default();
             }
         }
@@ -624,11 +636,9 @@ pub fn draw_table_content(
         }
         
         // 如果选中了单元格但表格没有焦点，重新请求焦点
-        // 这可以防止Tab键切换焦点到其他UI元素
-        // 但在编辑模式下不强制请求焦点，让输入框能够正常获取焦点
+        // 仅在Tab键或方向键操作时请求焦点，不每帧强制抢焦点
+        // 否则会阻止名称框/公式输入框获取焦点
         if !editing_cell.is_some() && selected_cell.is_some() && input.key_pressed(egui::Key::Tab) {
-            response.request_focus();
-        } else if !editing_cell.is_some() && selected_cell.is_some() && !response.has_focus() {
             response.request_focus();
         }
         
@@ -757,9 +767,20 @@ pub fn draw_table_content(
                             };
                             
                             *editing_cell = Some((edit_col, edit_row));
-                            // 获取单元格显示文本作为编辑初始值（日期格式会转换为可读文本）
+                            // 有公式的单元格显示公式，无公式的显示值
                             *edit_value = sheet.get_cell(edit_row, edit_col)
-                                .map(|cell| cell_display_text(cell))
+                                .map(|cell| {
+                                    if !cell.formula.is_empty() {
+                                        let f = &cell.formula;
+                                        if f.starts_with('=') {
+                                            f.clone()
+                                        } else {
+                                            format!("={}", f)
+                                        }
+                                    } else {
+                                        cell_display_text(cell)
+                                    }
+                                })
                                 .unwrap_or_default();
                         }
                     }
@@ -1592,6 +1613,19 @@ pub fn draw_table_content(
                         // 自动聚焦输入框
                         if !response.has_focus() {
                             response.request_focus();
+                        }
+
+                        // Ctrl+A 全选
+                        if response.has_focus() && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+                            let text_len = edit_value.chars().count();
+                            if let Some(mut ts) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                                ts.cursor = egui::text::CCursorRange::two(
+                                    egui::text::CCursor::default(),
+                                    egui::text::CCursor::new(text_len),
+                                ).into();
+                                egui::TextEdit::store_state(ui.ctx(), response.id, ts);
+                            }
+                            ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A));
                         }
 
                         // 处理键盘事件

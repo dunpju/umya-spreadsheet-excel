@@ -211,7 +211,8 @@ impl eframe::App for ExcelViewer {
                         };
                         sheet.get_cell(target_row, target_col).map(|cell| {
                             if !cell.formula.is_empty() {
-                                cell.formula.clone()
+                                let f = &cell.formula;
+                                if f.starts_with('=') { f.clone() } else { format!("={}", f) }
                             } else if let Some(ref fmt) = cell.number_format {
                                 if ExcelData::is_date_format(fmt) {
                                     if let Ok(serial) = cell.value.parse::<f64>() {
