@@ -41,12 +41,14 @@ pub fn draw_table_content(
     editing_cell: &mut Option<(u32, u32)>,
     edit_value: &mut String,
     just_entered_edit_mode: &mut bool,
-) -> Option<egui::Rect> {
+    validation_error: &mut Option<(String, String)>,
+    original_cell_data: &mut Option<((u32, u32), String, String)>,
+) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         (sheet.max_col, sheet.max_row, sheet.frozen_rows, sheet.frozen_cols)
     } else {
-        return None;
+        return (None, None);
     };
     
     // 如果已经在编辑模式中，重置"刚进入编辑模式"标志位
@@ -209,6 +211,8 @@ pub fn draw_table_content(
     
     // 用于存储滚动目标矩形
     let mut scroll_to_rect: Option<egui::Rect> = None;
+    // 用于存储选中单元格屏幕矩形，供数据有效性弹窗定位
+    let mut selected_cell_rect: Option<egui::Rect> = None;
     
     // Tab键处理（编辑模式下）
     // 保存并退出编辑
@@ -492,34 +496,48 @@ pub fn draw_table_content(
     if save_current_edit {
         if let Some((edit_col, edit_row)) = editing_cell_for_save {
             let is_formula = edit_value.starts_with('=');
-            if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
-                let cell = sheet.cells.entry((edit_row, edit_col))
-                    .or_insert_with(CellData::default);
-                if is_formula {
-                    cell.formula = edit_value.clone();
-                } else {
-                    // 检查是否为日期格式单元格，转换日期字符串为序列号
-                    let save_value = if let Some(ref fmt) = cell.number_format {
-                        if ExcelData::is_date_format(fmt) {
-                            ExcelData::parse_date_string(edit_value)
-                                .map(|serial| serial.to_string())
-                                .unwrap_or_else(|| edit_value.clone())
-                        } else {
-                            edit_value.clone()
-                        }
-                    } else {
-                        edit_value.clone()
-                    };
-                    cell.value = save_value;
-                    cell.formula.clear();
+            // 非公式值做数据有效性校验
+            if !is_formula {
+                if let Some(sheet) = excel_data.sheets.get(current_sheet) {
+                    if let Some((title, msg)) = sheet.validate_cell(edit_col, edit_row, edit_value) {
+                        *validation_error = Some((title, msg));
+                        save_current_edit = false;
+                        clear_current_edit = false;
+                    }
                 }
             }
-            if is_formula {
-                // 公式变更需要全量求值
-                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
-            } else {
-                // 值变更只需增量求值受影响的公式
-                crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
+            // 只有校验通过才执行保存
+            if save_current_edit {
+                let is_formula = edit_value.starts_with('=');
+                if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                    let cell = sheet.cells.entry((edit_row, edit_col))
+                        .or_insert_with(CellData::default);
+                    if is_formula {
+                        cell.formula = edit_value.clone();
+                    } else {
+                        // 检查是否为日期格式单元格，转换日期字符串为序列号
+                        let save_value = if let Some(ref fmt) = cell.number_format {
+                            if ExcelData::is_date_format(fmt) {
+                                ExcelData::parse_date_string(edit_value)
+                                    .map(|serial| serial.to_string())
+                                    .unwrap_or_else(|| edit_value.clone())
+                            } else {
+                                edit_value.clone()
+                            }
+                        } else {
+                            edit_value.clone()
+                        };
+                        cell.value = save_value;
+                        cell.formula.clear();
+                    }
+                }
+                if is_formula {
+                    // 公式变更需要全量求值
+                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+                } else {
+                    // 值变更只需增量求值受影响的公式
+                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
+                }
             }
         }
     }
@@ -557,6 +575,11 @@ pub fn draw_table_content(
                         }
                     })
                     .unwrap_or_default();
+                // 保存原始单元格数据，用于校验失败时恢复
+                let orig = sheet.get_cell(edit_row, edit_col)
+                    .map(|c| (c.value.clone(), c.formula.clone()))
+                    .unwrap_or_default();
+                *original_cell_data = Some(((edit_col, edit_row), orig.0, orig.1));
             }
         }
     }
@@ -782,6 +805,11 @@ pub fn draw_table_content(
                                     }
                                 })
                                 .unwrap_or_default();
+                            // 保存原始单元格数据，用于校验失败时恢复
+                            let orig = sheet.get_cell(edit_row, edit_col)
+                                .map(|c| (c.value.clone(), c.formula.clone()))
+                                .unwrap_or_default();
+                            *original_cell_data = Some(((edit_col, edit_row), orig.0, orig.1));
                         }
                     }
                 }
@@ -1528,6 +1556,12 @@ pub fn draw_table_content(
                 0.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 112, 192)),
             );
+
+            // 保存选中单元格屏幕矩形，供数据有效性弹窗定位
+            selected_cell_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::new(sel_x, sel_y),
+                egui::vec2(sel_w, sel_h),
+            ));
         }
 
         // ========== 编辑模式：显示输入框（在冻结覆盖层之后绘制，防止覆盖层遮挡） ==========
@@ -1652,6 +1686,19 @@ pub fn draw_table_content(
                 if save_cell {
                     // 保存编辑值并触发公式重算
                     let is_formula = edit_value.starts_with('=');
+                    // 非公式值做数据有效性校验
+                    if !is_formula {
+                        if let Some(sheet) = excel_data.sheets.get(current_sheet) {
+                            if let Some((title, msg)) = sheet.validate_cell(edit_col, edit_row, edit_value) {
+                                *validation_error = Some((title, msg));
+                                save_cell = false;
+                                clear_edit = false;
+                            }
+                        }
+                    }
+                }
+                if save_cell {
+                    let is_formula = edit_value.starts_with('=');
                     if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
                         let cell = sheet.cells.entry((edit_row, edit_col))
                             .or_insert_with(CellData::default);
@@ -1738,6 +1785,6 @@ pub fn draw_table_content(
         }
     }
     
-    // 返回滚动目标矩形
-    scroll_to_rect
+    // 返回（滚动目标矩形, 选中单元格屏幕矩形）
+    (scroll_to_rect, selected_cell_rect)
 }

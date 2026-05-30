@@ -95,6 +95,57 @@ pub struct CellRange {
     pub end_col: u32,
 }
 
+/// 数据有效性类型
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataValidationType {
+    None,
+    Whole,
+    Decimal,
+    List,
+    Date,
+    Time,
+    TextLength,
+    Custom,
+}
+
+/// 数据有效性运算符
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataValidationOperator {
+    Between,
+    NotBetween,
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+/// 数据有效性信息
+#[derive(Debug, Clone)]
+pub struct DataValidationInfo {
+    /// 输入提示标题
+    pub prompt_title: String,
+    /// 输入提示内容
+    pub prompt: String,
+    /// 错误提示标题
+    pub error_title: String,
+    /// 错误提示内容
+    pub error_message: String,
+    /// 是否显示错误提示
+    pub show_error_message: bool,
+    /// 有效性类型
+    pub dv_type: DataValidationType,
+    /// 运算符
+    pub dv_operator: DataValidationOperator,
+    /// 公式1（如最小值、起始值）
+    pub formula1: String,
+    /// 公式2（如最大值、结束值）
+    pub formula2: String,
+    /// 适用的单元格范围
+    pub ranges: Vec<CellRange>,
+}
+
 impl CellRange {
     /// 创建新的单元格范围
     /// 
@@ -158,6 +209,8 @@ pub struct SheetData {
     pub frozen_rows: u32,
     /// 冻结列数（Excel 冻结窗格中的垂直分割值，0 表示无冻结）
     pub frozen_cols: u32,
+    /// 数据有效性规则列表
+    pub data_validations: Vec<DataValidationInfo>,
 }
 
 impl SheetData {
@@ -176,6 +229,7 @@ impl SheetData {
             row_heights: HashMap::new(),
             frozen_rows: 0,
             frozen_cols: 0,
+            data_validations: Vec::new(),
         }
     }
 
@@ -201,6 +255,115 @@ impl SheetData {
     /// 如果单元格在合并范围内返回 Some(&CellRange)，否则返回 None
     pub fn get_merged_range(&self, col: u32, row: u32) -> Option<&CellRange> {
         self.merged_cells.iter().find(|r| r.contains(col, row))
+    }
+
+    /// 获取指定单元格的数据有效性输入提示信息
+    ///
+    /// # 参数
+    /// * `col` - 列号
+    /// * `row` - 行号
+    ///
+    /// # 返回值
+    /// 如果单元格有数据有效性且配置了输入提示，返回 Some(&DataValidationInfo)
+    pub fn get_input_message(&self, col: u32, row: u32) -> Option<&DataValidationInfo> {
+        self.data_validations.iter().find(|dv| {
+            dv.ranges.iter().any(|r| r.contains(col, row))
+        })
+    }
+
+    /// 校验输入值是否符合数据有效性规则
+    ///
+    /// # 参数
+    /// * `col` - 列号
+    /// * `row` - 行号
+    /// * `input` - 用户输入的值
+    ///
+    /// # 返回值
+    /// 如果校验失败返回 Some((error_title, error_message))，校验通过返回 None
+    pub fn validate_cell(&self, col: u32, row: u32, input: &str) -> Option<(String, String)> {
+        let dv = self.data_validations.iter().find(|dv| {
+            dv.ranges.iter().any(|r| r.contains(col, row))
+        })?;
+
+        if !dv.show_error_message { return None; }
+        if dv.dv_type == DataValidationType::None { return None; }
+
+        let valid = match dv.dv_type {
+            DataValidationType::Date => {
+                let v = input.parse::<f64>().ok().or_else(|| ExcelData::parse_date_string(input));
+                validate_number(&v, &dv.dv_operator, &dv.formula1, &dv.formula2, true)
+            }
+            DataValidationType::Whole => {
+                let v = input.parse::<f64>();
+                if let Ok(n) = v {
+                    if n != n.trunc() { false } // 不是整数
+                    else { validate_number(&Some(n), &dv.dv_operator, &dv.formula1, &dv.formula2, false) }
+                } else { false }
+            }
+            DataValidationType::Decimal => {
+                validate_number(&input.parse::<f64>().ok(), &dv.dv_operator, &dv.formula1, &dv.formula2, false)
+            }
+            DataValidationType::List => {
+                let items: Vec<&str> = dv.formula1.split(',').map(|s| s.trim()).collect();
+                items.iter().any(|item| item.eq_ignore_ascii_case(input.trim()))
+            }
+            DataValidationType::TextLength => {
+                let len = input.chars().count() as f64;
+                validate_number(&Some(len), &dv.dv_operator, &dv.formula1, &dv.formula2, false)
+            }
+            _ => true, // Time, Custom, None 暂不严格校验
+        };
+
+        if !valid {
+            let title = if dv.error_title.is_empty() { "输入错误".to_string() } else { dv.error_title.clone() };
+            let msg = if dv.error_message.is_empty() { "输入的值不符合数据有效性规则".to_string() } else { dv.error_message.clone() };
+            Some((title, msg))
+        } else {
+            None
+        }
+    }
+}
+
+/// 数值比较校验辅助函数
+/// `value` 为已解析的数值，`date_mode` 为 true 时 formula 也作为日期解析
+fn validate_number(
+    value: &Option<f64>,
+    op: &DataValidationOperator,
+    formula1: &str,
+    formula2: &str,
+    date_mode: bool,
+) -> bool {
+    let v = match value {
+        Some(n) => *n,
+        None => return false,
+    };
+
+    let parse = |s: &str| -> Option<f64> {
+        if date_mode {
+            s.parse::<f64>().ok().or_else(|| ExcelData::parse_date_string(s))
+        } else {
+            s.parse::<f64>().ok()
+        }
+    };
+
+    let f1 = match parse(formula1) {
+        Some(n) => n,
+        None => return true, // 无法解析公式值，放行
+    };
+
+    match op {
+        DataValidationOperator::Between => {
+            if let Some(f2) = parse(formula2) { v >= f1 && v <= f2 } else { true }
+        }
+        DataValidationOperator::NotBetween => {
+            if let Some(f2) = parse(formula2) { !(v >= f1 && v <= f2) } else { true }
+        }
+        DataValidationOperator::Equal => (v - f1).abs() < f64::EPSILON,
+        DataValidationOperator::NotEqual => (v - f1).abs() >= f64::EPSILON,
+        DataValidationOperator::GreaterThan => v > f1,
+        DataValidationOperator::GreaterThanOrEqual => v >= f1,
+        DataValidationOperator::LessThan => v < f1,
+        DataValidationOperator::LessThanOrEqual => v <= f1,
     }
 }
 
@@ -326,6 +489,66 @@ impl ExcelData {
                         // vertical_split   → XML ySplit → 冻结行数（垂直位置）
                         sheet.frozen_cols = *pane.get_horizontal_split() as u32;
                         sheet.frozen_rows = *pane.get_vertical_split() as u32;
+                    }
+                }
+            }
+
+            // 读取数据有效性规则
+            if let Some(dvs) = worksheet.get_data_validations() {
+                for dv in dvs.get_data_validation_list() {
+                    let show_input = *dv.get_show_input_message();
+                    let show_error = *dv.get_show_error_message();
+                    let title = dv.get_prompt_title().to_string();
+                    let prompt = dv.get_prompt().to_string();
+                    let err_title = dv.get_error_title().to_string();
+                    let err_msg = dv.get_error_message().to_string();
+
+                    if !show_input && !show_error { continue; }
+
+                    let dv_type = match dv.get_type() {
+                        umya_spreadsheet::DataValidationValues::Whole => DataValidationType::Whole,
+                        umya_spreadsheet::DataValidationValues::Decimal => DataValidationType::Decimal,
+                        umya_spreadsheet::DataValidationValues::List => DataValidationType::List,
+                        umya_spreadsheet::DataValidationValues::Date => DataValidationType::Date,
+                        umya_spreadsheet::DataValidationValues::Time => DataValidationType::Time,
+                        umya_spreadsheet::DataValidationValues::TextLength => DataValidationType::TextLength,
+                        umya_spreadsheet::DataValidationValues::Custom => DataValidationType::Custom,
+                        _ => DataValidationType::None,
+                    };
+                    let dv_operator = match dv.get_operator() {
+                        umya_spreadsheet::DataValidationOperatorValues::Between => DataValidationOperator::Between,
+                        umya_spreadsheet::DataValidationOperatorValues::NotBetween => DataValidationOperator::NotBetween,
+                        umya_spreadsheet::DataValidationOperatorValues::Equal => DataValidationOperator::Equal,
+                        umya_spreadsheet::DataValidationOperatorValues::NotEqual => DataValidationOperator::NotEqual,
+                        umya_spreadsheet::DataValidationOperatorValues::GreaterThan => DataValidationOperator::GreaterThan,
+                        umya_spreadsheet::DataValidationOperatorValues::GreaterThanOrEqual => DataValidationOperator::GreaterThanOrEqual,
+                        umya_spreadsheet::DataValidationOperatorValues::LessThan => DataValidationOperator::LessThan,
+                        umya_spreadsheet::DataValidationOperatorValues::LessThanOrEqual => DataValidationOperator::LessThanOrEqual,
+                    };
+
+                    let mut ranges = Vec::new();
+                    for range in dv.get_sequence_of_references().get_range_collection() {
+                        let sc = range.get_coordinate_start_col().map(|c| *c.get_num());
+                        let sr = range.get_coordinate_start_row().map(|r| *r.get_num());
+                        let ec = range.get_coordinate_end_col().map(|c| *c.get_num());
+                        let er = range.get_coordinate_end_row().map(|r| *r.get_num());
+                        if let (Some(sc), Some(sr), Some(ec), Some(er)) = (sc, sr, ec, er) {
+                            ranges.push(CellRange::new(sr, sc, er, ec));
+                        }
+                    }
+                    if !ranges.is_empty() {
+                        sheet.data_validations.push(DataValidationInfo {
+                            prompt_title: title,
+                            prompt,
+                            error_title: err_title,
+                            error_message: err_msg,
+                            show_error_message: show_error,
+                            dv_type,
+                            dv_operator,
+                            formula1: dv.get_formula1().to_string(),
+                            formula2: dv.get_formula2().to_string(),
+                            ranges,
+                        });
                     }
                 }
             }
