@@ -16,6 +16,42 @@ use crate::gui::widgets::{
 };
 use std::sync::mpsc::Receiver;
 
+/// 右键菜单状态
+#[derive(Debug)]
+pub struct ContextMenuState {
+    /// 是否可见
+    pub visible: bool,
+    /// 弹出位置（屏幕坐标）
+    pub position: egui::Pos2,
+    /// 右键点击的目标单元格 (col, row)
+    pub target_cell: Option<(u32, u32)>,
+    /// 插入行数
+    pub insert_rows_count: u32,
+    /// 插入列数
+    pub insert_cols_count: u32,
+}
+
+/// 右键菜单操作类型
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContextAction {
+    InsertRowAbove,
+    InsertRowBelow,
+    InsertColumnLeft,
+    InsertColumnRight,
+}
+
+impl Default for ContextMenuState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            position: egui::Pos2::ZERO,
+            target_cell: None,
+            insert_rows_count: 1,
+            insert_cols_count: 1,
+        }
+    }
+}
+
 /// Excel 查看器主结构体，管理所有 UI 状态和数据
 pub struct ExcelViewer {
     /// 当前加载的 Excel 数据（未加载时为 None）
@@ -48,6 +84,8 @@ pub struct ExcelViewer {
     pub validation_error: Option<(String, String)>, // (title, message)
     /// 编辑前的原始单元格数据，用于校验失败恢复
     pub original_cell_data: Option<((u32, u32), String, String)>, // ((col, row), value, formula)
+    /// 右键菜单状态
+    pub context_menu: ContextMenuState,
     /// 当前加载的文件路径
     pub file_path: Option<String>,
 }
@@ -71,6 +109,7 @@ impl ExcelViewer {
             pending_formula_save: None,
             validation_error: None,
             original_cell_data: None,
+            context_menu: ContextMenuState::default(),
             file_path: None,
         }
     }
@@ -269,6 +308,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.just_entered_edit_mode,
                             &mut self.validation_error,
                             &mut self.original_cell_data,
+                            &mut self.context_menu,
                         );
 
                         // 绘制数据有效性输入提示弹窗
@@ -356,6 +396,133 @@ impl eframe::App for ExcelViewer {
                             }
                         }
                     });
+
+                    // 绘制右键上下文菜单
+                    if self.context_menu.visible {
+                        let menu_pos = self.context_menu.position;
+
+                        // 收集操作结果，避免闭包内多重借用
+                        let mut pending_action: Option<ContextAction> = None;
+
+                        egui::Area::new(egui::Id::new("context_menu"))
+                            .fixed_pos(menu_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .fill(egui::Color32::WHITE)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(220.0);
+                                        ui.vertical(|ui| {
+                                            // 插入行
+                                            ui.horizontal(|ui| {
+                                                if ui.button("在上方插入行").clicked() {
+                                                    pending_action = Some(ContextAction::InsertRowAbove);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.insert_rows_count)
+                                                    .range(1..=1000)
+                                                    .speed(0.1));
+                                                ui.label("行");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("在下方插入行").clicked() {
+                                                    pending_action = Some(ContextAction::InsertRowBelow);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.insert_rows_count)
+                                                    .range(1..=1000)
+                                                    .speed(0.1));
+                                                ui.label("行");
+                                            });
+
+                                            ui.separator();
+
+                                            // 插入列
+                                            ui.horizontal(|ui| {
+                                                if ui.button("在左侧插入列").clicked() {
+                                                    pending_action = Some(ContextAction::InsertColumnLeft);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.insert_cols_count)
+                                                    .range(1..=1000)
+                                                    .speed(0.1));
+                                                ui.label("列");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("在右侧插入列").clicked() {
+                                                    pending_action = Some(ContextAction::InsertColumnRight);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.insert_cols_count)
+                                                    .range(1..=1000)
+                                                    .speed(0.1));
+                                                ui.label("列");
+                                            });
+                                        });
+                                    });
+                            });
+
+                        // 执行插入操作（在闭包外处理，避免借用冲突）
+                        if let Some(action) = pending_action {
+                            if let Some((col, row)) = self.context_menu.target_cell {
+                                // 先关闭编辑状态
+                                self.editing_cell = None;
+                                self.edit_value.clear();
+                                self.original_cell_data = None;
+                                self.validation_error = None;
+
+                                if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                                    // 计算锚点：合并单元格取合并边界
+                                    let (anchor_col, anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
+                                        match action {
+                                            ContextAction::InsertRowAbove => (col, mr.start_row),
+                                            ContextAction::InsertRowBelow => (col, mr.end_row),
+                                            ContextAction::InsertColumnLeft => (mr.start_col, row),
+                                            ContextAction::InsertColumnRight => (mr.end_col, row),
+                                        }
+                                    } else {
+                                        (col, row)
+                                    };
+
+                                    let n = self.context_menu.insert_rows_count;
+                                    let m = self.context_menu.insert_cols_count;
+
+                                    match action {
+                                        ContextAction::InsertRowAbove => {
+                                            sheet.insert_rows(anchor_row, n, false);
+                                        }
+                                        ContextAction::InsertRowBelow => {
+                                            sheet.insert_rows(anchor_row, n, true);
+                                        }
+                                        ContextAction::InsertColumnLeft => {
+                                            sheet.insert_columns(anchor_col, m, false);
+                                        }
+                                        ContextAction::InsertColumnRight => {
+                                            sheet.insert_columns(anchor_col, m, true);
+                                        }
+                                    }
+                                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                                }
+                            }
+                            self.context_menu.visible = false;
+                        }
+
+                        // 点击菜单外部关闭
+                        let menu_id = egui::Id::new("context_menu");
+                        let menu_area = ui.ctx().memory(|mem| {
+                            mem.area_rect(menu_id)
+                        });
+                        if let Some(menu_rect) = menu_area {
+                            if ui.input(|i| i.pointer.any_click()) {
+                                if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
+                                    if !menu_rect.contains(hover) {
+                                        self.context_menu.visible = false;
+                                    }
+                                }
+                            }
+                        }
+                        // Escape 关闭
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.context_menu.visible = false;
+                        }
+                    }
 
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {

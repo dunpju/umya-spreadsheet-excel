@@ -43,6 +43,7 @@ pub fn draw_table_content(
     just_entered_edit_mode: &mut bool,
     validation_error: &mut Option<(String, String)>,
     original_cell_data: &mut Option<((u32, u32), String, String)>,
+    context_menu: &mut crate::gui::viewer::ContextMenuState,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -811,6 +812,46 @@ pub fn draw_table_content(
                                 .unwrap_or_default();
                             *original_cell_data = Some(((edit_col, edit_row), orig.0, orig.1));
                         }
+                    }
+                }
+            }
+        }
+
+        // 右键点击：打开上下文菜单
+        if response.secondary_clicked() {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
+                let click_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
+                let click_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
+
+                let mut clicked_col: Option<u32> = None;
+                for (i, &width) in col_cumulative_width.iter().enumerate() {
+                    if click_x < width && i > 1 {
+                        clicked_col = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+                let mut clicked_row: Option<u32> = None;
+                for (i, &height) in row_cumulative_height.iter().enumerate() {
+                    if click_y < height && i > 0 {
+                        clicked_row = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+
+                if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
+                    if col > 0 && row > 0 {
+                        *selected_cell = Some((col, row));
+                        let (default_rows, default_cols) = (
+                            sheet.default_insert_count(col, row, true),
+                            sheet.default_insert_count(col, row, false),
+                        );
+                        context_menu.visible = true;
+                        context_menu.position = pos;
+                        context_menu.target_cell = Some((col, row));
+                        context_menu.insert_rows_count = default_rows;
+                        context_menu.insert_cols_count = default_cols;
                     }
                 }
             }

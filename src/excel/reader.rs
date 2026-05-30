@@ -322,6 +322,190 @@ impl SheetData {
             None
         }
     }
+
+    /// 获取默认插入数量：普通单元格返回 1，合并单元格返回对应维度的跨度
+    pub fn default_insert_count(&self, col: u32, row: u32, is_row: bool) -> u32 {
+        if let Some(mr) = self.get_merged_range(col, row) {
+            if is_row {
+                mr.end_row - mr.start_row + 1
+            } else {
+                mr.end_col - mr.start_col + 1
+            }
+        } else {
+            1
+        }
+    }
+
+    /// 在指定位置插入 N 行
+    ///
+    /// # 参数
+    /// * `anchor_row` - 锚点行号
+    /// * `n` - 插入行数
+    /// * `after` - true 表示在锚点下方插入，false 表示在锚点上方插入
+    pub fn insert_rows(&mut self, anchor_row: u32, n: u32, after: bool) {
+        let insert_at = if after { anchor_row + 1 } else { anchor_row };
+
+        // 1. 移动单元格
+        let mut new_cells = HashMap::new();
+        for ((row, col), cell_data) in self.cells.drain() {
+            let new_row = if row >= insert_at { row + n } else { row };
+            new_cells.insert((new_row, col), cell_data);
+        }
+        self.cells = new_cells;
+
+        // 2. 处理合并单元格：整体下移 / 跨越扩展 / 不动
+        for mr in &mut self.merged_cells {
+            if mr.start_row >= insert_at {
+                // 整个范围在插入点下方 → 整体下移
+                mr.start_row += n;
+                mr.end_row += n;
+            } else if mr.end_row >= insert_at {
+                // 跨越插入线 → 扩展（不拆分）
+                mr.end_row += n;
+            }
+            // else: 完全在上方，不变
+        }
+
+        // 3. 移动行高
+        let mut new_heights = HashMap::new();
+        for (row, height) in self.row_heights.drain() {
+            let new_row = if row >= insert_at { row + n } else { row };
+            new_heights.insert(new_row, height);
+        }
+        self.row_heights = new_heights;
+
+        // 4. 更新 max_row
+        self.max_row += n;
+
+        // 5. 处理数据有效性范围
+        for dv in &mut self.data_validations {
+            for r in &mut dv.ranges {
+                if r.start_row >= insert_at {
+                    r.start_row += n;
+                    r.end_row += n;
+                } else if r.end_row >= insert_at {
+                    r.end_row += n;
+                }
+            }
+        }
+
+        // 6. 新行样式继承：从相邻行（原 insert_at 行，现已移到 insert_at + n）复制样式
+        // 收集需要继承样式的列
+        let style_cols: Vec<u32> = self.cells.iter()
+            .filter(|((row, _), _)| *row >= insert_at && *row <= insert_at + n + self.max_row)
+            .map(|((_, col), _)| *col)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut new_style_cells: Vec<((u32, u32), CellData)> = Vec::new();
+        for col in style_cols {
+            // 从 insert_at + n 处（即原来的 insert_at 行）获取样式模板
+            if let Some(template) = self.cells.get(&(insert_at + n, col)) {
+                let styled = CellData {
+                    value: String::new(),
+                    raw_number: None,
+                    formula: String::new(),
+                    alignment: template.alignment.clone(),
+                    background_color: template.background_color,
+                    font_size: template.font_size,
+                    font_color: template.font_color,
+                    number_format: template.number_format.clone(),
+                };
+                for offset in 0..n {
+                    let new_row = insert_at + offset;
+                    if !self.cells.contains_key(&(new_row, col)) {
+                        new_style_cells.push(((new_row, col), styled.clone()));
+                    }
+                }
+            }
+        }
+        for (key, cell) in new_style_cells {
+            self.cells.insert(key, cell);
+        }
+    }
+
+    /// 在指定位置插入 M 列
+    ///
+    /// # 参数
+    /// * `anchor_col` - 锚点列号
+    /// * `m` - 插入列数
+    /// * `after` - true 表示在锚点右侧插入，false 表示在锚点左侧插入
+    pub fn insert_columns(&mut self, anchor_col: u32, m: u32, after: bool) {
+        let insert_at = if after { anchor_col + 1 } else { anchor_col };
+
+        // 1. 移动单元格
+        let mut new_cells = HashMap::new();
+        for ((row, col), cell_data) in self.cells.drain() {
+            let new_col = if col >= insert_at { col + m } else { col };
+            new_cells.insert((row, new_col), cell_data);
+        }
+        self.cells = new_cells;
+
+        // 2. 处理合并单元格
+        for mr in &mut self.merged_cells {
+            if mr.start_col >= insert_at {
+                mr.start_col += m;
+                mr.end_col += m;
+            } else if mr.end_col >= insert_at {
+                mr.end_col += m;
+            }
+        }
+
+        // 3. 移动列宽
+        let mut new_widths = HashMap::new();
+        for (col, width) in self.column_widths.drain() {
+            let new_col = if col >= insert_at { col + m } else { col };
+            new_widths.insert(new_col, width);
+        }
+        self.column_widths = new_widths;
+
+        // 4. 更新 max_col
+        self.max_col += m;
+
+        // 5. 处理数据有效性范围
+        for dv in &mut self.data_validations {
+            for r in &mut dv.ranges {
+                if r.start_col >= insert_at {
+                    r.start_col += m;
+                    r.end_col += m;
+                } else if r.end_col >= insert_at {
+                    r.end_col += m;
+                }
+            }
+        }
+
+        // 6. 新列样式继承：从相邻列复制样式
+        let style_rows: Vec<u32> = self.cells.iter()
+            .filter(|((_, col), _)| *col >= insert_at)
+            .map(|((row, _), _)| *row)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut new_style_cells: Vec<((u32, u32), CellData)> = Vec::new();
+        for row in style_rows {
+            if let Some(template) = self.cells.get(&(row, insert_at + m)) {
+                let styled = CellData {
+                    value: String::new(),
+                    raw_number: None,
+                    formula: String::new(),
+                    alignment: template.alignment.clone(),
+                    background_color: template.background_color,
+                    font_size: template.font_size,
+                    font_color: template.font_color,
+                    number_format: template.number_format.clone(),
+                };
+                for offset in 0..m {
+                    let new_col = insert_at + offset;
+                    if !self.cells.contains_key(&(row, new_col)) {
+                        new_style_cells.push(((row, new_col), styled.clone()));
+                    }
+                }
+            }
+        }
+        for (key, cell) in new_style_cells {
+            self.cells.insert(key, cell);
+        }
+    }
 }
 
 /// 数值比较校验辅助函数
