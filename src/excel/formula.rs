@@ -4,7 +4,7 @@
 //! 使用递归下降解析器将公式字符串解析为 AST，然后通过拓扑排序处理依赖关系并求值。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::excel::reader::SheetData;
+use crate::excel::reader::{ExcelData, SheetData};
 
 // ========== AST 类型定义 ==========
 
@@ -569,6 +569,14 @@ fn get_cell_value(sheet: &SheetData, row: u32, col: u32) -> FormulaValue {
                 FormulaValue::Blank
             } else if let Ok(n) = cell.value.parse::<f64>() {
                 FormulaValue::Number(n)
+            } else if let Some(n) = cell.raw_number {
+                // 显示值无法解析为数字时（如日期 "2025/7/1"），
+                // 使用原始数值（Excel 日期序列号等）供公式计算
+                FormulaValue::Number(n)
+            } else if let Some(serial) = ExcelData::parse_date_string(&cell.value) {
+                // 值为格式化日期字符串（如 "2026/02/06"），解析回序列号供公式计算。
+                // parse_date_string 只匹配严格的三段日期格式，不会误匹配普通文本。
+                FormulaValue::Number(serial)
             } else {
                 match cell.value.to_uppercase().as_str() {
                     "TRUE" => FormulaValue::Boolean(true),
@@ -1153,6 +1161,40 @@ mod tests {
             });
         }
         sheet
+    }
+
+    /// 创建带日期格式的工作表
+    /// cells: ((row, col), value, number_format)
+    fn make_date_sheet(cells: Vec<((u32, u32), &str, &str)>) -> SheetData {
+        let mut sheet = SheetData::new("Test".to_string());
+        for ((row, col), value, number_format) in cells {
+            sheet.cells.insert((row, col), CellData {
+                value: value.to_string(),
+                number_format: Some(number_format.to_string()),
+                ..CellData::default()
+            });
+        }
+        sheet
+    }
+
+    #[test]
+    fn test_eval_date_cell_subtraction() {
+        // B5(row=5, col=2) 是日期 "2026/02/06"，B7 公式 =IF(B5="","",B5-TODAY())
+        let mut sheet = make_date_sheet(vec![
+            ((5, 2), "2026/02/06", "yyyy/m/d"),
+            ((7, 2), "", "General"),
+        ]);
+        sheet.cells.get_mut(&(7, 2)).unwrap().formula = r#"IF(B5="","",B5-TODAY())"#.to_string();
+        sheet.max_row = 7;
+        sheet.max_col = 2;
+        evaluate_sheet(&mut sheet);
+        let result = &sheet.cells.get(&(7, 2)).unwrap().value;
+        // B5 序列号 45858 减去 TODAY 序列号，结果应为负数（未来日期 - 今天）
+        // 不应返回 #VALUE!
+        assert_ne!(result, "#VALUE!", "日期单元格减法不应返回 #VALUE!");
+        let n: f64 = result.parse().expect("结果应为数字");
+        // 2026/02/06 减今天应为一个较大的负数（约 -250 左右）
+        assert!(n < 0.0, "2026/02/06 减今天应为负数，实际: {}", n);
     }
 
     #[test]

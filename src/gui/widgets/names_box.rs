@@ -184,7 +184,7 @@ pub fn draw_name_box(
                 egui::TextEdit::singleline(&mut state.formula_text)
                     .font(font_id)
                     .hint_text("输入公式...")
-                    .desired_width(200.0)
+                    .desired_width(400.0)
             );
             
             // 检测公式输入框焦点状态

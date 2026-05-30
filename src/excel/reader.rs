@@ -50,6 +50,8 @@ impl Default for CellAlignment {
 pub struct CellData {
     /// 单元格的显示值
     pub value: String,
+    /// 单元格的原始数值（如日期序列号等，用于公式计算）
+    pub raw_number: Option<f64>,
     /// 单元格的公式（如存在）
     pub formula: String,
     /// 单元格对齐方式
@@ -69,6 +71,7 @@ impl Default for CellData {
     fn default() -> Self {
         Self {
             value: String::new(),
+            raw_number: None,
             formula: String::new(),
             alignment: CellAlignment::default(),
             background_color: None,
@@ -241,11 +244,13 @@ impl ExcelData {
                     // umya-spreadsheet 的 get_cell 方法期望 (col, row) 顺序（符合 Excel 惯例）
                     if let Some(cell) = worksheet.get_cell((col_idx, row_idx)) {
                         let value = cell.get_value().to_string();
+                        let raw_number = cell.get_value_number();
                         let style = worksheet.get_style((col_idx, row_idx));
                         let (alignment, background_color, font_size, font_color, number_format) = Self::parse_style(style, theme);
 
                         let cell_data = CellData {
                             value,
+                            raw_number,
                             formula: cell.get_formula().to_string(),
                             alignment,
                             background_color,
