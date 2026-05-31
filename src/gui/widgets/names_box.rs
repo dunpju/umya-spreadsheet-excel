@@ -170,16 +170,36 @@ pub fn draw_name_box(
         
         // 显示下拉菜单
         if state.show_dropdown {
-            egui::Area::new(egui::Id::new("name_box_dropdown"))
-                .fixed_pos(dropdown_response.rect.left_top())
+            let dropdown_id = egui::Id::new("name_box_dropdown");
+            egui::Area::new(dropdown_id)
+                .fixed_pos(dropdown_response.rect.left_bottom() + egui::vec2(0.0, 2.0))
+                .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_min_width(150.0);
-                        ui.label("定义名称...");
+                        if ui.button("定义名称...").clicked() {
+                            state.show_dropdown = false;
+                        }
                         ui.separator();
-                        ui.label("管理名称...");
+                        if ui.button("管理名称...").clicked() {
+                            state.show_dropdown = false;
+                        }
                     });
                 });
+            // 点击菜单外部或按 Escape 关闭
+            let menu_area = ui.ctx().memory(|mem| mem.area_rect(dropdown_id));
+            if let Some(menu_rect) = menu_area {
+                if ui.input(|i| i.pointer.any_click()) {
+                    if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
+                        if !menu_rect.contains(hover) && !dropdown_response.rect.contains(hover) {
+                            state.show_dropdown = false;
+                        }
+                    }
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                state.show_dropdown = false;
+            }
         }
         
         // 分隔线
