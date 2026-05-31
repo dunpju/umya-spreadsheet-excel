@@ -82,6 +82,8 @@ pub struct ExcelViewer {
     pub pending_formula_save: Option<String>,
     /// 数据有效性校验错误弹窗
     pub validation_error: Option<(String, String)>, // (title, message)
+    /// 校验错误弹窗的固定位置（记录触发校验时的单元格位置，不随选中变化）
+    pub validation_error_pos: Option<egui::Pos2>,
     /// 编辑前的原始单元格数据，用于校验失败恢复
     pub original_cell_data: Option<((u32, u32), String, String)>, // ((col, row), value, formula)
     /// 右键菜单状态
@@ -108,6 +110,7 @@ impl ExcelViewer {
             name_box_state: NameBoxState::default(),
             pending_formula_save: None,
             validation_error: None,
+            validation_error_pos: None,
             original_cell_data: None,
             context_menu: ContextMenuState::default(),
             file_path: None,
@@ -340,13 +343,19 @@ impl eframe::App for ExcelViewer {
                             }
                         }
 
-                        // 绘制数据有效性校验错误弹窗（覆盖在提示框上方）
-                        if let Some(cell_rect) = cell_rect {
-                            if let Some((ref title, ref msg)) = self.validation_error {
+                        // 首次记录校验错误弹窗位置（固定在触发校验的单元格下方）
+                        if self.validation_error.is_some() && self.validation_error_pos.is_none() {
+                            if let Some(cr) = cell_rect {
+                                self.validation_error_pos = Some(cr.left_bottom() + egui::vec2(0.0, 2.0));
+                            }
+                        }
+
+                        // 绘制数据有效性校验错误弹窗（使用固定位置，不随选中单元格变化）
+                        if let Some((ref title, ref msg)) = self.validation_error {
+                            if let Some(pos) = self.validation_error_pos {
                                 let title = title.clone();
                                 let msg = msg.clone();
-                                let pos = cell_rect.left_bottom() + egui::vec2(0.0, 2.0);
-                                let popup_width = cell_rect.width().max(200.0);
+                                let popup_width = 200.0;
                                 egui::Area::new(egui::Id::new("data_validation_error_popup"))
                                     .fixed_pos(pos)
                                     .order(egui::Order::Foreground)
@@ -367,6 +376,7 @@ impl eframe::App for ExcelViewer {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("重试").clicked() {
                                                         self.validation_error = None;
+                                                        self.validation_error_pos = None;
                                                     }
                                                     if ui.button("取消").clicked() {
                                                         // 恢复原始单元格数据
@@ -386,6 +396,7 @@ impl eframe::App for ExcelViewer {
                                                         }
                                                         self.original_cell_data = None;
                                                         self.validation_error = None;
+                                                        self.validation_error_pos = None;
                                                         self.editing_cell = None;
                                                         self.edit_value.clear();
                                                         self.pending_formula_save = None;
@@ -467,6 +478,7 @@ impl eframe::App for ExcelViewer {
                                 self.edit_value.clear();
                                 self.original_cell_data = None;
                                 self.validation_error = None;
+                                self.validation_error_pos = None;
 
                                 if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
                                     // 计算锚点：合并单元格取合并边界

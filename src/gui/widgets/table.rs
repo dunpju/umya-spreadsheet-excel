@@ -201,7 +201,10 @@ pub fn draw_table_content(
             egui::vec2(width, height)
         )
     };
-    
+
+    // 校验错误弹窗显示时，锁定表格交互（禁止键盘导航、点击选中等操作）
+    let validation_error_active = validation_error.is_some();
+
     // 键盘事件处理
     let input = ui.input(|i| i.clone());
     let mut save_current_edit = false;
@@ -209,7 +212,7 @@ pub fn draw_table_content(
     let mut enter_edit_mode = false;
     let mut new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
-    
+
     // 用于存储滚动目标矩形
     let mut scroll_to_rect: Option<egui::Rect> = None;
     // 用于存储选中单元格屏幕矩形，供数据有效性弹窗定位
@@ -585,6 +588,20 @@ pub fn draw_table_content(
         }
     }
 
+    // 校验弹窗锁定时消费所有按键，防止穿透
+    if validation_error_active {
+        ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+            i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+        });
+    }
+
     // 现在开始渲染（获取不可变借用）
     if let Some(sheet) = excel_data.get_sheet(current_sheet) {
         // 表格渲染常量定义
@@ -736,8 +753,8 @@ pub fn draw_table_content(
         let fr = sheet.frozen_rows;
         let fc = sheet.frozen_cols;
 
-        // 处理点击事件
-        if response.clicked() {
+        // 处理点击事件（校验错误弹窗显示时禁止点击）
+        if response.clicked() && !validation_error_active {
             if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                 // 冻结区域在视口上位置固定，不随滚动变化
                 // 因此需要根据点击位置是否在冻结区域内，选择不同的坐标参考系
@@ -817,8 +834,8 @@ pub fn draw_table_content(
             }
         }
 
-        // 右键点击：打开上下文菜单
-        if response.secondary_clicked() {
+        // 右键点击：打开上下文菜单（校验错误弹窗显示时禁止）
+        if response.secondary_clicked() && !validation_error_active {
             if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                 let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
                 let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
