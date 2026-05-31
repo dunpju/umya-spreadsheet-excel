@@ -53,12 +53,43 @@ impl Default for ContextMenuState {
 }
 
 /// 设置面板状态
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SettingsPanelState {
     /// 是否显示设置面板
     pub visible: bool,
     /// 当前选中的设置页
     pub active_page: Option<SettingsPage>,
+    // 合并配置参数
+    /// 列范围起始
+    pub merge_col_start: u32,
+    /// 列范围结束
+    pub merge_col_end: u32,
+    /// 横向每 N 个单元格合并
+    pub merge_col_group: u32,
+    /// 行范围起始
+    pub merge_row_start: u32,
+    /// 行范围结束
+    pub merge_row_end: u32,
+    /// 纵向每 N 个单元格合并
+    pub merge_row_group: u32,
+    /// 保存成功提示计时（秒）
+    pub save_success_timer: f32,
+}
+
+impl Default for SettingsPanelState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            active_page: None,
+            merge_col_start: 0,
+            merge_col_end: 0,
+            merge_col_group: 0,
+            merge_row_start: 0,
+            merge_row_end: 0,
+            merge_row_group: 0,
+            save_success_timer: 0.0,
+        }
+    }
 }
 
 /// 设置页类型
@@ -225,18 +256,34 @@ impl eframe::App for ExcelViewer {
         // 绘制设置面板
         if self.settings_panel.visible {
             let active_page = self.settings_panel.active_page;
-            let title = match active_page {
-                Some(SettingsPage::ColumnConfig) => "列配置",
-                Some(SettingsPage::RowConfig) => "行配置",
-                None => "设置",
-            };
-            egui::Window::new(title)
-                .open(&mut self.settings_panel.visible)
+            let title = "插入配置";
+            let mut keep_open = true;
+            egui::Window::new("settings_panel")
+                .title_bar(false)
+                .open(&mut keep_open)
                 .resizable(false)
                 .collapsible(false)
-                .default_pos(ctx.screen_rect().center() - egui::vec2(150.0, 100.0))
+                .default_pos(ctx.screen_rect().center() - egui::vec2(190.0, 80.0))
                 .show(ctx, |ui| {
-                    ui.set_min_width(300.0);
+                    ui.set_min_width(420.0);
+                    // 自定义小字体标题栏
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(title).size(12.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("X").clicked() {
+                                self.settings_panel.visible = false;
+                            }
+                            if ui.button("保存").clicked() {
+                                // TODO: 执行合并操作
+                                self.settings_panel.save_success_timer = 2.0;
+                            }
+                            if self.settings_panel.save_success_timer > 0.0 {
+                                ui.label(egui::RichText::new("保存成功").size(11.0).color(egui::Color32::GREEN));
+                                self.settings_panel.save_success_timer -= ui.input(|i| i.stable_dt);
+                            }
+                        });
+                    });
+                    ui.separator();
                     // 选项卡切换
                     ui.horizontal(|ui| {
                         if ui.selectable_label(active_page == Some(SettingsPage::ColumnConfig), "列配置").clicked() {
@@ -251,14 +298,47 @@ impl eframe::App for ExcelViewer {
                     match active_page {
                         Some(SettingsPage::ColumnConfig) => {
                             ui.vertical(|ui| {
-                                ui.label("列配置功能");
-                                ui.add_space(4.0);
-                                ui.colored_label(egui::Color32::GRAY, "（功能开发中...）");
+                                // 合并配置块
+                                ui.group(|ui| {
+                                    ui.label(egui::RichText::new("合并").size(12.0).strong());
+                                    ui.add_space(6.0);
+                                    // 列范围 + 合并数量在同一行
+                                    ui.horizontal(|ui| {
+                                        ui.label("列范围:");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_col_start)
+                                            .range(0..=10000).speed(0.1));
+                                        ui.label("列 至");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_col_end)
+                                            .range(0..=10000).speed(0.1));
+                                        ui.label("列");
+                                        ui.separator();
+                                        ui.label("横向每");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_col_group)
+                                            .range(0..=1000).speed(0.1));
+                                        ui.label("个单元格进行合并");
+                                    });
+                                    ui.add_space(6.0);
+                                    // 行范围 + 合并数量在同一行
+                                    ui.horizontal(|ui| {
+                                        ui.label("行范围:");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_row_start)
+                                            .range(0..=10000).speed(0.1));
+                                        ui.label("行 至");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_row_end)
+                                            .range(0..=10000).speed(0.1));
+                                        ui.label("行");
+                                        ui.separator();
+                                        ui.label("纵向每");
+                                        ui.add(egui::DragValue::new(&mut self.settings_panel.merge_row_group)
+                                            .range(0..=1000).speed(0.1));
+                                        ui.label("个单元格进行合并");
+                                    });
+                                });
                             });
                         }
                         Some(SettingsPage::RowConfig) => {
                             ui.vertical(|ui| {
-                                ui.label("行配置功能");
+                                ui.label("列配置功能");
                                 ui.add_space(4.0);
                                 ui.colored_label(egui::Color32::GRAY, "（功能开发中...）");
                             });
@@ -268,8 +348,11 @@ impl eframe::App for ExcelViewer {
                         }
                     }
                 });
+            if !keep_open {
+                self.settings_panel.visible = false;
+            }
         }
-        
+
         // 检查异步加载结果
         self.check_load_result();
 
