@@ -52,6 +52,22 @@ impl Default for ContextMenuState {
     }
 }
 
+/// 设置面板状态
+#[derive(Debug, Default)]
+pub struct SettingsPanelState {
+    /// 是否显示设置面板
+    pub visible: bool,
+    /// 当前选中的设置页
+    pub active_page: Option<SettingsPage>,
+}
+
+/// 设置页类型
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsPage {
+    ColumnConfig,
+    RowConfig,
+}
+
 /// Excel 查看器主结构体，管理所有 UI 状态和数据
 pub struct ExcelViewer {
     /// 当前加载的 Excel 数据（未加载时为 None）
@@ -88,6 +104,8 @@ pub struct ExcelViewer {
     pub original_cell_data: Option<((u32, u32), String, String)>, // ((col, row), value, formula)
     /// 右键菜单状态
     pub context_menu: ContextMenuState,
+    /// 设置面板状态
+    pub settings_panel: SettingsPanelState,
     /// 当前加载的文件路径
     pub file_path: Option<String>,
 }
@@ -113,6 +131,7 @@ impl ExcelViewer {
             validation_error_pos: None,
             original_cell_data: None,
             context_menu: ContextMenuState::default(),
+            settings_panel: SettingsPanelState::default(),
             file_path: None,
         }
     }
@@ -195,12 +214,60 @@ impl eframe::App for ExcelViewer {
         
         // 绘制菜单栏
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel);
         });
         
         // 绘制导入对话框
         if let Some(path) = draw_import_dialog(&mut self.show_import_dialog) {
             self.start_async_load(path, ctx.clone());
+        }
+
+        // 绘制设置面板
+        if self.settings_panel.visible {
+            let active_page = self.settings_panel.active_page;
+            let title = match active_page {
+                Some(SettingsPage::ColumnConfig) => "列配置",
+                Some(SettingsPage::RowConfig) => "行配置",
+                None => "设置",
+            };
+            egui::Window::new(title)
+                .open(&mut self.settings_panel.visible)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_min_width(300.0);
+                    // 选项卡切换
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(active_page == Some(SettingsPage::ColumnConfig), "列配置").clicked() {
+                            self.settings_panel.active_page = Some(SettingsPage::ColumnConfig);
+                        }
+                        if ui.selectable_label(active_page == Some(SettingsPage::RowConfig), "行配置").clicked() {
+                            self.settings_panel.active_page = Some(SettingsPage::RowConfig);
+                        }
+                    });
+                    ui.separator();
+
+                    match active_page {
+                        Some(SettingsPage::ColumnConfig) => {
+                            ui.vertical(|ui| {
+                                ui.label("列配置功能");
+                                ui.add_space(4.0);
+                                ui.colored_label(egui::Color32::GRAY, "（功能开发中...）");
+                            });
+                        }
+                        Some(SettingsPage::RowConfig) => {
+                            ui.vertical(|ui| {
+                                ui.label("行配置功能");
+                                ui.add_space(4.0);
+                                ui.colored_label(egui::Color32::GRAY, "（功能开发中...）");
+                            });
+                        }
+                        None => {
+                            ui.label("请选择配置页");
+                        }
+                    }
+                });
         }
         
         // 检查异步加载结果
