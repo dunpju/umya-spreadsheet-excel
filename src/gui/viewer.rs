@@ -234,7 +234,7 @@ impl eframe::App for ExcelViewer {
                 .open(&mut self.settings_panel.visible)
                 .resizable(false)
                 .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .default_pos(ctx.screen_rect().center() - egui::vec2(150.0, 100.0))
                 .show(ctx, |ui| {
                     ui.set_min_width(300.0);
                     // 选项卡切换
