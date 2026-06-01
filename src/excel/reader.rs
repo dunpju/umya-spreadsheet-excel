@@ -324,16 +324,35 @@ impl SheetData {
     }
 
     /// 获取默认插入数量：普通单元格返回 1，合并单元格返回对应维度的跨度
+    /// 查找包含指定列的跨列合并范围（不考虑行）
+    pub fn get_column_merge(&self, col: u32) -> Option<&CellRange> {
+        self.merged_cells.iter().find(|mr| {
+            col >= mr.start_col && col <= mr.end_col && mr.start_col != mr.end_col
+        })
+    }
+
     pub fn default_insert_count(&self, col: u32, row: u32, is_row: bool) -> u32 {
+        // 先检查单元格本身是否在合并范围内
         if let Some(mr) = self.get_merged_range(col, row) {
             if is_row {
-                mr.end_row - mr.start_row + 1
+                return mr.end_row - mr.start_row + 1;
             } else {
-                mr.end_col - mr.start_col + 1
+                return mr.end_col - mr.start_col + 1;
             }
-        } else {
-            1
         }
+        // 单元格本身不在合并范围，检查该列/行是否属于其他跨列/行合并
+        for mr in &self.merged_cells {
+            if is_row {
+                if row >= mr.start_row && row <= mr.end_row && mr.start_row != mr.end_row {
+                    return mr.end_row - mr.start_row + 1;
+                }
+            } else {
+                if col >= mr.start_col && col <= mr.end_col && mr.start_col != mr.end_col {
+                    return mr.end_col - mr.start_col + 1;
+                }
+            }
+        }
+        1
     }
 
     /// 在指定位置插入 N 行

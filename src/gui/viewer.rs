@@ -743,13 +743,23 @@ impl eframe::App for ExcelViewer {
                                 self.validation_error_pos = None;
 
                                 if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                                    // 计算锚点：合并单元格取合并边界
+                                    // 计算锚点：
+                                    // 1. 单元格本身在合并范围内 → 使用合并边界
+                                    // 2. 单元格不在合并范围，但该列属于跨列合并 → 使用列合并的边界
+                                    // 3. 无合并 → 使用单元格自身坐标
                                     let (anchor_col, anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
                                         match action {
                                             ContextAction::InsertRowAbove => (col, mr.start_row),
                                             ContextAction::InsertRowBelow => (col, mr.end_row),
                                             ContextAction::InsertColumnLeft => (mr.start_col, row),
                                             ContextAction::InsertColumnRight => (mr.end_col, row),
+                                        }
+                                    } else if let Some(cm) = sheet.get_column_merge(col) {
+                                        // 该列属于跨列合并，左侧插入用合并起始列，右侧插入用合并结束列
+                                        match action {
+                                            ContextAction::InsertColumnLeft => (cm.start_col, row),
+                                            ContextAction::InsertColumnRight => (cm.end_col, row),
+                                            _ => (col, row),
                                         }
                                     } else {
                                         (col, row)
