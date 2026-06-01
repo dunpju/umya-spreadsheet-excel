@@ -72,8 +72,12 @@ pub struct SettingsPanelState {
     pub merge_row_end: u32,
     /// 纵向每 N 个单元格合并
     pub merge_row_group: u32,
-    /// 是否复制公式
+    /// 复制公式
     pub copy_formula: bool,
+    /// 复制样式
+    pub copy_style: bool,
+    /// 复制值
+    pub copy_value: bool,
     /// 保存成功提示计时（秒）
     pub save_success_timer: f32,
 }
@@ -90,6 +94,8 @@ impl Default for SettingsPanelState {
             merge_row_end: 0,
             merge_row_group: 0,
             copy_formula: true,
+            copy_style: false,
+            copy_value: false,
             save_success_timer: 0.0,
         };
         state.load_from_file();
@@ -125,6 +131,10 @@ impl SettingsPanelState {
                     self.merge_row_group = get_u32("row_group", self.merge_row_group);
                     self.copy_formula = column.get("copy_formula")
                         .and_then(|v| v.as_bool()).unwrap_or(true);
+                    self.copy_style = column.get("copy_style")
+                        .and_then(|v| v.as_bool()).unwrap_or(false);
+                    self.copy_value = column.get("copy_value")
+                        .and_then(|v| v.as_bool()).unwrap_or(false);
                 }
             }
         }
@@ -157,6 +167,8 @@ impl SettingsPanelState {
         column.insert("row_end".into(), serde_yaml::Value::Number(self.merge_row_end.into()));
         column.insert("row_group".into(), serde_yaml::Value::Number(self.merge_row_group.into()));
         column.insert("copy_formula".into(), serde_yaml::Value::Bool(self.copy_formula));
+        column.insert("copy_style".into(), serde_yaml::Value::Bool(self.copy_style));
+        column.insert("copy_value".into(), serde_yaml::Value::Bool(self.copy_value));
 
         // 获取或创建 insert 节点，写入 column
         let doc_mapping = doc.as_mapping_mut().unwrap();
@@ -424,8 +436,14 @@ impl eframe::App for ExcelViewer {
                                     });
                                     ui.add_space(6.0);
                                     ui.horizontal(|ui| {
-                                        ui.label("复制公式:");
+                                        ui.label("复制: 公式");
                                         ui.checkbox(&mut self.settings_panel.copy_formula, "");
+                                        ui.separator();
+                                        ui.label("样式");
+                                        ui.checkbox(&mut self.settings_panel.copy_style, "");
+                                        ui.separator();
+                                        ui.label("值");
+                                        ui.checkbox(&mut self.settings_panel.copy_value, "");
                                     });
                                 });
                             });
