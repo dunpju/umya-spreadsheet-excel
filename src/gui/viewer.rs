@@ -385,8 +385,6 @@ impl eframe::App for ExcelViewer {
                             ui.vertical(|ui| {
                                 // 合并配置块
                                 ui.group(|ui| {
-                                    ui.label(egui::RichText::new("合并").size(12.0).strong());
-                                    ui.add_space(6.0);
                                     // 列范围 + 合并数量在同一行
                                     ui.horizontal(|ui| {
                                         ui.label("列范围:");
