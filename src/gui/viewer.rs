@@ -78,7 +78,7 @@ pub struct SettingsPanelState {
 
 impl Default for SettingsPanelState {
     fn default() -> Self {
-        Self {
+        let mut state = Self {
             visible: false,
             active_page: None,
             merge_col_start: 0,
@@ -88,6 +88,90 @@ impl Default for SettingsPanelState {
             merge_row_end: 0,
             merge_row_group: 0,
             save_success_timer: 0.0,
+        };
+        state.load_from_file();
+        state
+    }
+}
+
+impl SettingsPanelState {
+    /// 获取配置文件路径 ~/.MyExcel/my-excel.yaml
+    fn config_path() -> std::path::PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        home.join(".MyExcel").join("my-excel.yaml")
+    }
+
+    /// 从配置文件加载 insert 块
+    fn load_from_file(&mut self) {
+        let path = Self::config_path();
+        if !path.exists() {
+            return;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                // 读取 insert.column 节点
+                if let Some(column) = doc.get("insert").and_then(|i| i.get("column")) {
+                    let get_u32 = |key: &str, default: u32| -> u32 {
+                        column.get(key).and_then(|v| v.as_u64()).unwrap_or(default as u64) as u32
+                    };
+                    self.merge_col_start = get_u32("col_start", self.merge_col_start);
+                    self.merge_col_end = get_u32("col_end", self.merge_col_end);
+                    self.merge_col_group = get_u32("col_group", self.merge_col_group);
+                    self.merge_row_start = get_u32("row_start", self.merge_row_start);
+                    self.merge_row_end = get_u32("row_end", self.merge_row_end);
+                    self.merge_row_group = get_u32("row_group", self.merge_row_group);
+                }
+            }
+        }
+    }
+
+    /// 保存到 insert.column 节点（保留文件中已有的其他配置）
+    pub fn save_to_file(&self) -> bool {
+        let path = Self::config_path();
+
+        // 确保目录存在
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // 读取已有内容（保留其他配置块）
+        let mut doc = if path.exists() {
+            std::fs::read_to_string(&path).ok()
+                .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+                .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+
+        // 构建 column 块
+        let mut column = serde_yaml::Mapping::new();
+        column.insert("col_start".into(), serde_yaml::Value::Number(self.merge_col_start.into()));
+        column.insert("col_end".into(), serde_yaml::Value::Number(self.merge_col_end.into()));
+        column.insert("col_group".into(), serde_yaml::Value::Number(self.merge_col_group.into()));
+        column.insert("row_start".into(), serde_yaml::Value::Number(self.merge_row_start.into()));
+        column.insert("row_end".into(), serde_yaml::Value::Number(self.merge_row_end.into()));
+        column.insert("row_group".into(), serde_yaml::Value::Number(self.merge_row_group.into()));
+
+        // 获取或创建 insert 节点，写入 column
+        let doc_mapping = doc.as_mapping_mut().unwrap();
+        if let Some(insert_val) = doc_mapping.get_mut(&serde_yaml::Value::String("insert".into())) {
+            if let Some(insert_map) = insert_val.as_mapping_mut() {
+                insert_map.insert("column".into(), serde_yaml::Value::Mapping(column));
+            } else {
+                let mut insert = serde_yaml::Mapping::new();
+                insert.insert("column".into(), serde_yaml::Value::Mapping(column));
+                *insert_val = serde_yaml::Value::Mapping(insert);
+            }
+        } else {
+            let mut insert = serde_yaml::Mapping::new();
+            insert.insert("column".into(), serde_yaml::Value::Mapping(column));
+            doc_mapping.insert("insert".into(), serde_yaml::Value::Mapping(insert));
+        }
+
+        // 写入文件
+        match serde_yaml::to_string(&doc) {
+            Ok(yaml_str) => std::fs::write(&path, yaml_str).is_ok(),
+            Err(_) => false,
         }
     }
 }
@@ -274,8 +358,9 @@ impl eframe::App for ExcelViewer {
                                 self.settings_panel.visible = false;
                             }
                             if ui.button("保存").clicked() {
-                                // TODO: 执行合并操作
-                                self.settings_panel.save_success_timer = 2.0;
+                                if self.settings_panel.save_to_file() {
+                                    self.settings_panel.save_success_timer = 2.0;
+                                }
                             }
                             if self.settings_panel.save_success_timer > 0.0 {
                                 ui.label(egui::RichText::new("保存成功").size(11.0).color(egui::Color32::GREEN));
