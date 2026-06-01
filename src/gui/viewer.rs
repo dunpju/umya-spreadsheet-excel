@@ -29,6 +29,18 @@ pub struct ContextMenuState {
     pub insert_rows_count: u32,
     /// 插入列数
     pub insert_cols_count: u32,
+    /// 确认弹窗是否可见
+    pub confirm_visible: bool,
+    /// 确认弹窗对应的操作
+    pub confirm_action: Option<ContextAction>,
+    /// 确认弹窗：复制合并
+    pub copy_merge: bool,
+    /// 确认弹窗：复制公式
+    pub copy_formula: bool,
+    /// 确认弹窗：复制样式
+    pub copy_style: bool,
+    /// 确认弹窗：复制值
+    pub copy_value: bool,
 }
 
 /// 右键菜单操作类型
@@ -48,6 +60,12 @@ impl Default for ContextMenuState {
             target_cell: None,
             insert_rows_count: 1,
             insert_cols_count: 1,
+            confirm_visible: false,
+            confirm_action: None,
+            copy_merge: false,
+            copy_formula: true,
+            copy_style: true,
+            copy_value: true,
         }
     }
 }
@@ -712,7 +730,8 @@ impl eframe::App for ExcelViewer {
                                             // 插入列
                                             ui.horizontal(|ui| {
                                                 if ui.button("在左侧插入列").clicked() {
-                                                    pending_action = Some(ContextAction::InsertColumnLeft);
+                                                    self.context_menu.confirm_action = Some(ContextAction::InsertColumnLeft);
+                                                    self.context_menu.confirm_visible = true;
                                                 }
                                                 ui.add(egui::DragValue::new(&mut self.context_menu.insert_cols_count)
                                                     .range(1..=1000)
@@ -721,7 +740,8 @@ impl eframe::App for ExcelViewer {
                                             });
                                             ui.horizontal(|ui| {
                                                 if ui.button("在右侧插入列").clicked() {
-                                                    pending_action = Some(ContextAction::InsertColumnRight);
+                                                    self.context_menu.confirm_action = Some(ContextAction::InsertColumnRight);
+                                                    self.context_menu.confirm_visible = true;
                                                 }
                                                 ui.add(egui::DragValue::new(&mut self.context_menu.insert_cols_count)
                                                     .range(1..=1000)
@@ -804,6 +824,103 @@ impl eframe::App for ExcelViewer {
                         }
                         // Escape 关闭
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.context_menu.visible = false;
+                        }
+                    }
+
+                    // 绘制插入列确认弹窗
+                    if self.context_menu.confirm_visible {
+                        // 判断目标列是否有合并单元格，决定 copy_merge 默认值
+                        if let Some((col, _row)) = self.context_menu.target_cell {
+                            if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                                self.context_menu.copy_merge = sheet.get_column_merge(col).is_some();
+                            }
+                        }
+
+                        let confirm_action = self.context_menu.confirm_action;
+                        let mut confirm_execute = false;
+                        let mut keep_open = true;
+
+                        egui::Window::new("insert_confirm")
+                            .title_bar(false)
+                            .open(&mut keep_open)
+                            .resizable(false)
+                            .collapsible(false)
+                            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_width(360.0);
+                                ui.set_height(50.0);
+                                // 复制选项
+                                ui.horizontal(|ui| {
+                                    ui.label("复制合并:");
+                                    ui.checkbox(&mut self.context_menu.copy_merge, "");
+                                    ui.separator();
+                                    ui.label("公式:");
+                                    ui.checkbox(&mut self.context_menu.copy_formula, "");
+                                    ui.separator();
+                                    ui.label("样式:");
+                                    ui.checkbox(&mut self.context_menu.copy_style, "");
+                                    ui.separator();
+                                    ui.label("值:");
+                                    ui.checkbox(&mut self.context_menu.copy_value, "");
+                                });
+                                ui.separator();
+                                // 右下角确认按钮
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("确认").clicked() {
+                                        confirm_execute = true;
+                                    }
+                                });
+                            });
+
+                        if !keep_open {
+                            self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_action = None;
+                        }
+
+                        if confirm_execute {
+                            if let Some(action) = confirm_action {
+                                if let Some((col, row)) = self.context_menu.target_cell {
+                                    self.editing_cell = None;
+                                    self.edit_value.clear();
+                                    self.original_cell_data = None;
+                                    self.validation_error = None;
+                                    self.validation_error_pos = None;
+
+                                    if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                                        let (anchor_col, _anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
+                                            match action {
+                                                ContextAction::InsertColumnLeft => (mr.start_col, row),
+                                                ContextAction::InsertColumnRight => (mr.end_col, row),
+                                                _ => (col, row),
+                                            }
+                                        } else if let Some(cm) = sheet.get_column_merge(col) {
+                                            match action {
+                                                ContextAction::InsertColumnLeft => (cm.start_col, row),
+                                                ContextAction::InsertColumnRight => (cm.end_col, row),
+                                                _ => (col, row),
+                                            }
+                                        } else {
+                                            (col, row)
+                                        };
+
+                                        let m = self.context_menu.insert_cols_count;
+
+                                        match action {
+                                            ContextAction::InsertColumnLeft => {
+                                                sheet.insert_columns(anchor_col, m, false);
+                                            }
+                                            ContextAction::InsertColumnRight => {
+                                                sheet.insert_columns(anchor_col, m, true);
+                                            }
+                                            _ => {}
+                                        }
+                                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                                    }
+                                }
+                            }
+                            self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_action = None;
                             self.context_menu.visible = false;
                         }
                     }
