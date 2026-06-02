@@ -937,7 +937,14 @@ impl eframe::App for ExcelViewer {
                                             (col, row)
                                         };
 
-                                        let m = self.context_menu.insert_cols_count;
+                                        let mut m = self.context_menu.insert_cols_count;
+                                        // 如果列属于跨列合并，自动将 m 设为合并宽度
+                                        if let Some(cm) = sheet.get_column_merge(col) {
+                                            let merge_width = cm.end_col - cm.start_col + 1;
+                                            if m < merge_width {
+                                                m = merge_width;
+                                            }
+                                        }
 
                                         let copy_options = crate::excel::reader::ColumnCopyOptions::new(
                                             self.context_menu.copy_merge,

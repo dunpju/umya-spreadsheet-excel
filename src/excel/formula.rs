@@ -565,14 +565,14 @@ pub fn parse_formula(input: &str) -> Result<FormulaNode, String> {
 
 /// 调整公式字符串中的列引用。
 ///
-/// 对 `threshold_col` 及之后的**相对列引用**右移 `shift` 列。
+/// 对 `threshold_col` 及之后的**相对列引用**偏移 `shift` 列（正数右移，负数左移）。
 /// 绝对引用（`$A`）不变，行号不变。跳过字符串字面量内的内容。
 ///
 /// # 参数
 /// * `formula` - 公式字符串（可含前导 `=`）
 /// * `threshold_col` - 列号阈值，仅 >= 此列号的相对引用会被偏移
-/// * `shift` - 右移列数
-pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: u32) -> String {
+/// * `shift` - 偏移列数（正数右移，负数左移）
+pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: i32) -> String {
     if formula.is_empty() || shift == 0 {
         return formula.to_string();
     }
@@ -680,7 +680,7 @@ pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: u32) -> 
 
             // 判断是否需要偏移：列是相对的 且 列号 >= threshold_col
             if !col_abs && col_num >= threshold_col {
-                let new_col = col_num + shift;
+                let new_col = (col_num as i32 + shift).max(1) as u32;
                 let new_col_str = col_to_letter(new_col);
                 // 重建引用：保留行绝对标记，列不再需要 $ 前缀（因为是相对引用）
                 result.push_str(&new_col_str);
