@@ -511,6 +511,14 @@ impl SheetData {
         }
         self.column_widths = new_widths;
 
+        // 3.5 新列宽度：从源列复制列宽
+        let source_col_for_width = if after { anchor_col } else { insert_at + m };
+        if let Some(&src_width) = self.column_widths.get(&source_col_for_width) {
+            for offset in 0..m {
+                self.column_widths.insert(insert_at + offset, src_width);
+            }
+        }
+
         // 4. 更新 max_col
         self.max_col += m;
 
