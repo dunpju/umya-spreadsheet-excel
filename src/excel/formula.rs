@@ -678,11 +678,14 @@ pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: i32) -> 
                 }
             };
 
-            // 判断是否需要偏移：列是相对的 且 列号 >= threshold_col
-            if !col_abs && col_num >= threshold_col {
+            // 判断是否需要偏移：列号 >= threshold_col（绝对引用也偏移，列插入是结构性操作）
+            if col_num >= threshold_col {
                 let new_col = (col_num as i32 + shift).max(1) as u32;
                 let new_col_str = col_to_letter(new_col);
-                // 重建引用：保留行绝对标记，列不再需要 $ 前缀（因为是相对引用）
+                // 保留列绝对标记 $
+                if col_abs {
+                    result.push('$');
+                }
                 result.push_str(&new_col_str);
                 if row_abs {
                     result.push('$');
