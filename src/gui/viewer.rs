@@ -16,6 +16,19 @@ use crate::gui::widgets::{
 };
 use std::sync::mpsc::Receiver;
 
+/// 撤销栈最大深度
+const MAX_UNDO_DEPTH: usize = 20;
+
+/// 撤销快照：保存操作前的整个工作表状态
+struct UndoSnapshot {
+    /// 操作前的工作表数据（深拷贝）
+    sheet_data: crate::excel::reader::SheetData,
+    /// 操作前的工作表索引
+    sheet_index: usize,
+    /// 操作前选中的单元格
+    selected_cell: Option<(u32, u32)>,
+}
+
 /// 右键菜单状态
 #[derive(Debug)]
 pub struct ContextMenuState {
@@ -262,6 +275,8 @@ pub struct ExcelViewer {
     pub settings_panel: SettingsPanelState,
     /// 当前加载的文件路径
     pub file_path: Option<String>,
+    /// 撤销栈：存储可撤销操作前的快照
+    undo_stack: Vec<UndoSnapshot>,
 }
 
 impl ExcelViewer {
@@ -287,7 +302,25 @@ impl ExcelViewer {
             context_menu: ContextMenuState::default(),
             settings_panel: SettingsPanelState::default(),
             file_path: None,
+            undo_stack: Vec::new(),
         }
+    }
+
+    /// 保存当前工作表快照到撤销栈（不借用 self，避免与 excel_data 借用冲突）
+    fn push_undo(
+        undo_stack: &mut Vec<UndoSnapshot>,
+        sheet: &crate::excel::reader::SheetData,
+        sheet_index: usize,
+        selected_cell: Option<(u32, u32)>,
+    ) {
+        if undo_stack.len() >= MAX_UNDO_DEPTH {
+            undo_stack.remove(0);
+        }
+        undo_stack.push(UndoSnapshot {
+            sheet_data: sheet.clone(),
+            sheet_index,
+            selected_cell,
+        });
     }
 
     /// 启动异步加载 Excel 文件
@@ -340,6 +373,7 @@ impl ExcelViewer {
                         self.pending_formula_save = None;
                         self.hovered_cell = None;
                         self.error_message = None;
+                        self.undo_stack.clear();
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
                     Err(e) => {
@@ -529,6 +563,22 @@ impl eframe::App for ExcelViewer {
         // 主内容区域
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(excel_data) = &mut self.excel_data {
+                // Ctrl+Z 撤销
+                if ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
+                    if let Some(snapshot) = self.undo_stack.pop() {
+                        if excel_data.sheets.len() > snapshot.sheet_index {
+                            excel_data.sheets[snapshot.sheet_index] = snapshot.sheet_data;
+                            self.selected_cell = snapshot.selected_cell;
+                            self.editing_cell = None;
+                            self.edit_value.clear();
+                            self.current_sheet = snapshot.sheet_index;
+                            crate::excel::formula::evaluate_sheet(
+                                &mut excel_data.sheets[snapshot.sheet_index],
+                            );
+                        }
+                    }
+                }
+
                 // 预先获取工作表信息
                 let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(0);
                 let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(0);
@@ -791,6 +841,9 @@ impl eframe::App for ExcelViewer {
                                     let n = self.context_menu.insert_rows_count;
                                     let m = self.context_menu.insert_cols_count;
 
+                                    // 保存撤销快照
+                                    Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+
                                     let default_options = crate::excel::reader::ColumnCopyOptions::default();
                                     match action {
                                         ContextAction::InsertRowAbove => {
@@ -946,6 +999,9 @@ impl eframe::App for ExcelViewer {
                                             }
                                         }
 
+                                        // 保存撤销快照
+                                        Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+
                                         let copy_options = crate::excel::reader::ColumnCopyOptions::new(
                                             self.context_menu.copy_merge,
                                             self.context_menu.copy_formula,
@@ -975,6 +1031,10 @@ impl eframe::App for ExcelViewer {
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {
                     if let Some((col, row)) = self.selected_cell {
+                        // 保存撤销快照
+                        if let Some(sheet) = excel_data.sheets.get(self.current_sheet) {
+                            Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                        }
                         // 非公式值做数据有效性校验
                         if !formula_value.starts_with('=') {
                             if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
