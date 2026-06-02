@@ -4,7 +4,7 @@
 //! 使用递归下降解析器将公式字符串解析为 AST，然后通过拓扑排序处理依赖关系并求值。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::excel::reader::{ExcelData, SheetData};
+use crate::excel::reader::{ExcelData, SheetData, col_to_letter};
 
 // ========== AST 类型定义 ==========
 
@@ -535,7 +535,7 @@ fn parse_cell_ref_str(s: &str) -> Result<(u32, u32), String> {
 }
 
 /// 列字母转列号 (A=1, B=2, ..., Z=26, AA=27)
-fn letter_to_col(s: &str) -> Result<u32, String> {
+pub fn letter_to_col(s: &str) -> Result<u32, String> {
     let mut col = 0u32;
     for ch in s.chars() {
         if !ch.is_ascii_alphabetic() { return Err(format!("无效列字母: {}", s)); }
@@ -559,6 +559,151 @@ pub fn parse_formula(input: &str) -> Result<FormulaNode, String> {
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     parser.parse()
+}
+
+// ========== 公式列偏移调整 ==========
+
+/// 调整公式字符串中的列引用。
+///
+/// 对 `threshold_col` 及之后的**相对列引用**右移 `shift` 列。
+/// 绝对引用（`$A`）不变，行号不变。跳过字符串字面量内的内容。
+///
+/// # 参数
+/// * `formula` - 公式字符串（可含前导 `=`）
+/// * `threshold_col` - 列号阈值，仅 >= 此列号的相对引用会被偏移
+/// * `shift` - 右移列数
+pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: u32) -> String {
+    if formula.is_empty() || shift == 0 {
+        return formula.to_string();
+    }
+    let chars: Vec<char> = formula.chars().collect();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+
+    // 跳过前导 '=' 或 '@'
+    if i < chars.len() && chars[i] == '=' {
+        result.push('=');
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '@' {
+        result.push('@');
+        i += 1;
+    }
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // 字符串字面量：原样输出
+        if ch == '"' {
+            result.push(ch);
+            i += 1;
+            while i < chars.len() {
+                result.push(chars[i]);
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // 尝试匹配单元格引用：[$]?[A-Za-z]+[$]?[0-9]+
+        if ch == '$' || ch.is_ascii_alphabetic() {
+            let start = i;
+            let mut pos = i;
+            let mut col_abs = false; // 列是否绝对引用 ($A)
+            let mut col_letters = String::new();
+            let mut row_abs = false;  // 行是否绝对引用 ($1)
+            let mut row_digits = String::new();
+            let mut _state: u8 = 0; // 0=before_col, 1=in_col, 2=after_col, 3=in_row
+
+            // 可选的列绝对前缀 $
+            if pos < chars.len() && chars[pos] == '$' {
+                col_abs = true;
+                pos += 1;
+            }
+
+            // 列字母
+            let col_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
+                col_letters.push(chars[pos].to_ascii_uppercase());
+                pos += 1;
+            }
+            if pos == col_start || col_letters.is_empty() {
+                // 不是单元格引用（如 $ 后直接跟数字，或是标识符开头）
+                // 原样输出从 start 到 pos 的内容
+                // 但可能只是个 $ 开头的标识符，继续作为普通字符处理
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            _state = 1; // 读完列字母
+
+            // 可选的行绝对前缀 $
+            if pos < chars.len() && chars[pos] == '$' {
+                row_abs = true;
+                pos += 1;
+            }
+
+            // 行号数字
+            let row_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_digit() {
+                row_digits.push(chars[pos]);
+                pos += 1;
+            }
+            if pos == row_start || row_digits.is_empty() {
+                // 没有行号 → 不是单元格引用，是函数名或标识符（如 SUM, A1B2 中的前缀）
+                // 但需要检查是否是范围引用的一部分，如 A:C
+                // 如果后面跟 : 则是列范围，否则是标识符
+                // 先按标识符处理，原样输出
+                for c in &chars[start..pos] {
+                    result.push(*c);
+                }
+                i = pos;
+                continue;
+            }
+
+            // 到这里，成功匹配了一个单元格引用
+            // 解析列号
+            let col_num = match letter_to_col(&col_letters) {
+                Ok(c) => c,
+                Err(_) => {
+                    // 解析失败，原样输出
+                    for c in &chars[start..pos] {
+                        result.push(*c);
+                    }
+                    i = pos;
+                    continue;
+                }
+            };
+
+            // 判断是否需要偏移：列是相对的 且 列号 >= threshold_col
+            if !col_abs && col_num >= threshold_col {
+                let new_col = col_num + shift;
+                let new_col_str = col_to_letter(new_col);
+                // 重建引用：保留行绝对标记，列不再需要 $ 前缀（因为是相对引用）
+                result.push_str(&new_col_str);
+                if row_abs {
+                    result.push('$');
+                }
+                result.push_str(&row_digits);
+            } else {
+                // 原样输出
+                for c in &chars[start..pos] {
+                    result.push(*c);
+                }
+            }
+            i = pos;
+            continue;
+        }
+
+        // 其他字符原样输出
+        result.push(ch);
+        i += 1;
+    }
+
+    result
 }
 
 // ========== 求值器 ==========

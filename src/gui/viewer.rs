@@ -31,6 +31,8 @@ pub struct ContextMenuState {
     pub insert_cols_count: u32,
     /// 确认弹窗是否可见
     pub confirm_visible: bool,
+    /// 确认弹窗是否已显示超过一帧（用于跳过首帧外部点击检测）
+    pub confirm_established: bool,
     /// 确认弹窗对应的操作
     pub confirm_action: Option<ContextAction>,
     /// 确认弹窗：复制合并
@@ -61,6 +63,7 @@ impl Default for ContextMenuState {
             insert_rows_count: 1,
             insert_cols_count: 1,
             confirm_visible: false,
+            confirm_established: false,
             confirm_action: None,
             copy_merge: false,
             copy_formula: true,
@@ -788,6 +791,7 @@ impl eframe::App for ExcelViewer {
                                     let n = self.context_menu.insert_rows_count;
                                     let m = self.context_menu.insert_cols_count;
 
+                                    let default_options = crate::excel::reader::ColumnCopyOptions::default();
                                     match action {
                                         ContextAction::InsertRowAbove => {
                                             sheet.insert_rows(anchor_row, n, false);
@@ -796,10 +800,10 @@ impl eframe::App for ExcelViewer {
                                             sheet.insert_rows(anchor_row, n, true);
                                         }
                                         ContextAction::InsertColumnLeft => {
-                                            sheet.insert_columns(anchor_col, m, false);
+                                            sheet.insert_columns(anchor_col, m, false, default_options);
                                         }
                                         ContextAction::InsertColumnRight => {
-                                            sheet.insert_columns(anchor_col, m, true);
+                                            sheet.insert_columns(anchor_col, m, true, default_options);
                                         }
                                     }
                                     crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
@@ -830,6 +834,10 @@ impl eframe::App for ExcelViewer {
 
                     // 绘制插入列确认弹窗
                     if self.context_menu.confirm_visible {
+                        // 首帧标记为已建立，后续帧才检测外部点击
+                        let is_established = self.context_menu.confirm_established;
+                        self.context_menu.confirm_established = true;
+
                         // 判断目标列是否有合并单元格，决定 copy_merge 默认值
                         if let Some((col, _row)) = self.context_menu.target_cell {
                             if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
@@ -839,6 +847,7 @@ impl eframe::App for ExcelViewer {
 
                         let confirm_action = self.context_menu.confirm_action;
                         let mut confirm_execute = false;
+                        let mut cancel_clicked = false;
                         let mut keep_open = true;
 
                         egui::Window::new("insert_confirm")
@@ -846,7 +855,8 @@ impl eframe::App for ExcelViewer {
                             .open(&mut keep_open)
                             .resizable(false)
                             .collapsible(false)
-                            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(self.context_menu.position)
                             .show(ui.ctx(), |ui| {
                                 ui.set_min_width(360.0);
                                 ui.set_height(50.0);
@@ -865,17 +875,40 @@ impl eframe::App for ExcelViewer {
                                     ui.checkbox(&mut self.context_menu.copy_value, "");
                                 });
                                 ui.separator();
-                                // 右下角确认按钮
+                                // 右下角按钮：取消（左） + 确认（右）
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.button("确认").clicked() {
                                         confirm_execute = true;
                                     }
+                                    if ui.button("取消").clicked() {
+                                        cancel_clicked = true;
+                                    }
                                 });
                             });
 
-                        if !keep_open {
+                        if !keep_open || cancel_clicked {
                             self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
+                        }
+
+                        // 点击弹窗外部关闭（仅当弹窗已建立后检测，避免首帧误关）
+                        if is_established {
+                            let confirm_id = egui::Id::new("insert_confirm");
+                            let confirm_area = ui.ctx().memory(|mem| {
+                                mem.area_rect(confirm_id)
+                            });
+                            if let Some(confirm_rect) = confirm_area {
+                                if ui.input(|i| i.pointer.any_click()) {
+                                    if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
+                                        if !confirm_rect.contains(hover) {
+                                            self.context_menu.confirm_visible = false;
+                                            self.context_menu.confirm_established = false;
+                                            self.context_menu.confirm_action = None;
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         if confirm_execute {
@@ -906,12 +939,18 @@ impl eframe::App for ExcelViewer {
 
                                         let m = self.context_menu.insert_cols_count;
 
+                                        let copy_options = crate::excel::reader::ColumnCopyOptions::new(
+                                            self.context_menu.copy_merge,
+                                            self.context_menu.copy_formula,
+                                            self.context_menu.copy_style,
+                                            self.context_menu.copy_value,
+                                        );
                                         match action {
                                             ContextAction::InsertColumnLeft => {
-                                                sheet.insert_columns(anchor_col, m, false);
+                                                sheet.insert_columns(anchor_col, m, false, copy_options);
                                             }
                                             ContextAction::InsertColumnRight => {
-                                                sheet.insert_columns(anchor_col, m, true);
+                                                sheet.insert_columns(anchor_col, m, true, copy_options);
                                             }
                                             _ => {}
                                         }
@@ -920,6 +959,7 @@ impl eframe::App for ExcelViewer {
                                 }
                             }
                             self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
                             self.context_menu.visible = false;
                         }

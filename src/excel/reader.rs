@@ -146,6 +146,36 @@ pub struct DataValidationInfo {
     pub ranges: Vec<CellRange>,
 }
 
+/// 列插入复制选项
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnCopyOptions {
+    /// 是否复制合并单元格信息
+    pub copy_merge: bool,
+    /// 是否复制公式（列引用自动偏移）
+    pub copy_formula: bool,
+    /// 是否复制样式（字体大小、字体颜色、背景色、对齐、数字格式）
+    pub copy_style: bool,
+    /// 是否复制单元格值
+    pub copy_value: bool,
+}
+
+impl Default for ColumnCopyOptions {
+    fn default() -> Self {
+        Self {
+            copy_merge: false,
+            copy_formula: false,
+            copy_style: true,
+            copy_value: false,
+        }
+    }
+}
+
+impl ColumnCopyOptions {
+    pub fn new(copy_merge: bool, copy_formula: bool, copy_style: bool, copy_value: bool) -> Self {
+        Self { copy_merge, copy_formula, copy_style, copy_value }
+    }
+}
+
 impl CellRange {
     /// 创建新的单元格范围
     /// 
@@ -449,8 +479,11 @@ impl SheetData {
     /// * `anchor_col` - 锚点列号
     /// * `m` - 插入列数
     /// * `after` - true 表示在锚点右侧插入，false 表示在锚点左侧插入
-    pub fn insert_columns(&mut self, anchor_col: u32, m: u32, after: bool) {
+    /// * `options` - 复制选项（合并、公式、样式、值）
+    pub fn insert_columns(&mut self, anchor_col: u32, m: u32, after: bool, options: ColumnCopyOptions) {
         let insert_at = if after { anchor_col + 1 } else { anchor_col };
+
+        // ========== Phase A: 结构性移动 ==========
 
         // 1. 移动单元格
         let mut new_cells = HashMap::new();
@@ -493,36 +526,195 @@ impl SheetData {
             }
         }
 
-        // 6. 新列样式继承：从相邻列复制样式
-        let style_rows: Vec<u32> = self.cells.iter()
-            .filter(|((_, col), _)| *col >= insert_at)
-            .map(|((row, _), _)| *row)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
+        // 5.5 修正已有公式引用：所有现有单元格和数据有效性中的公式，
+        //     相对列引用 >= insert_at 的右移 m 列
+        for cell in self.cells.values_mut() {
+            if !cell.formula.is_empty() {
+                cell.formula = crate::excel::formula::adjust_formula_columns(
+                    &cell.formula, insert_at, m,
+                );
+            }
+        }
+        for dv in &mut self.data_validations {
+            if !dv.formula1.is_empty() {
+                dv.formula1 = crate::excel::formula::adjust_formula_columns(
+                    &dv.formula1, insert_at, m,
+                );
+            }
+            if !dv.formula2.is_empty() {
+                dv.formula2 = crate::excel::formula::adjust_formula_columns(
+                    &dv.formula2, insert_at, m,
+                );
+            }
+        }
+
+        // ========== Phase B: 复制内容到新列 ==========
+
+        // 确定源列（从哪一列复制内容）
+        let source_col = if after { anchor_col } else { insert_at + m };
+
+        // 6. 按选项复制单元格数据
+        let source_rows: Vec<u32> = self.cells.keys()
+            .filter(|(_row, col)| *col == source_col)
+            .map(|(row, _)| *row)
             .collect();
-        let mut new_style_cells: Vec<((u32, u32), CellData)> = Vec::new();
-        for row in style_rows {
-            if let Some(template) = self.cells.get(&(row, insert_at + m)) {
-                let styled = CellData {
-                    value: String::new(),
-                    raw_number: None,
-                    formula: String::new(),
-                    alignment: template.alignment.clone(),
-                    background_color: template.background_color,
-                    font_size: template.font_size,
-                    font_color: template.font_color,
-                    number_format: template.number_format.clone(),
-                };
+
+        let mut new_cells_to_insert: Vec<((u32, u32), CellData)> = Vec::new();
+
+        for row in source_rows {
+            if let Some(source_cell) = self.cells.get(&(row, source_col)).cloned() {
                 for offset in 0..m {
                     let new_col = insert_at + offset;
-                    if !self.cells.contains_key(&(row, new_col)) {
-                        new_style_cells.push(((row, new_col), styled.clone()));
+                    let col_shift = new_col - source_col;
+
+                    let new_cell = CellData {
+                        value: if options.copy_value {
+                            source_cell.value.clone()
+                        } else {
+                            String::new()
+                        },
+                        raw_number: if options.copy_value {
+                            source_cell.raw_number
+                        } else {
+                            None
+                        },
+                        formula: if options.copy_formula && !source_cell.formula.is_empty() {
+                            crate::excel::formula::adjust_formula_columns(
+                                &source_cell.formula, source_col + 1, col_shift,
+                            )
+                        } else {
+                            String::new()
+                        },
+                        alignment: if options.copy_style {
+                            source_cell.alignment.clone()
+                        } else {
+                            CellAlignment::default()
+                        },
+                        background_color: if options.copy_style {
+                            source_cell.background_color
+                        } else {
+                            None
+                        },
+                        font_size: if options.copy_style {
+                            source_cell.font_size
+                        } else {
+                            None
+                        },
+                        font_color: if options.copy_style {
+                            source_cell.font_color
+                        } else {
+                            None
+                        },
+                        number_format: if options.copy_style {
+                            source_cell.number_format.clone()
+                        } else {
+                            None
+                        },
+                    };
+                    new_cells_to_insert.push(((row, new_col), new_cell));
+                }
+            }
+        }
+
+        // 如果没有 copy_value 也没有 copy_formula，但 copy_style 为 true，
+        // 则对源列没有数据但相邻列有数据的行，仍然继承样式
+        if options.copy_style && !options.copy_value && !options.copy_formula {
+            let style_rows: Vec<u32> = self.cells.iter()
+                .filter(|((_, col), _)| *col >= insert_at && *col <= insert_at + m + 10)
+                .map(|((row, _), _)| *row)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            for row in style_rows {
+                if self.cells.contains_key(&(row, source_col)) {
+                    continue; // 已在上面处理
+                }
+                if let Some(template) = self.cells.get(&(row, insert_at + m)) {
+                    let styled = CellData {
+                        value: String::new(),
+                        raw_number: None,
+                        formula: String::new(),
+                        alignment: template.alignment.clone(),
+                        background_color: template.background_color,
+                        font_size: template.font_size,
+                        font_color: template.font_color,
+                        number_format: template.number_format.clone(),
+                    };
+                    for offset in 0..m {
+                        let new_col = insert_at + offset;
+                        if !self.cells.contains_key(&(row, new_col)) {
+                            new_cells_to_insert.push(((row, new_col), styled.clone()));
+                        }
                     }
                 }
             }
         }
-        for (key, cell) in new_style_cells {
+
+        for (key, cell) in new_cells_to_insert {
             self.cells.insert(key, cell);
+        }
+
+        // 7. 复制合并结构
+        if options.copy_merge {
+            let source_merges: Vec<CellRange> = self.merged_cells.iter()
+                .filter(|mr| mr.start_col <= source_col && mr.end_col >= source_col)
+                .copied()
+                .collect();
+
+            for offset in 0..m {
+                let new_col = insert_at + offset;
+                let col_shift = new_col as i32 - source_col as i32;
+                for mr in &source_merges {
+                    let new_start_col = (mr.start_col as i32 + col_shift).max(1) as u32;
+                    let new_end_col = (mr.end_col as i32 + col_shift).max(1) as u32;
+                    let new_merge = CellRange::new(
+                        mr.start_row,
+                        new_start_col,
+                        mr.end_row,
+                        new_end_col,
+                    );
+                    // 去重：不添加已存在的合并范围
+                    if !self.merged_cells.iter().any(|existing| {
+                        existing.start_row == new_merge.start_row
+                        && existing.start_col == new_merge.start_col
+                        && existing.end_row == new_merge.end_row
+                        && existing.end_col == new_merge.end_col
+                    }) {
+                        self.merged_cells.push(new_merge);
+                    }
+                }
+            }
+        }
+
+        // 8. 复制数据有效性规则
+        if options.copy_merge || options.copy_formula || options.copy_style || options.copy_value {
+            let source_dvs: Vec<DataValidationInfo> = self.data_validations.iter()
+                .filter(|dv| dv.ranges.iter().any(|r| r.start_col <= source_col && r.end_col >= source_col))
+                .cloned()
+                .collect();
+
+            for offset in 0..m {
+                let new_col = insert_at + offset;
+                let col_shift = new_col - source_col;
+                for dv in &source_dvs {
+                    let mut new_dv = dv.clone();
+                    for r in &mut new_dv.ranges {
+                        r.start_col += col_shift;
+                        r.end_col += col_shift;
+                    }
+                    if !new_dv.formula1.is_empty() {
+                        new_dv.formula1 = crate::excel::formula::adjust_formula_columns(
+                            &new_dv.formula1, source_col + 1, col_shift,
+                        );
+                    }
+                    if !new_dv.formula2.is_empty() {
+                        new_dv.formula2 = crate::excel::formula::adjust_formula_columns(
+                            &new_dv.formula2, source_col + 1, col_shift,
+                        );
+                    }
+                    self.data_validations.push(new_dv);
+                }
+            }
         }
     }
 }
