@@ -474,11 +474,62 @@ impl SheetData {
 
         // 7. 修正已有公式引用：所有现有单元格和数据有效性中的公式，
         //    行号 >= insert_at 的相对行引用下移 n 行
-        for cell in self.cells.values_mut() {
-            if !cell.formula.is_empty() {
-                cell.formula = crate::excel::formula::adjust_formula_rows(
-                    &cell.formula, insert_at, n as i32,
-                );
+        //    单元格公式数量较多时使用多线程并行处理以提升性能
+        {
+            let formulas: Vec<((u32, u32), String)> = self.cells.iter()
+                .filter(|(_, cell)| !cell.formula.is_empty())
+                .map(|(&key, cell)| (key, cell.formula.clone()))
+                .collect();
+
+            if !formulas.is_empty() {
+                let cpu_count = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+
+                if formulas.len() >= 100 && cpu_count > 1 {
+                    // 多线程并行处理：将公式分块，每块一个线程
+                    let num_threads = cpu_count.min(formulas.len());
+                    let chunk_size = (formulas.len() + num_threads - 1) / num_threads;
+                    let threshold = insert_at;
+                    let shift = n as i32;
+
+                    let handles: Vec<std::thread::JoinHandle<Vec<((u32, u32), String)>>> = formulas
+                        .chunks(chunk_size)
+                        .map(|chunk| {
+                            let chunk = chunk.to_vec();
+                            std::thread::spawn(move || {
+                                chunk.into_iter()
+                                    .map(|(key, formula)| {
+                                        let adjusted = crate::excel::formula::adjust_formula_rows(
+                                            &formula, threshold, shift,
+                                        );
+                                        (key, adjusted)
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        if let Ok(results) = handle.join() {
+                            for (key, adjusted) in results {
+                                if let Some(cell) = self.cells.get_mut(&key) {
+                                    cell.formula = adjusted;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // 公式数量较少或单核，直接在当前线程处理
+                    for (key, formula) in formulas {
+                        let adjusted = crate::excel::formula::adjust_formula_rows(
+                            &formula, insert_at, n as i32,
+                        );
+                        if let Some(cell) = self.cells.get_mut(&key) {
+                            cell.formula = adjusted;
+                        }
+                    }
+                }
             }
         }
         for dv in &mut self.data_validations {

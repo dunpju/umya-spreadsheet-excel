@@ -283,6 +283,10 @@ pub struct ExcelViewer {
     add_column_pending: bool,
     /// 插入完成后滚动到最右列，使新列出现在可视区域
     scroll_to_last_col: bool,
+    /// 菜单栏触发的"添加行"操作标志
+    pub add_row: bool,
+    /// 插入完成后滚动到最后一行，使新行出现在可视区域
+    scroll_to_last_row: bool,
 }
 
 impl ExcelViewer {
@@ -312,6 +316,8 @@ impl ExcelViewer {
             add_column: false,
             add_column_pending: false,
             scroll_to_last_col: false,
+            add_row: false,
+            scroll_to_last_row: false,
         }
     }
 
@@ -412,7 +418,7 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.add_column, has_data);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.add_column, &mut self.add_row, has_data);
         });
 
         // 绘制导入对话框
@@ -437,6 +443,22 @@ impl eframe::App for ExcelViewer {
                     // 弹窗定位在屏幕中央
                     self.context_menu.position = ctx.screen_rect().center();
                 }
+            }
+        }
+
+        // 处理"编辑 → 添加行"：在表格最后一行下方插入1行，完成后滚动到底部
+        if self.add_row {
+            self.add_row = false;
+            if let Some(excel_data) = &mut self.excel_data {
+                if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                    let max_row = sheet.max_row;
+                    // 保存撤销快照
+                    Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                    // 在最后一行下方插入1行（与右键"在下方插入1行"相同）
+                    sheet.insert_rows(max_row, 1, true);
+                }
+                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                self.scroll_to_last_row = true;
             }
         }
 
@@ -686,6 +708,17 @@ impl eframe::App for ExcelViewer {
                                 egui::Pos2::new(content_rect.max.x, content_rect.max.y),
                             );
                             ui.scroll_to_rect(right_edge, None);
+                        }
+
+                        // 添加行后滚动到最后一行，使新行出现在可视区域内
+                        if self.scroll_to_last_row {
+                            self.scroll_to_last_row = false;
+                            let content_rect = ui.min_rect();
+                            let bottom_edge = egui::Rect::from_min_max(
+                                egui::Pos2::new(content_rect.min.x, content_rect.max.y - 2.0),
+                                egui::Pos2::new(content_rect.max.x, content_rect.max.y),
+                            );
+                            ui.scroll_to_rect(bottom_edge, None);
                         }
 
                         // 绘制数据有效性输入提示弹窗
