@@ -279,6 +279,10 @@ pub struct ExcelViewer {
     undo_stack: Vec<UndoSnapshot>,
     /// 菜单栏触发的"添加列"操作标志
     pub add_column: bool,
+    /// 标记当前确认弹窗由"编辑 → 添加列"触发（区别于右键菜单）
+    add_column_pending: bool,
+    /// 插入完成后滚动到最右列，使新列出现在可视区域
+    scroll_to_last_col: bool,
 }
 
 impl ExcelViewer {
@@ -306,6 +310,8 @@ impl ExcelViewer {
             file_path: None,
             undo_stack: Vec::new(),
             add_column: false,
+            add_column_pending: false,
+            scroll_to_last_col: false,
         }
     }
 
@@ -426,6 +432,8 @@ impl eframe::App for ExcelViewer {
                     self.context_menu.confirm_action = Some(ContextAction::InsertColumnRight);
                     self.context_menu.confirm_visible = true;
                     self.context_menu.confirm_established = false;
+                    // 标记来自"添加列"菜单，确认后自动滚动到最右列
+                    self.add_column_pending = true;
                     // 弹窗定位在屏幕中央
                     self.context_menu.position = ctx.screen_rect().center();
                 }
@@ -668,6 +676,17 @@ impl eframe::App for ExcelViewer {
                             &mut self.original_cell_data,
                             &mut self.context_menu,
                         );
+
+                        // 添加列后滚动到最右列，使新列出现在可视区域内
+                        if self.scroll_to_last_col {
+                            self.scroll_to_last_col = false;
+                            let content_rect = ui.min_rect();
+                            let right_edge = egui::Rect::from_min_max(
+                                egui::Pos2::new(content_rect.max.x - 2.0, content_rect.min.y),
+                                egui::Pos2::new(content_rect.max.x, content_rect.max.y),
+                            );
+                            ui.scroll_to_rect(right_edge, None);
+                        }
 
                         // 绘制数据有效性输入提示弹窗
                         if let Some(cell_rect) = cell_rect {
@@ -965,6 +984,7 @@ impl eframe::App for ExcelViewer {
                             self.context_menu.confirm_visible = false;
                             self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
+                            self.add_column_pending = false;
                         }
 
                         // 点击弹窗外部关闭（仅当弹窗已建立后检测，避免首帧误关）
@@ -980,6 +1000,7 @@ impl eframe::App for ExcelViewer {
                                             self.context_menu.confirm_visible = false;
                                             self.context_menu.confirm_established = false;
                                             self.context_menu.confirm_action = None;
+                                            self.add_column_pending = false;
                                         }
                                     }
                                 }
@@ -1047,6 +1068,11 @@ impl eframe::App for ExcelViewer {
                             self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
                             self.context_menu.visible = false;
+                            // 由"编辑 → 添加列"触发时，标记需要滚动到最右列
+                            if self.add_column_pending {
+                                self.add_column_pending = false;
+                                self.scroll_to_last_col = true;
+                            }
                         }
                     }
 
