@@ -13,7 +13,7 @@ use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 /// * `ui` - egui UI 上下文
 /// * `show_import_dialog` - 用于控制是否显示导入对话框的可变引用
 /// * `settings_panel` - 设置面板状态
-pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_panel: &mut SettingsPanelState) {
+pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_panel: &mut SettingsPanelState, add_column: &mut bool, has_data: bool) {
     egui::menu::bar(ui, |ui| {
         // 文件菜单
         ui.menu_button("文件", |ui| {
@@ -24,9 +24,12 @@ pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_
             ui.add_enabled(false, egui::Button::new("模板"));
         });
 
-        // 编辑菜单（暂未实现）
+        // 编辑菜单
         ui.menu_button("编辑", |ui| {
-            ui.label("编辑功能");
+            if ui.add_enabled(has_data, egui::Button::new("添加列")).clicked() {
+                ui.close_menu();
+                *add_column = true;
+            }
         });
 
         // 设置菜单

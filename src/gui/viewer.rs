@@ -277,6 +277,8 @@ pub struct ExcelViewer {
     pub file_path: Option<String>,
     /// 撤销栈：存储可撤销操作前的快照
     undo_stack: Vec<UndoSnapshot>,
+    /// 菜单栏触发的"添加列"操作标志
+    pub add_column: bool,
 }
 
 impl ExcelViewer {
@@ -303,6 +305,7 @@ impl ExcelViewer {
             settings_panel: SettingsPanelState::default(),
             file_path: None,
             undo_stack: Vec::new(),
+            add_column: false,
         }
     }
 
@@ -401,13 +404,32 @@ impl eframe::App for ExcelViewer {
         setup_fonts(ctx);
         
         // 绘制菜单栏
+        let has_data = self.excel_data.is_some();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.add_column, has_data);
         });
-        
+
         // 绘制导入对话框
         if let Some(path) = draw_import_dialog(&mut self.show_import_dialog) {
             self.start_async_load(path, ctx.clone());
+        }
+
+        // 处理"编辑 → 添加列"：复用 insert_confirm 确认弹窗流程
+        // 在最后一列 (max_col, 1) 上触发"在右侧插入列"操作
+        if self.add_column {
+            self.add_column = false;
+            if let Some(excel_data) = &self.excel_data {
+                if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                    let max_col = sheet.max_col;
+                    self.context_menu.target_cell = Some((max_col, 1));
+                    self.context_menu.insert_cols_count = 1;
+                    self.context_menu.confirm_action = Some(ContextAction::InsertColumnRight);
+                    self.context_menu.confirm_visible = true;
+                    self.context_menu.confirm_established = false;
+                    // 弹窗定位在屏幕中央
+                    self.context_menu.position = ctx.screen_rect().center();
+                }
+            }
         }
 
         // 绘制设置面板
