@@ -546,6 +546,116 @@ impl SheetData {
         }
     }
 
+    /// 在表格末尾追加一行。
+    ///
+    /// 与 `insert_rows(max_row, 1, true)` 不同，此方法使用 `old_max_row` 作为
+    /// 公式调整阈值，使得 `=SUM(B15:B199)` 等引用最后一行的公式能正确扩展为
+    /// `=SUM(B15:B200)`，将新增行纳入聚合范围。
+    ///
+    /// 使用多线程并行处理公式更新以提升性能。
+    pub fn append_row(&mut self) {
+        let old_max_row = self.max_row;
+
+        // 1. 增加 max_row
+        self.max_row += 1;
+
+        // 2. 新行样式继承：从原最后一行复制样式到新行
+        let style_cols: Vec<u32> = self.cells.iter()
+            .filter(|((row, _), _)| *row == old_max_row)
+            .map(|((_, col), _)| *col)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        for col in style_cols {
+            if let Some(template) = self.cells.get(&(old_max_row, col)) {
+                let styled = CellData {
+                    value: String::new(),
+                    raw_number: None,
+                    formula: String::new(),
+                    alignment: template.alignment.clone(),
+                    background_color: template.background_color,
+                    font_size: template.font_size,
+                    font_color: template.font_color,
+                    number_format: template.number_format.clone(),
+                };
+                self.cells.insert((old_max_row + 1, col), styled);
+            }
+        }
+
+        // 3. 扩展公式引用范围：将行号 >= old_max_row 的相对行引用下移1行
+        //    使得 =SUM(B15:B199) → =SUM(B15:B200)
+        //    使用多线程并行处理提升性能
+        {
+            let formulas: Vec<((u32, u32), String)> = self.cells.iter()
+                .filter(|(_, cell)| !cell.formula.is_empty())
+                .map(|(&key, cell)| (key, cell.formula.clone()))
+                .collect();
+
+            if !formulas.is_empty() {
+                let cpu_count = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+
+                if formulas.len() >= 100 && cpu_count > 1 {
+                    let num_threads = cpu_count.min(formulas.len());
+                    let chunk_size = (formulas.len() + num_threads - 1) / num_threads;
+                    let threshold = old_max_row;
+                    let shift = 1i32;
+
+                    let handles: Vec<std::thread::JoinHandle<Vec<((u32, u32), String)>>> = formulas
+                        .chunks(chunk_size)
+                        .map(|chunk| {
+                            let chunk = chunk.to_vec();
+                            std::thread::spawn(move || {
+                                chunk.into_iter()
+                                    .map(|(key, formula)| {
+                                        let adjusted = crate::excel::formula::adjust_formula_rows(
+                                            &formula, threshold, shift,
+                                        );
+                                        (key, adjusted)
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        if let Ok(results) = handle.join() {
+                            for (key, adjusted) in results {
+                                if let Some(cell) = self.cells.get_mut(&key) {
+                                    cell.formula = adjusted;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (key, formula) in formulas {
+                        let adjusted = crate::excel::formula::adjust_formula_rows(
+                            &formula, old_max_row, 1,
+                        );
+                        if let Some(cell) = self.cells.get_mut(&key) {
+                            cell.formula = adjusted;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. 调整数据有效性公式（通常数量较少，顺序处理）
+        for dv in &mut self.data_validations {
+            if !dv.formula1.is_empty() {
+                dv.formula1 = crate::excel::formula::adjust_formula_rows(
+                    &dv.formula1, old_max_row, 1,
+                );
+            }
+            if !dv.formula2.is_empty() {
+                dv.formula2 = crate::excel::formula::adjust_formula_rows(
+                    &dv.formula2, old_max_row, 1,
+                );
+            }
+        }
+    }
+
     /// 在指定位置插入 M 列
     ///
     /// # 参数
@@ -610,11 +720,60 @@ impl SheetData {
 
         // 5.5 修正已有公式引用：所有现有单元格和数据有效性中的公式，
         //     相对列引用 >= insert_at 的右移 m 列
-        for cell in self.cells.values_mut() {
-            if !cell.formula.is_empty() {
-                cell.formula = crate::excel::formula::adjust_formula_columns(
-                    &cell.formula, insert_at, m as i32,
-                );
+        //     单元格公式数量较多时使用多线程并行处理以提升性能
+        {
+            let formulas: Vec<((u32, u32), String)> = self.cells.iter()
+                .filter(|(_, cell)| !cell.formula.is_empty())
+                .map(|(&key, cell)| (key, cell.formula.clone()))
+                .collect();
+
+            if !formulas.is_empty() {
+                let cpu_count = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+
+                if formulas.len() >= 100 && cpu_count > 1 {
+                    let num_threads = cpu_count.min(formulas.len());
+                    let chunk_size = (formulas.len() + num_threads - 1) / num_threads;
+                    let threshold = insert_at;
+                    let shift = m as i32;
+
+                    let handles: Vec<std::thread::JoinHandle<Vec<((u32, u32), String)>>> = formulas
+                        .chunks(chunk_size)
+                        .map(|chunk| {
+                            let chunk = chunk.to_vec();
+                            std::thread::spawn(move || {
+                                chunk.into_iter()
+                                    .map(|(key, formula)| {
+                                        let adjusted = crate::excel::formula::adjust_formula_columns(
+                                            &formula, threshold, shift,
+                                        );
+                                        (key, adjusted)
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        if let Ok(results) = handle.join() {
+                            for (key, adjusted) in results {
+                                if let Some(cell) = self.cells.get_mut(&key) {
+                                    cell.formula = adjusted;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (key, formula) in formulas {
+                        let adjusted = crate::excel::formula::adjust_formula_columns(
+                            &formula, insert_at, m as i32,
+                        );
+                        if let Some(cell) = self.cells.get_mut(&key) {
+                            cell.formula = adjusted;
+                        }
+                    }
+                }
             }
         }
         for dv in &mut self.data_validations {

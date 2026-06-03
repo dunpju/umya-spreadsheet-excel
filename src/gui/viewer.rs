@@ -446,16 +446,15 @@ impl eframe::App for ExcelViewer {
             }
         }
 
-        // 处理"编辑 → 添加行"：在表格最后一行下方插入1行，完成后滚动到底部
+        // 处理"编辑 → 添加行"：在表格末尾追加一行，自动扩展公式引用范围，完成后滚动到底部
         if self.add_row {
             self.add_row = false;
             if let Some(excel_data) = &mut self.excel_data {
                 if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                    let max_row = sheet.max_row;
                     // 保存撤销快照
                     Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
-                    // 在最后一行下方插入1行（与右键"在下方插入1行"相同）
-                    sheet.insert_rows(max_row, 1, true);
+                    // 在末尾追加一行，公式引用范围自动扩展
+                    sheet.append_row();
                 }
                 crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                 self.scroll_to_last_row = true;
