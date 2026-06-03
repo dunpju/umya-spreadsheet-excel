@@ -709,6 +709,159 @@ pub fn adjust_formula_columns(formula: &str, threshold_col: u32, shift: i32) -> 
     result
 }
 
+// ========== 公式行偏移调整 ==========
+
+/// 调整公式字符串中的行引用。
+///
+/// 对行号 >= `threshold_row` 的**相对行引用**偏移 `shift` 行（正数下移，负数上移）。
+/// 绝对行引用（`$1`）不变，列号不变。跳过字符串字面量内的内容。
+///
+/// # 参数
+/// * `formula` - 公式字符串（可含前导 `=`）
+/// * `threshold_row` - 行号阈值，仅 >= 此行号的相对行引用会被偏移
+/// * `shift` - 偏移行数（正数下移，负数上移）
+pub fn adjust_formula_rows(formula: &str, threshold_row: u32, shift: i32) -> String {
+    if formula.is_empty() || shift == 0 {
+        return formula.to_string();
+    }
+    let chars: Vec<char> = formula.chars().collect();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+
+    // 跳过前导 '=' 或 '@'
+    if i < chars.len() && chars[i] == '=' {
+        result.push('=');
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '@' {
+        result.push('@');
+        i += 1;
+    }
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // 字符串字面量：原样输出
+        if ch == '"' {
+            result.push(ch);
+            i += 1;
+            while i < chars.len() {
+                result.push(chars[i]);
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // 尝试匹配单元格引用：[$]?[A-Za-z]+[$]?[0-9]+
+        if ch == '$' || ch.is_ascii_alphabetic() {
+            let start = i;
+            let mut pos = i;
+            let mut col_abs = false; // 列是否绝对引用 ($A)
+            let mut col_letters = String::new();
+            let mut row_abs = false;  // 行是否绝对引用 ($1)
+            let mut row_digits = String::new();
+
+            // 可选的列绝对前缀 $
+            if pos < chars.len() && chars[pos] == '$' {
+                col_abs = true;
+                pos += 1;
+            }
+
+            // 列字母
+            let col_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
+                col_letters.push(chars[pos].to_ascii_uppercase());
+                pos += 1;
+            }
+            if pos == col_start || col_letters.is_empty() {
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+
+            // 可选的行绝对前缀 $
+            if pos < chars.len() && chars[pos] == '$' {
+                row_abs = true;
+                pos += 1;
+            }
+
+            // 行号数字
+            let row_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_digit() {
+                row_digits.push(chars[pos]);
+                pos += 1;
+            }
+            if pos == row_start || row_digits.is_empty() {
+                // 没有行号 → 不是单元格引用
+                for c in &chars[start..pos] {
+                    result.push(*c);
+                }
+                i = pos;
+                continue;
+            }
+
+            // 到这里，成功匹配了一个单元格引用
+            // 解析列号（仅用于验证，列号不变）
+            let col_num = match letter_to_col(&col_letters) {
+                Ok(c) => c,
+                Err(_) => {
+                    for c in &chars[start..pos] {
+                        result.push(*c);
+                    }
+                    i = pos;
+                    continue;
+                }
+            };
+
+            // 解析行号
+            let row_num: u32 = match row_digits.parse() {
+                Ok(r) => r,
+                Err(_) => {
+                    for c in &chars[start..pos] {
+                        result.push(*c);
+                    }
+                    i = pos;
+                    continue;
+                }
+            };
+
+            // 判断是否需要偏移：行号 >= threshold_row 且行引用不是绝对引用
+            // 列号不变（列偏移由 adjust_formula_columns 负责）
+            if !row_abs && row_num >= threshold_row {
+                let new_row = (row_num as i32 + shift).max(1) as u32;
+                // 保留列绝对标记 $
+                if col_abs {
+                    result.push('$');
+                }
+                result.push_str(&col_letters);
+                if row_abs {
+                    result.push('$');
+                }
+                result.push_str(&new_row.to_string());
+            } else {
+                // 原样输出
+                for c in &chars[start..pos] {
+                    result.push(*c);
+                }
+            }
+            i = pos;
+            // 消除 "col_num 未使用" 警告
+            let _ = col_num;
+            continue;
+        }
+
+        // 其他字符原样输出
+        result.push(ch);
+        i += 1;
+    }
+
+    result
+}
+
 // ========== 求值器 ==========
 
 /// 从 SheetData 获取单元格的值
@@ -1609,5 +1762,103 @@ mod tests {
         let ast = parse_formula("=ROW(A10)").unwrap();
         let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "10");
+    }
+
+    // ========== adjust_formula_rows 测试 ==========
+
+    #[test]
+    fn test_adjust_formula_rows_basic() {
+        // 在第20行上方插入1行 → 行号 >=20 的相对引用 +1
+        assert_eq!(
+            adjust_formula_rows("=SUM(B15:B199)", 20, 1),
+            "=SUM(B15:B200)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_absolute_row() {
+        // 绝对行引用 $15, $199 不应被偏移
+        assert_eq!(
+            adjust_formula_rows("=SUM(B$15:B$199)", 20, 1),
+            "=SUM(B$15:B$199)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_mixed_ref() {
+        // 绝对列 + 相对行：$D15:$D199 → $D15:$D200
+        assert_eq!(
+            adjust_formula_rows("=SUM($D15:$D199)", 20, 1),
+            "=SUM($D15:$D200)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_absolute_col_absolute_row() {
+        // 完全绝对引用 $D$15:$D$199 → 不变
+        assert_eq!(
+            adjust_formula_rows("=SUM($D$15:$D$199)", 20, 1),
+            "=SUM($D$15:$D$199)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_below_threshold() {
+        // 行号 < threshold 的相对引用不变
+        assert_eq!(
+            adjust_formula_rows("=SUM(A1:A19)", 20, 1),
+            "=SUM(A1:A19)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_straddle_threshold() {
+        // 起始行 < threshold，结束行 >= threshold → 只偏移结束行
+        assert_eq!(
+            adjust_formula_rows("=SUM(A15:A25)", 20, 1),
+            "=SUM(A15:A26)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_multiple_refs() {
+        // 公式中多个引用
+        assert_eq!(
+            adjust_formula_rows("=A20+B30*C10", 20, 1),
+            "=A21+B31*C10"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_string_literal() {
+        // 字符串内的引用不应被修改
+        assert_eq!(
+            adjust_formula_rows(r#"=IF(A1="text","A20",B20)"#, 20, 1),
+            r#"=IF(A1="text","A20",B21)"#
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_negative_shift() {
+        // 删除行：负偏移
+        assert_eq!(
+            adjust_formula_rows("=SUM(B15:B200)", 20, -1),
+            "=SUM(B15:B199)"
+        );
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_empty() {
+        assert_eq!(adjust_formula_rows("", 20, 1), "");
+        assert_eq!(adjust_formula_rows("=SUM(A1:A10)", 20, 0), "=SUM(A1:A10)");
+    }
+
+    #[test]
+    fn test_adjust_formula_rows_at_prefix() {
+        // @ 前缀应保留
+        assert_eq!(
+            adjust_formula_rows("@SUM(A20:A30)", 20, 1),
+            "@SUM(A21:A31)"
+        );
     }
 }

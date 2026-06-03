@@ -471,6 +471,28 @@ impl SheetData {
         for (key, cell) in new_style_cells {
             self.cells.insert(key, cell);
         }
+
+        // 7. 修正已有公式引用：所有现有单元格和数据有效性中的公式，
+        //    行号 >= insert_at 的相对行引用下移 n 行
+        for cell in self.cells.values_mut() {
+            if !cell.formula.is_empty() {
+                cell.formula = crate::excel::formula::adjust_formula_rows(
+                    &cell.formula, insert_at, n as i32,
+                );
+            }
+        }
+        for dv in &mut self.data_validations {
+            if !dv.formula1.is_empty() {
+                dv.formula1 = crate::excel::formula::adjust_formula_rows(
+                    &dv.formula1, insert_at, n as i32,
+                );
+            }
+            if !dv.formula2.is_empty() {
+                dv.formula2 = crate::excel::formula::adjust_formula_rows(
+                    &dv.formula2, insert_at, n as i32,
+                );
+            }
+        }
     }
 
     /// 在指定位置插入 M 列
