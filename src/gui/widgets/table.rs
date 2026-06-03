@@ -5,17 +5,19 @@
 use eframe::egui;
 use crate::excel::reader::{CellAlignment, CellData, ExcelData, col_to_letter};
 use crate::gui::alignment::alignment_to_egui;
+use std::borrow::Cow;
 
 /// 获取单元格的显示文本，处理日期格式转换
-fn cell_display_text(cell: &CellData) -> String {
+/// 返回 Cow<str> 避免无谓的 String clone
+fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str> {
     if let Some(ref fmt) = cell.number_format {
         if ExcelData::is_date_format(fmt) {
             if let Ok(serial) = cell.value.parse::<f64>() {
-                return ExcelData::format_date(serial, fmt);
+                return Cow::Owned(ExcelData::format_date(serial, fmt));
             }
         }
     }
-    cell.value.clone()
+    Cow::Borrowed(&cell.value)
 }
 
 /// 绘制表格内容
@@ -109,20 +111,21 @@ pub fn draw_table_content(
     let table_top_left = rect.min;
     
     // 计算单元格像素矩形的辅助函数（相对于表格左上角）
+    // 仅用于键盘导航，不在渲染热路径上
     let get_cell_rect = |col: u32, row: u32| -> (f32, f32, f32, f32) {
         let mut x = header_width; // 行号列
         for c in 1..col {
             x += get_col_width(c) + border_width;
         }
-        
+
         let mut y = 0.0; // 表头行
         for r in 0..row {
             y += get_row_height(r) + border_width;
         }
-        
+
         let width = get_col_width(col);
         let height = get_row_height(row);
-        
+
         (x, y, width, height)
     };
     
@@ -232,9 +235,7 @@ pub fn draw_table_content(
         if let Some((col, row)) = *selected_cell {
             let mut new_col = col;
             let mut new_row = row;
-            let direction = if input.modifiers.shift { "Shift+Tab (左)" } else { "Tab (右)" };
-            
-            println!("[Tab键处理] 当前单元格: ({},{}), 方向: {}", col, row, direction);
+            let _direction = if input.modifiers.shift { "Shift+Tab (左)" } else { "Tab (右)" };
             
             // 获取sheet用于检查合并单元格
             let sheet = excel_data.get_sheet(current_sheet);
@@ -309,16 +310,12 @@ pub fn draw_table_content(
             
             if new_col != col || new_row != row {
                 new_selected_cell = Some((new_col, new_row));
-                println!("[Tab键处理] 新单元格: ({},{}), 是否在视口内: {}", new_col, new_row, is_cell_in_viewport(new_col, new_row));
-                
+
                 // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
                 if !is_cell_in_viewport(new_col, new_row) {
-                    println!("[Tab键处理] 触发滚动到单元格 ({},{})", new_col, new_row);
-                    
                     // 使用全局坐标进行滚动
                     let target_rect = get_cell_global_rect(new_col, new_row);
                     let clip_rect = ui.clip_rect();
-                    println!("[Tab键处理] 滚动目标矩形(全局): {:?}", target_rect);
 
                     // Excel行为：滚动最小距离使新单元格可见（滚动1行/列）
                     // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
@@ -336,10 +333,8 @@ pub fn draw_table_content(
                     scroll_to_rect = Some(target_rect);
                 }
             } else {
-                println!("[Tab键处理] 单元格位置未变化");
             }
         } else {
-            println!("[Tab键处理] 未选中任何单元格");
         }
         // 消费Tab键事件，防止传递到菜单栏
         ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Tab));
@@ -430,21 +425,14 @@ pub fn draw_table_content(
             }
             
             if !direction.is_empty() {
-                println!("[方向键处理] 当前单元格: ({},{}), 方向: {}", col, row, direction);
-                
                 if new_col != col || new_row != row {
                     new_selected_cell = Some((new_col, new_row));
-                    println!("[方向键处理] 新单元格: ({},{}), 是否在视口内: {}", new_col, new_row, is_cell_in_viewport(new_col, new_row));
-                    
+
                     // 触边滚动机制：只有当新单元格不在可视区域内时才触发滚动
                     if !is_cell_in_viewport(new_col, new_row) {
-                        println!("[方向键处理] 触发滚动到单元格 ({},{})", new_col, new_row);
-                        
                         // 使用全局坐标进行滚动
                         let target_rect = get_cell_global_rect(new_col, new_row);
                         let clip_rect = ui.clip_rect();
-                        println!("[方向键处理] 滚动目标矩形(全局): {:?}", target_rect);
-                        println!("[方向键处理] 视口: {:?}", clip_rect);
 
                         // Excel行为：滚动最小距离使新单元格可见（即滚动1行/列）
                         // 补偿冻结窗格：对比有效区域边界（而非 clip_rect）
@@ -464,7 +452,7 @@ pub fn draw_table_content(
 
                         scroll_to_rect = Some(target_rect);
                     }
-                    
+
                     // 消费方向键事件
                     ui.input_mut(|i| {
                         if input.key_pressed(egui::Key::ArrowUp) {
@@ -477,8 +465,6 @@ pub fn draw_table_content(
                             i.consume_key(input.modifiers, egui::Key::ArrowRight);
                         }
                     });
-                } else {
-                    println!("[方向键处理] 单元格位置未变化（已达边界）");
                 }
             }
         }
@@ -575,7 +561,7 @@ pub fn draw_table_content(
                                 format!("={}", f)
                             }
                         } else {
-                            cell_display_text(cell)
+                            cell_display_text(cell).into_owned()
                         }
                     })
                     .unwrap_or_default();
@@ -745,9 +731,25 @@ pub fn draw_table_content(
             row_cumulative_height.push(current_height);
         }
 
-        // 简化：确保第0行（列标题行）始终可见
-        let visible_rows_start = 0;
-        let visible_rows_end = sheet.max_row;
+        // 使用累积行高计算可见行范围（与列的可见范围计算逻辑一致）
+        let target_start_y = viewport_rect.min.y - tl_y - margin;
+        let target_end_y = viewport_rect.max.y - tl_y + margin;
+
+        let mut visible_rows_start = 0u32;
+        let mut visible_rows_end = sheet.max_row;
+
+        for (i, &height) in row_cumulative_height.iter().enumerate() {
+            if height > target_start_y && visible_rows_start == 0 {
+                visible_rows_start = i.saturating_sub(1).max(0) as u32;
+            }
+            if height > target_end_y {
+                visible_rows_end = i.min(sheet.max_row as usize) as u32;
+                break;
+            }
+        }
+
+        // 确保第0行（列标题行）始终可见
+        visible_rows_start = 0;
 
         // 冻结区域边界：主网格渲染跳过这些行列，由冻结覆盖层单独绘制
         let fr = sheet.frozen_rows;
@@ -819,7 +821,7 @@ pub fn draw_table_content(
                                             format!("={}", f)
                                         }
                                     } else {
-                                        cell_display_text(cell)
+                                        cell_display_text(cell).into_owned()
                                     }
                                 })
                                 .unwrap_or_default();
@@ -1044,7 +1046,7 @@ pub fn draw_table_content(
                         if merged_range.is_top_left(col, row) {
                             is_merged_top_left = true;
                             if let Some(cell) = sheet.get_cell(row, col) {
-                                cell_content = cell_display_text(cell);
+                                cell_content = cell_display_text(cell).into_owned();
                                 alignment = cell.alignment.clone();
                                 font_size = cell.font_size.map(|s| s as f32);
                                 font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -1055,7 +1057,7 @@ pub fn draw_table_content(
                     } else {
                         // 普通单元格
                         if let Some(cell) = sheet.get_cell(row, col) {
-                            cell_content = cell_display_text(cell);
+                            cell_content = cell_display_text(cell).into_owned();
                             alignment = cell.alignment.clone();
                             font_size = cell.font_size.map(|s| s as f32);
                             font_color = cell.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK);
@@ -1174,16 +1176,10 @@ pub fn draw_table_content(
             let cell_width = get_col_width(col);
             let cell_height = get_row_height(row);
 
-            // 检查合并单元格
-            let mut is_merged_top_left = false;
-            let mut is_merged_part = false;
-            if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                if merged_range.is_top_left(col, row) {
-                    is_merged_top_left = true;
-                } else {
-                    is_merged_part = true;
-                }
-            }
+            // 检查合并单元格（只调用一次 get_merged_range）
+            let merged_range = sheet.get_merged_range(col, row);
+            let is_merged_top_left = merged_range.map_or(false, |mr| mr.is_top_left(col, row));
+            let is_merged_part = merged_range.is_some() && !is_merged_top_left;
 
             if is_merged_part {
                 return;
@@ -1202,7 +1198,7 @@ pub fn draw_table_content(
 
             // 绘制背景
             if is_merged_top_left {
-                if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                if let Some(merged_range) = merged_range {
                     let mut mw = 0.0;
                     for c in merged_range.start_col..=merged_range.end_col {
                         mw += get_col_width(c) + border_width;
@@ -1295,10 +1291,7 @@ pub fn draw_table_content(
 
         // 绘制冻结列范围内的列标题（row 0，cols 1..=fc）
         for col in 1..=fc {
-            let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-            for c in 1..col {
-                fixed_x += get_col_width(c) + border_width;
-            }
+            let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
             painter.rect_filled(
@@ -1316,7 +1309,7 @@ pub fn draw_table_content(
         }
 
         // 绘制非冻结列的列标题（row 0，cols > fc）- scroll-dependent x
-        for col in (fc + 1).max(1)..=sheet.max_col {
+        for col in (fc + 1).max(visible_cols_start)..=visible_cols_end.min(sheet.max_col) {
             let col_x = tl_x + border_width + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
@@ -1342,16 +1335,10 @@ pub fn draw_table_content(
         // 绘制冻结顶部数据行（rows 1..=fr，所有数据列）
         // 注意：合并单元格可能向左溢出到冻结左侧区域
         for row in 1..=fr {
-            let mut fixed_y = viewport_rect.min.y;
-            for r in 0..row {
-                fixed_y += get_row_height(r) + border_width;
-            }
+            let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             // 冻结列部分（cols 1..=fc）
             for col in 1..=fc {
-                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                for c in 1..col {
-                    fixed_x += get_col_width(c) + border_width;
-                }
+                let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
             }
             // 非冻结列部分（cols > fc）- scroll-dependent x
@@ -1385,10 +1372,7 @@ pub fn draw_table_content(
 
         // 左上角冻结列范围内的列标题（row 0，cols 1..=fc）
         for col in 1..=fc {
-            let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-            for c in 1..col {
-                fixed_x += get_col_width(c) + border_width;
-            }
+            let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
             painter.rect_filled(
@@ -1407,10 +1391,7 @@ pub fn draw_table_content(
 
         // 左上角冻结行范围内的行号（rows 1..=fr）
         for row in 1..=fr {
-            let mut fixed_y = viewport_rect.min.y;
-            for r in 0..row {
-                fixed_y += get_row_height(r) + border_width;
-            }
+            let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             let row_height = get_row_height(row);
             painter.rect_filled(
                 egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
@@ -1428,21 +1409,15 @@ pub fn draw_table_content(
 
         // 左上角冻结数据单元格（冻结行 ∩ 冻结列）
         for row in 1..=fr {
-            let mut fixed_y = viewport_rect.min.y;
-            for r in 0..row {
-                fixed_y += get_row_height(r) + border_width;
-            }
+            let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             for col in 1..=fc {
-                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                for c in 1..col {
-                    fixed_x += get_col_width(c) + border_width;
-                }
+                let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
             }
         }
 
         // 非冻结行的行号（col 0，rows > fr）
-        for row in (fr + 1).max(1)..=sheet.max_row {
+        for row in (fr + 1).max(visible_rows_start)..=visible_rows_end.min(sheet.max_row) {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             let row_width = header_width;
             let row_height = get_row_height(row);
@@ -1472,10 +1447,7 @@ pub fn draw_table_content(
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
             if row_y >= viewport_rect.max.y { break; }
             for col in 1..=fc {
-                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                for c in 1..col {
-                    fixed_x += get_col_width(c) + border_width;
-                }
+                let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, row_y);
             }
         }
@@ -1502,10 +1474,7 @@ pub fn draw_table_content(
             );
             // 重绘冻结列标题
             for col in 1..=fc {
-                let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                for c in 1..col {
-                    fixed_x += get_col_width(c) + border_width;
-                }
+                let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 let col_width = get_col_width(col);
                 let col_height = get_row_height(0);
                 painter.rect_filled(
@@ -1523,10 +1492,7 @@ pub fn draw_table_content(
             }
             // 重绘冻结行号
             for row in 1..=fr {
-                let mut fixed_y = viewport_rect.min.y;
-                for r in 0..row {
-                    fixed_y += get_row_height(r) + border_width;
-                }
+                let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
                 let row_height = get_row_height(row);
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
@@ -1543,15 +1509,9 @@ pub fn draw_table_content(
             }
             // 重绘角落冻结数据单元格
             for row in 1..=fr {
-                let mut fixed_y = viewport_rect.min.y;
-                for r in 0..row {
-                    fixed_y += get_row_height(r) + border_width;
-                }
+                let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
                 for col in 1..=fc {
-                    let mut fixed_x = viewport_rect.min.x + header_width + border_width;
-                    for c in 1..col {
-                        fixed_x += get_col_width(c) + border_width;
-                    }
+                    let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                     draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
                 }
             }
@@ -1805,7 +1765,7 @@ pub fn draw_table_content(
                     if edit_value.starts_with('=') {
                         c.formula.clone()
                     } else {
-                        cell_display_text(c)
+                        cell_display_text(c).into_owned()
                     }
                 })
                 .unwrap_or_default();

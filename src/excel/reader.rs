@@ -241,6 +241,9 @@ pub struct SheetData {
     pub frozen_cols: u32,
     /// 数据有效性规则列表
     pub data_validations: Vec<DataValidationInfo>,
+    /// 合并单元格索引：映射每个被合并覆盖的单元格到 merged_cells 中的索引
+    /// 用于 O(1) 查找替代原来的 O(n) 线性扫描
+    pub merge_index: HashMap<(u32, u32), usize>,
 }
 
 impl SheetData {
@@ -260,6 +263,19 @@ impl SheetData {
             frozen_rows: 0,
             frozen_cols: 0,
             data_validations: Vec::new(),
+            merge_index: HashMap::new(),
+        }
+    }
+
+    /// 重建合并单元格索引（在 merged_cells 变更后调用）
+    pub fn rebuild_merge_index(&mut self) {
+        self.merge_index.clear();
+        for (idx, mr) in self.merged_cells.iter().enumerate() {
+            for row in mr.start_row..=mr.end_row {
+                for col in mr.start_col..=mr.end_col {
+                    self.merge_index.insert((col, row), idx);
+                }
+            }
         }
     }
 
@@ -284,7 +300,9 @@ impl SheetData {
     /// # 返回值
     /// 如果单元格在合并范围内返回 Some(&CellRange)，否则返回 None
     pub fn get_merged_range(&self, col: u32, row: u32) -> Option<&CellRange> {
-        self.merged_cells.iter().find(|r| r.contains(col, row))
+        self.merge_index
+            .get(&(col, row))
+            .and_then(|&idx| self.merged_cells.get(idx))
     }
 
     /// 获取指定单元格的数据有效性输入提示信息
@@ -544,6 +562,9 @@ impl SheetData {
                 );
             }
         }
+
+        // 8. 重建合并单元格索引
+        self.rebuild_merge_index();
     }
 
     /// 在表格末尾追加一行。
@@ -986,6 +1007,9 @@ impl SheetData {
                 self.data_validations.push(new_dv);
             }
         }
+
+        // 9. 重建合并单元格索引
+        self.rebuild_merge_index();
     }
 }
 
@@ -1229,6 +1253,7 @@ impl ExcelData {
 
         // 文件加载后立即求值所有公式
         for sheet in &mut sheets {
+            sheet.rebuild_merge_index();
             crate::excel::formula::evaluate_sheet(sheet);
         }
 
@@ -1612,12 +1637,12 @@ impl ExcelData {
 /// # 返回值
 /// 对应的 Excel 列名
 pub fn col_to_letter(mut col: u32) -> String {
-    let mut result = String::new();
+    let mut chars = Vec::new();
     while col > 0 {
         col -= 1;
-        // 计算当前位的字母并插入到结果前面
-        result.insert(0, (b'A' + (col % 26) as u8) as char);
+        chars.push((b'A' + (col % 26) as u8) as char);
         col /= 26;
     }
-    result
+    chars.reverse();
+    chars.into_iter().collect()
 }
