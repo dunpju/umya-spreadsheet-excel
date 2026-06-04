@@ -10,3 +10,4 @@ egui = "0.34.3"
 rfd = "0.17.2"
 serde_yaml = "0.9"
 dirs = "6"
+
