@@ -829,9 +829,10 @@ pub fn adjust_formula_rows(formula: &str, threshold_row: u32, shift: i32) -> Str
                 }
             };
 
-            // 判断是否需要偏移：行号 >= threshold_row 且行引用不是绝对引用
+            // 判断是否需要偏移：行号 >= threshold_row
+            // 注意：Excel 插入行时，无论行引用是绝对($1)还是相对(1)都会被调整
             // 列号不变（列偏移由 adjust_formula_columns 负责）
-            if !row_abs && row_num >= threshold_row {
+            if row_num >= threshold_row {
                 let new_row = (row_num as i32 + shift).max(1) as u32;
                 // 保留列绝对标记 $
                 if col_abs {
@@ -1777,10 +1778,16 @@ mod tests {
 
     #[test]
     fn test_adjust_formula_rows_absolute_row() {
-        // 绝对行引用 $15, $199 不应被偏移
+        // 绝对行引用 $15, $199 在插入行时也需要调整
+        // 行号 15 < 20 不变，行号 199 >= 20 偏移为 200
         assert_eq!(
             adjust_formula_rows("=SUM(B$15:B$199)", 20, 1),
-            "=SUM(B$15:B$199)"
+            "=SUM(B$15:B$200)"
+        );
+        // 两个都 >= threshold
+        assert_eq!(
+            adjust_formula_rows("=SUM(B$25:B$30)", 20, 1),
+            "=SUM(B$26:B$31)"
         );
     }
 
@@ -1795,10 +1802,22 @@ mod tests {
 
     #[test]
     fn test_adjust_formula_rows_absolute_col_absolute_row() {
-        // 完全绝对引用 $D$15:$D$199 → 不变
+        // 完全绝对引用 $D$15:$D$199 → 插入行时绝对引用的行号也需要调整
+        // 行号 15 < 20 不变，行号 199 >= 20 偏移为 200
         assert_eq!(
             adjust_formula_rows("=SUM($D$15:$D$199)", 20, 1),
-            "=SUM($D$15:$D$199)"
+            "=SUM($D$15:$D$200)"
+        );
+        // 用户场景：D12=SUM($D$15:$D$45)，在 B26 下方插入 100 行
+        // insert_at = 27, 15 < 27 不变, 45 >= 27 偏移为 145
+        assert_eq!(
+            adjust_formula_rows("=SUM($D$15:$D$45)", 27, 100),
+            "=SUM($D$15:$D$145)"
+        );
+        // 两个行号都 >= threshold，都偏移
+        assert_eq!(
+            adjust_formula_rows("=SUM($D$30:$D$45)", 27, 100),
+            "=SUM($D$130:$D$145)"
         );
     }
 

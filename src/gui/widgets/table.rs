@@ -1221,6 +1221,7 @@ pub fn draw_table_content(
                         egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(mw, mh)),
                         0.0,
                         egui::Stroke::new(border_width, egui::Color32::GRAY),
+                        egui::StrokeKind::Outside,
                     );
 
                     // 绘制内容
@@ -1257,6 +1258,7 @@ pub fn draw_table_content(
                     egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height)),
                     0.0,
                     egui::Stroke::new(border_width, egui::Color32::GRAY),
+                    egui::StrokeKind::Outside,
                 );
 
                 // 绘制内容
@@ -1321,7 +1323,7 @@ pub fn draw_table_content(
 
             if col_rect.max.x > viewport_rect.min.x + frozen_left_width && col_rect.min.x < viewport_rect.max.x {
                 painter.rect_filled(col_rect, 0.0, egui::Color32::LIGHT_GRAY);
-                painter.rect_stroke(col_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY));
+                painter.rect_stroke(col_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY), egui::StrokeKind::Outside);
                 painter.text(
                     egui::Pos2::new(col_rect.center().x, col_rect.center().y),
                     egui::Align2::CENTER_CENTER,
@@ -1429,7 +1431,7 @@ pub fn draw_table_content(
 
             if row_rect.max.y > viewport_rect.min.y + frozen_top_height && row_rect.min.y < viewport_rect.max.y {
                 painter.rect_filled(row_rect, 0.0, egui::Color32::LIGHT_GRAY);
-                painter.rect_stroke(row_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY));
+                painter.rect_stroke(row_rect, 0.0, egui::Stroke::new(border_width, egui::Color32::GRAY), egui::StrokeKind::Outside);
                 painter.text(
                     egui::Pos2::new(row_rect.center().x, row_rect.center().y),
                     egui::Align2::CENTER_CENTER,
@@ -1573,6 +1575,7 @@ pub fn draw_table_content(
                 egui::Rect::from_min_size(egui::Pos2::new(sel_x, sel_y), egui::vec2(sel_w, sel_h)),
                 0.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 112, 192)),
+                egui::StrokeKind::Outside,
             );
 
             // 保存选中单元格屏幕矩形，供数据有效性弹窗定位
@@ -1654,7 +1657,7 @@ pub fn draw_table_content(
                     egui::vec2(input_width, input_height)
                 );
                 let builder = egui::UiBuilder::new().max_rect(edit_rect);
-                ui.allocate_new_ui(builder, |ui| {
+                ui.scope_builder(builder, |ui| {
                         let text_edit = egui::TextEdit::singleline(edit_value)
                             .font(egui::FontId::default())
                             .desired_width(input_width)

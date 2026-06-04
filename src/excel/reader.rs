@@ -1077,33 +1077,33 @@ impl ExcelData {
             .map_err(|e| format!("读取失败: {}", e))?;
 
         // 获取主题对象，用于解析主题颜色
-        let theme = book.get_theme();
+        let theme = book.theme();
 
         let mut sheets = Vec::new();
 
         // 遍历工作簿中的所有工作表
-        for worksheet in book.get_sheet_collection().iter() {
+        for worksheet in book.sheet_collection().iter() {
             // 创建工作表数据对象
-            let mut sheet = SheetData::new(worksheet.get_name().to_string());
+            let mut sheet = SheetData::new(worksheet.name().to_string());
 
             // 使用库提供的方法动态获取工作表的最大行和最大列（去除硬编码限制）
-            let highest_row = worksheet.get_highest_row();
-            let highest_col = worksheet.get_highest_column();
+            let highest_row = worksheet.highest_row();
+            let highest_col = worksheet.highest_column();
 
             // 遍历所有单元格，读取有数据的单元格
             for row_idx in 1..=highest_row {
                 for col_idx in 1..=highest_col {
                     // umya-spreadsheet 的 get_cell 方法期望 (col, row) 顺序（符合 Excel 惯例）
-                    if let Some(cell) = worksheet.get_cell((col_idx, row_idx)) {
-                        let value = cell.get_value().to_string();
-                        let raw_number = cell.get_value_number();
-                        let style = worksheet.get_style((col_idx, row_idx));
+                    if let Some(cell) = worksheet.cell((col_idx, row_idx)) {
+                        let value = cell.value().to_string();
+                        let raw_number = cell.value_number();
+                        let style = worksheet.style((col_idx, row_idx));
                         let (alignment, background_color, font_size, font_color, number_format) = Self::parse_style(style, theme);
 
                         let cell_data = CellData {
                             value,
                             raw_number,
-                            formula: cell.get_formula().to_string(),
+                            formula: cell.formula().to_string(),
                             alignment,
                             background_color,
                             font_size,
@@ -1121,17 +1121,17 @@ impl ExcelData {
             sheet.max_col = highest_col;
 
             // 读取合并单元格信息
-            for range in worksheet.get_merge_cells() {
+            for range in worksheet.merge_cells() {
                 if let (Some(start_row), Some(start_col), Some(end_row), Some(end_col)) = (
-                    range.get_coordinate_start_row(),
-                    range.get_coordinate_start_col(),
-                    range.get_coordinate_end_row(),
-                    range.get_coordinate_end_col(),
+                    range.coordinate_start_row(),
+                    range.coordinate_start_col(),
+                    range.coordinate_end_row(),
+                    range.coordinate_end_col(),
                 ) {
-                    let start_row_num = *start_row.get_num();
-                    let start_col_num = *start_col.get_num();
-                    let end_row_num = *end_row.get_num();
-                    let end_col_num = *end_col.get_num();
+                    let start_row_num = start_row.num();
+                    let start_col_num = start_col.num();
+                    let end_row_num = end_row.num();
+                    let end_col_num = end_col.num();
                     
                     // 确保合并范围在有效数据区域内
                     if end_col_num <= highest_col && end_row_num <= highest_row {
@@ -1148,49 +1148,49 @@ impl ExcelData {
 
             // 读取列宽信息
             let mut col_index = 1;
-            for col_dimension in worksheet.get_column_dimensions() {
-                let width = col_dimension.get_width();
+            for col_dimension in worksheet.column_dimensions() {
+                let width = col_dimension.width();
                 // 只保存宽度大于0的列
-                if *width > 0.0 {
-                    sheet.column_widths.insert(col_index, *width);
+                if width > 0.0 {
+                    sheet.column_widths.insert(col_index, width);
                 }
                 col_index += 1;
             }
 
             // 读取行高信息
-            for row_dimension in worksheet.get_row_dimensions() {
-                let row_num = *row_dimension.get_row_num();
-                let height = row_dimension.get_height();
+            for row_dimension in worksheet.row_dimensions() {
+                let row_num = row_dimension.row_num();
+                let height = row_dimension.height();
                 // 只保存高度大于0的行
-                if *height > 0.0 {
-                    sheet.row_heights.insert(row_num, *height);
+                if height > 0.0 {
+                    sheet.row_heights.insert(row_num, height);
                 }
             }
 
             // 解析冻结窗格信息
-            if let Some(sheet_view) = worksheet.get_sheets_views().get_sheet_view_list().first() {
-                if let Some(pane) = sheet_view.get_pane() {
+            if let Some(sheet_view) = worksheet.sheets_views().sheet_view_list().first() {
+                if let Some(pane) = sheet_view.pane() {
                     use umya_spreadsheet::PaneStateValues;
-                    let state = pane.get_state();
+                    let state = pane.state();
                     if matches!(state, PaneStateValues::Frozen | PaneStateValues::FrozenSplit) {
                         // umya-spreadsheet 命名与 OOXML 对照：
                         // horizontal_split → XML xSplit → 冻结列数（水平位置）
                         // vertical_split   → XML ySplit → 冻结行数（垂直位置）
-                        sheet.frozen_cols = *pane.get_horizontal_split() as u32;
-                        sheet.frozen_rows = *pane.get_vertical_split() as u32;
+                        sheet.frozen_cols = pane.horizontal_split() as u32;
+                        sheet.frozen_rows = pane.vertical_split() as u32;
                     }
                 }
             }
 
             // 读取数据有效性规则
-            if let Some(dvs) = worksheet.get_data_validations() {
-                for dv in dvs.get_data_validation_list() {
-                    let show_input = *dv.get_show_input_message();
-                    let show_error = *dv.get_show_error_message();
-                    let title = dv.get_prompt_title().to_string();
-                    let prompt = dv.get_prompt().to_string();
-                    let err_title = dv.get_error_title().to_string();
-                    let err_msg = dv.get_error_message().to_string();
+            if let Some(dvs) = worksheet.data_validations() {
+                for dv in dvs.data_validation_list() {
+                    let show_input = dv.show_input_message();
+                    let show_error = dv.show_error_message();
+                    let title = dv.prompt_title().to_string();
+                    let prompt = dv.prompt().to_string();
+                    let err_title = dv.error_title().to_string();
+                    let err_msg = dv.error_message().to_string();
 
                     if !show_input && !show_error { continue; }
 
@@ -1204,7 +1204,7 @@ impl ExcelData {
                         umya_spreadsheet::DataValidationValues::Custom => DataValidationType::Custom,
                         _ => DataValidationType::None,
                     };
-                    let dv_operator = match dv.get_operator() {
+                    let dv_operator = match dv.operator() {
                         umya_spreadsheet::DataValidationOperatorValues::Between => DataValidationOperator::Between,
                         umya_spreadsheet::DataValidationOperatorValues::NotBetween => DataValidationOperator::NotBetween,
                         umya_spreadsheet::DataValidationOperatorValues::Equal => DataValidationOperator::Equal,
@@ -1216,11 +1216,11 @@ impl ExcelData {
                     };
 
                     let mut ranges = Vec::new();
-                    for range in dv.get_sequence_of_references().get_range_collection() {
-                        let sc = range.get_coordinate_start_col().map(|c| *c.get_num());
-                        let sr = range.get_coordinate_start_row().map(|r| *r.get_num());
-                        let ec = range.get_coordinate_end_col().map(|c| *c.get_num());
-                        let er = range.get_coordinate_end_row().map(|r| *r.get_num());
+                    for range in dv.sequence_of_references().range_collection() {
+                        let sc = range.coordinate_start_col().map(|c| c.num());
+                        let sr = range.coordinate_start_row().map(|r| r.num());
+                        let ec = range.coordinate_end_col().map(|c| c.num());
+                        let er = range.coordinate_end_row().map(|r| r.num());
                         if let (Some(sc), Some(sr), Some(ec), Some(er)) = (sc, sr, ec, er) {
                             ranges.push(CellRange::new(sr, sc, er, ec));
                         }
@@ -1234,8 +1234,8 @@ impl ExcelData {
                             show_error_message: show_error,
                             dv_type,
                             dv_operator,
-                            formula1: dv.get_formula1().to_string(),
-                            formula2: dv.get_formula2().to_string(),
+                            formula1: dv.formula1().to_string(),
+                            formula2: dv.formula2().to_string(),
                             ranges,
                         });
                     }
@@ -1278,10 +1278,10 @@ impl ExcelData {
         let mut number_format: Option<String> = None;
 
         // 解析对齐方式
-        if let Some(align) = style.get_alignment() {
+        if let Some(align) = style.alignment() {
             // 解析水平对齐方式
-            let horizontal = align.get_horizontal();
-            let h_str = horizontal.get_value_string();
+            let horizontal = align.horizontal();
+            let h_str = horizontal.value_string();
             alignment.horizontal = match &*h_str {
                 "left" => HorizontalAlignment::Left,
                 "center" => HorizontalAlignment::Center,
@@ -1294,8 +1294,8 @@ impl ExcelData {
             };
 
             // 解析垂直对齐方式
-            let vertical = align.get_vertical();
-            let v_str = vertical.get_value_string();
+            let vertical = align.vertical();
+            let v_str = vertical.value_string();
             alignment.vertical = match &*v_str {
                 "top" => VerticalAlignment::Top,
                 "center" => VerticalAlignment::Center,
@@ -1305,9 +1305,9 @@ impl ExcelData {
             };
         }
 
-        // 解析背景颜色（使用 get_argb_with_theme 自动解析主题颜色和 tint）
-        if let Some(bg_color) = style.get_background_color() {
-            let resolved = bg_color.get_argb_with_theme(theme);
+        // 解析背景颜色（使用 argb_with_theme 自动解析主题颜色和 tint）
+        if let Some(bg_color) = style.background_color() {
+            let resolved = bg_color.argb_with_theme(theme);
             if !resolved.is_empty() && resolved != "00000000" {
                 if let Ok(rgb) = Self::parse_hex_color(&resolved) {
                     background_color = Some(rgb);
@@ -1316,12 +1316,12 @@ impl ExcelData {
         }
 
         // 解析字体信息（大小和颜色）
-        if let Some(font) = style.get_font() {
-            font_size = Some(*font.get_size());
+        if let Some(font) = style.font() {
+            font_size = Some(font.size());
 
             // 解析字体颜色
-            let color = font.get_color();
-            let resolved = color.get_argb_with_theme(theme);
+            let color = font.color();
+            let resolved = color.argb_with_theme(theme);
             if !resolved.is_empty() && resolved != "00000000" {
                 if let Ok(rgb) = Self::parse_hex_color(&resolved) {
                     font_color = Some(rgb);
@@ -1330,8 +1330,8 @@ impl ExcelData {
         }
 
         // 解析数字格式
-        if let Some(num_fmt) = style.get_number_format() {
-            let fmt = num_fmt.get_format_code();
+        if let Some(num_fmt) = style.number_format() {
+            let fmt = num_fmt.format_code();
             if !fmt.is_empty() && fmt != "General" {
                 number_format = Some(fmt.to_string());
             }

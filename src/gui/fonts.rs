@@ -3,6 +3,7 @@
 //! 负责加载和设置中文字体，确保中文能在界面中正常显示
 
 use eframe::egui;
+use std::sync::Arc;
 
 /// 加载中文字体
 /// 
@@ -49,7 +50,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
         // 添加字体数据
         fonts.font_data.insert(
             font_name.clone(),
-            egui::FontData::from_owned(font_data),
+            Arc::new(egui::FontData::from_owned(font_data)),
         );
         
         // 将字体插入到字体族的首位，优先使用

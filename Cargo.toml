@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-umya-spreadsheet = "2.2.0"
-eframe = "0.29"
-egui = "0.29"
-rfd = "0.14"
-serde = { version = "1", features = ["derive"] }
+umya-spreadsheet = "3.0"
+eframe = "0.34.3"
+egui = "0.34.3"
+rfd = "0.17.2"
 serde_yaml = "0.9"
-dirs = "5"
+dirs = "6"

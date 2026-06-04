@@ -406,18 +406,19 @@ impl ExcelViewer {
 
 /// 实现 eframe::App trait，这是 egui 应用程序的入口
 impl eframe::App for ExcelViewer {
-    /// 每帧更新 UI
-    /// 
+    /// 每帧绘制 UI
+    ///
     /// # 参数
-    /// * `ctx` - egui 上下文
+    /// * `ui` - egui UI 上下文
     /// * `_frame` - eframe 框架
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // 设置中文字体
-        setup_fonts(ctx);
-        
+        setup_fonts(&ctx);
+
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.add_column, &mut self.add_row, has_data);
         });
 
@@ -441,7 +442,7 @@ impl eframe::App for ExcelViewer {
                     // 标记来自"添加列"菜单，确认后自动滚动到最右列
                     self.add_column_pending = true;
                     // 弹窗定位在屏幕中央
-                    self.context_menu.position = ctx.screen_rect().center();
+                    self.context_menu.position = ctx.content_rect().center();
                 }
             }
         }
@@ -471,8 +472,8 @@ impl eframe::App for ExcelViewer {
                 .open(&mut keep_open)
                 .resizable(false)
                 .collapsible(false)
-                .default_pos(ctx.screen_rect().center() - egui::vec2(190.0, 80.0))
-                .show(ctx, |ui| {
+                .default_pos(ctx.content_rect().center() - egui::vec2(190.0, 80.0))
+                .show(&ctx, |ui| {
                     ui.set_min_width(420.0);
                     // 自定义小字体标题栏
                     ui.horizontal(|ui| {
@@ -579,9 +580,9 @@ impl eframe::App for ExcelViewer {
         // 先渲染 status_bar（最底部），再渲染 sheet_bar（其上方），CentralPanel 在最上面
 
         // 文件路径状态栏（最底部）
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(20.0)
-            .show(ctx, |ui| {
+        egui::Panel::bottom("status_bar")
+            .exact_size(20.0)
+            .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(6.0);
                     if let Some(path) = &self.file_path {
@@ -596,9 +597,9 @@ impl eframe::App for ExcelViewer {
 
         // 工作表选择器（状态栏上方）
         if self.excel_data.is_some() {
-            egui::TopBottomPanel::bottom("sheet_bar")
-                .exact_height(28.0)
-                .show(ctx, |ui| {
+            egui::Panel::bottom("sheet_bar")
+                .exact_size(28.0)
+                .show_inside(ui, |ui| {
                     ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
                     ui.horizontal(|ui| {
                         for (i, sheet) in self.excel_data.as_ref().unwrap().sheets.iter().enumerate() {
@@ -612,7 +613,7 @@ impl eframe::App for ExcelViewer {
         }
 
         // 主内容区域
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(excel_data) = &mut self.excel_data {
                 // Ctrl+Z 撤销
                 if ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {

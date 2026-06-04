@@ -14,11 +14,11 @@ use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 /// * `show_import_dialog` - 用于控制是否显示导入对话框的可变引用
 /// * `settings_panel` - 设置面板状态
 pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_panel: &mut SettingsPanelState, add_column: &mut bool, add_row: &mut bool, has_data: bool) {
-    egui::menu::bar(ui, |ui| {
+    egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
         ui.menu_button("文件", |ui| {
             if ui.button("导入").clicked() {
-                ui.close_menu();
+                ui.close();
                 *show_import_dialog = true;
             }
             ui.add_enabled(false, egui::Button::new("模板"));
@@ -27,11 +27,11 @@ pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_
         // 编辑菜单
         ui.menu_button("编辑", |ui| {
             if ui.add_enabled(has_data, egui::Button::new("添加列")).clicked() {
-                ui.close_menu();
+                ui.close();
                 *add_column = true;
             }
             if ui.add_enabled(has_data, egui::Button::new("添加行")).clicked() {
-                ui.close_menu();
+                ui.close();
                 *add_row = true;
             }
         });
@@ -40,12 +40,12 @@ pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_
         ui.menu_button("设置", |ui| {
             ui.menu_button("插入", |ui| {
                 if ui.button("列").clicked() {
-                    ui.close_menu();
+                    ui.close();
                     settings_panel.visible = true;
                     settings_panel.active_page = Some(SettingsPage::ColumnConfig);
                 }
                 if ui.button("行").clicked() {
-                    ui.close_menu();
+                    ui.close();
                     settings_panel.visible = true;
                     settings_panel.active_page = Some(SettingsPage::RowConfig);
                 }
