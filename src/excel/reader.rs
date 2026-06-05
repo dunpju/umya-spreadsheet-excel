@@ -490,6 +490,66 @@ impl SheetData {
             self.cells.insert(key, cell);
         }
 
+        // 6.5 复制合并结构：将源行的合并范围偏移到新行位置
+        // 源行 = insert_at + n 处（即原来的 insert_at 行，已被下移）
+        // 只复制行范围完全落在源行内的合并
+        let source_merges: Vec<CellRange> = self.merged_cells.iter()
+            .filter(|mr| {
+                mr.start_row >= insert_at + n && mr.end_row < insert_at + n + n
+            })
+            .copied()
+            .collect();
+        let row_shift = insert_at as i32 - (insert_at + n) as i32;
+        for mr in &source_merges {
+            let new_start_row = (mr.start_row as i32 + row_shift).max(1) as u32;
+            let new_end_row = (mr.end_row as i32 + row_shift).max(1) as u32;
+            let new_merge = CellRange::new(
+                new_start_row,
+                mr.start_col,
+                new_end_row,
+                mr.end_col,
+            );
+            // 去重：不添加已存在的合并范围
+            if !self.merged_cells.iter().any(|existing| {
+                existing.start_row == new_merge.start_row
+                && existing.start_col == new_merge.start_col
+                && existing.end_row == new_merge.end_row
+                && existing.end_col == new_merge.end_col
+            }) {
+                self.merged_cells.push(new_merge);
+            }
+        }
+
+        // 6.6 复制数据有效性规则：将范围完全落在源行内的数据有效性复制并偏移到新行
+        let source_dvs: Vec<DataValidationInfo> = self.data_validations.iter()
+            .filter(|dv| {
+                dv.ranges.iter().any(|r| {
+                    r.start_row >= insert_at + n && r.end_row < insert_at + n + n
+                })
+            })
+            .cloned()
+            .collect();
+        for dv in &source_dvs {
+            let mut new_dv = dv.clone();
+            for r in &mut new_dv.ranges {
+                let new_start = (r.start_row as i32 + row_shift).max(1) as u32;
+                let new_end = (r.end_row as i32 + row_shift).max(1) as u32;
+                r.start_row = new_start;
+                r.end_row = new_end;
+            }
+            if !new_dv.formula1.is_empty() {
+                new_dv.formula1 = crate::excel::formula::adjust_formula_rows(
+                    &new_dv.formula1, insert_at, -(n as i32),
+                );
+            }
+            if !new_dv.formula2.is_empty() {
+                new_dv.formula2 = crate::excel::formula::adjust_formula_rows(
+                    &new_dv.formula2, insert_at, -(n as i32),
+                );
+            }
+            self.data_validations.push(new_dv);
+        }
+
         // 7. 修正已有公式引用：所有现有单元格和数据有效性中的公式，
         //    行号 >= insert_at 的相对行引用下移 n 行
         //    单元格公式数量较多时使用多线程并行处理以提升性能
@@ -942,11 +1002,16 @@ impl SheetData {
         }
 
         // 7. 复制合并结构
+        // 只复制完全落在源列范围内的合并范围（避免部分重叠的合并被错误复制）
+        // Phase A 已经移动了合并范围的列号，需要还原到移动前的坐标来判断
         if options.copy_merge {
-            // 收集所有涉及源列的合并范围
+            // Phase A 移动后的合并中，找出源列对应的原始合并
+            // 源列在移动后的位置是 source_start_col..source_start_col+m
+            // （右侧插入时源列未移动；左侧插入时源列已被右移，正好在 source_start_col 位置）
             let source_merges: Vec<CellRange> = self.merged_cells.iter()
                 .filter(|mr| {
-                    (mr.start_col..=mr.end_col).any(|c| c >= source_start_col && c < source_start_col + m)
+                    // 合并范围的列完全落在源列范围内
+                    mr.start_col >= source_start_col && mr.end_col < source_start_col + m
                 })
                 .copied()
                 .collect();
@@ -975,11 +1040,13 @@ impl SheetData {
         }
 
         // 8. 复制数据有效性规则
+        // 只复制范围完全落在源列内的规则
         if options.copy_merge || options.copy_formula || options.copy_style || options.copy_value {
             let source_dvs: Vec<DataValidationInfo> = self.data_validations.iter()
                 .filter(|dv| {
                     dv.ranges.iter().any(|r| {
-                        (r.start_col..=r.end_col).any(|c| c >= source_start_col && c < source_start_col + m)
+                        // 数据有效性范围完全落在源列范围内
+                        r.start_col >= source_start_col && r.end_col < source_start_col + m
                     })
                 })
                 .cloned()

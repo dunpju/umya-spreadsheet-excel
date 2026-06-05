@@ -1356,7 +1356,12 @@ impl eframe::App for ExcelViewer {
 
                                             Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
 
-                                            let default_options = crate::excel::reader::ColumnCopyOptions::default();
+                                            let default_options = crate::excel::reader::ColumnCopyOptions::new(
+                                                true,   // copy_merge: 复制合并单元格
+                                                false,  // copy_formula
+                                                true,   // copy_style: 复制样式
+                                                false,  // copy_value
+                                            );
                                             match action {
                                                 ContextAction::InsertRowAbove => {
                                                     sheet.insert_rows(anchor_row, n, false);
