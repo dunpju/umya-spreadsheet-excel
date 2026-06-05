@@ -950,6 +950,9 @@ impl eframe::App for ExcelViewer {
                                 }
                             }
                             self.context_menu.visible = false;
+                            self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_established = false;
+                            self.context_menu.confirm_action = None;
                         }
 
                         // 点击菜单外部关闭
@@ -962,6 +965,9 @@ impl eframe::App for ExcelViewer {
                                 if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
                                     if !menu_rect.contains(hover) {
                                         self.context_menu.visible = false;
+                                        self.context_menu.confirm_visible = false;
+                                        self.context_menu.confirm_established = false;
+                                        self.context_menu.confirm_action = None;
                                     }
                                 }
                             }
@@ -969,6 +975,9 @@ impl eframe::App for ExcelViewer {
                         // Escape 关闭
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             self.context_menu.visible = false;
+                            self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_established = false;
+                            self.context_menu.confirm_action = None;
                         }
                     }
 
