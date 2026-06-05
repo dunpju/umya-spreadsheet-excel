@@ -65,6 +65,7 @@ pub enum ContextAction {
     InsertRowBelow,
     InsertColumnLeft,
     InsertColumnRight,
+    ClearCell,
 }
 
 impl Default for ContextMenuState {
@@ -875,6 +876,14 @@ impl eframe::App for ExcelViewer {
                                                     .speed(0.1));
                                                 ui.label("列");
                                             });
+
+                                            ui.separator();
+
+                                            // 清空单元格
+                                            if ui.button("清空单元格").clicked() {
+                                                self.context_menu.confirm_action = Some(ContextAction::ClearCell);
+                                                self.context_menu.confirm_visible = true;
+                                            }
                                         });
                                     });
                             });
@@ -900,6 +909,7 @@ impl eframe::App for ExcelViewer {
                                             ContextAction::InsertRowBelow => (col, mr.end_row),
                                             ContextAction::InsertColumnLeft => (mr.start_col, row),
                                             ContextAction::InsertColumnRight => (mr.end_col, row),
+                                            ContextAction::ClearCell => (col, row),
                                         }
                                     } else if let Some(cm) = sheet.get_column_merge(col) {
                                         // 该列属于跨列合并，左侧插入用合并起始列，右侧插入用合并结束列
@@ -931,6 +941,9 @@ impl eframe::App for ExcelViewer {
                                         }
                                         ContextAction::InsertColumnRight => {
                                             sheet.insert_columns(anchor_col, m, true, default_options);
+                                        }
+                                        ContextAction::ClearCell => {
+                                            // 清空走确认弹窗路径，这里不应到达
                                         }
                                     }
                                     crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
@@ -965,53 +978,80 @@ impl eframe::App for ExcelViewer {
                         let is_established = self.context_menu.confirm_established;
                         self.context_menu.confirm_established = true;
 
-                        // 判断目标列是否有合并单元格，决定 copy_merge 默认值
-                        if let Some((col, _row)) = self.context_menu.target_cell {
-                            if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
-                                self.context_menu.copy_merge = sheet.get_column_merge(col).is_some();
-                            }
-                        }
-
                         let confirm_action = self.context_menu.confirm_action;
                         let mut confirm_execute = false;
                         let mut cancel_clicked = false;
                         let mut keep_open = true;
 
-                        egui::Window::new("insert_confirm")
-                            .title_bar(false)
-                            .open(&mut keep_open)
-                            .resizable(false)
-                            .collapsible(false)
-                            .order(egui::Order::Foreground)
-                            .fixed_pos(self.context_menu.position)
-                            .show(ui.ctx(), |ui| {
-                                ui.set_min_width(360.0);
-                                ui.set_height(50.0);
-                                // 复制选项
-                                ui.horizontal(|ui| {
-                                    ui.label("复制合并:");
-                                    ui.checkbox(&mut self.context_menu.copy_merge, "");
-                                    ui.separator();
-                                    ui.label("公式:");
-                                    ui.checkbox(&mut self.context_menu.copy_formula, "");
-                                    ui.separator();
-                                    ui.label("样式:");
-                                    ui.checkbox(&mut self.context_menu.copy_style, "");
-                                    ui.separator();
-                                    ui.label("值:");
-                                    ui.checkbox(&mut self.context_menu.copy_value, "");
+                        // 根据操作类型显示不同的确认弹窗
+                        if confirm_action == Some(ContextAction::ClearCell) {
+                            // 清空单元格确认弹窗
+                            egui::Window::new("clear_confirm")
+                                .title_bar(false)
+                                .open(&mut keep_open)
+                                .resizable(false)
+                                .collapsible(false)
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(self.context_menu.position)
+                                .show(ui.ctx(), |ui| {
+                                    ui.set_min_width(260.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(egui::RichText::new("确定清空该单元格的内容？").size(13.0));
+                                    });
+                                    ui.add_space(8.0);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("确认").clicked() {
+                                            confirm_execute = true;
+                                        }
+                                        if ui.button("取消").clicked() {
+                                            cancel_clicked = true;
+                                        }
+                                    });
                                 });
-                                ui.separator();
-                                // 右下角按钮：取消（左） + 确认（右）
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("确认").clicked() {
-                                        confirm_execute = true;
-                                    }
-                                    if ui.button("取消").clicked() {
-                                        cancel_clicked = true;
-                                    }
+                        } else {
+                            // 插入列确认弹窗（保留原有逻辑）
+                            if let Some((col, _row)) = self.context_menu.target_cell {
+                                if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                                    self.context_menu.copy_merge = sheet.get_column_merge(col).is_some();
+                                }
+                            }
+
+                            egui::Window::new("insert_confirm")
+                                .title_bar(false)
+                                .open(&mut keep_open)
+                                .resizable(false)
+                                .collapsible(false)
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(self.context_menu.position)
+                                .show(ui.ctx(), |ui| {
+                                    ui.set_min_width(360.0);
+                                    ui.set_height(50.0);
+                                    // 复制选项
+                                    ui.horizontal(|ui| {
+                                        ui.label("复制合并:");
+                                        ui.checkbox(&mut self.context_menu.copy_merge, "");
+                                        ui.separator();
+                                        ui.label("公式:");
+                                        ui.checkbox(&mut self.context_menu.copy_formula, "");
+                                        ui.separator();
+                                        ui.label("样式:");
+                                        ui.checkbox(&mut self.context_menu.copy_style, "");
+                                        ui.separator();
+                                        ui.label("值:");
+                                        ui.checkbox(&mut self.context_menu.copy_value, "");
+                                    });
+                                    ui.separator();
+                                    // 右下角按钮：取消（左） + 确认（右）
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("确认").clicked() {
+                                            confirm_execute = true;
+                                        }
+                                        if ui.button("取消").clicked() {
+                                            cancel_clicked = true;
+                                        }
+                                    });
                                 });
-                            });
+                        }
 
                         if !keep_open || cancel_clicked {
                             self.context_menu.confirm_visible = false;
@@ -1050,50 +1090,64 @@ impl eframe::App for ExcelViewer {
                                     self.validation_error_pos = None;
 
                                     if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                                        let (anchor_col, _anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
-                                            match action {
-                                                ContextAction::InsertColumnLeft => (mr.start_col, row),
-                                                ContextAction::InsertColumnRight => (mr.end_col, row),
-                                                _ => (col, row),
-                                            }
-                                        } else if let Some(cm) = sheet.get_column_merge(col) {
-                                            match action {
-                                                ContextAction::InsertColumnLeft => (cm.start_col, row),
-                                                ContextAction::InsertColumnRight => (cm.end_col, row),
-                                                _ => (col, row),
-                                            }
-                                        } else {
-                                            (col, row)
-                                        };
-
-                                        let mut m = self.context_menu.insert_cols_count;
-                                        // 如果列属于跨列合并，自动将 m 设为合并宽度
-                                        if let Some(cm) = sheet.get_column_merge(col) {
-                                            let merge_width = cm.end_col - cm.start_col + 1;
-                                            if m < merge_width {
-                                                m = merge_width;
-                                            }
-                                        }
-
-                                        // 保存撤销快照
-                                        Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
-
-                                        let copy_options = crate::excel::reader::ColumnCopyOptions::new(
-                                            self.context_menu.copy_merge,
-                                            self.context_menu.copy_formula,
-                                            self.context_menu.copy_style,
-                                            self.context_menu.copy_value,
-                                        );
                                         match action {
-                                            ContextAction::InsertColumnLeft => {
-                                                sheet.insert_columns(anchor_col, m, false, copy_options);
+                                            ContextAction::ClearCell => {
+                                                // 清空单元格的值和公式（保留样式）
+                                                if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                                                    cell.value.clear();
+                                                    cell.formula.clear();
+                                                }
+                                                // 清空后触发依赖公式重算
+                                                crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
                                             }
-                                            ContextAction::InsertColumnRight => {
-                                                sheet.insert_columns(anchor_col, m, true, copy_options);
+                                            _ => {
+                                                // 插入列逻辑
+                                                let (anchor_col, _anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
+                                                    match action {
+                                                        ContextAction::InsertColumnLeft => (mr.start_col, row),
+                                                        ContextAction::InsertColumnRight => (mr.end_col, row),
+                                                        _ => (col, row),
+                                                    }
+                                                } else if let Some(cm) = sheet.get_column_merge(col) {
+                                                    match action {
+                                                        ContextAction::InsertColumnLeft => (cm.start_col, row),
+                                                        ContextAction::InsertColumnRight => (cm.end_col, row),
+                                                        _ => (col, row),
+                                                    }
+                                                } else {
+                                                    (col, row)
+                                                };
+
+                                                let mut m = self.context_menu.insert_cols_count;
+                                                // 如果列属于跨列合并，自动将 m 设为合并宽度
+                                                if let Some(cm) = sheet.get_column_merge(col) {
+                                                    let merge_width = cm.end_col - cm.start_col + 1;
+                                                    if m < merge_width {
+                                                        m = merge_width;
+                                                    }
+                                                }
+
+                                                // 保存撤销快照
+                                                Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+
+                                                let copy_options = crate::excel::reader::ColumnCopyOptions::new(
+                                                    self.context_menu.copy_merge,
+                                                    self.context_menu.copy_formula,
+                                                    self.context_menu.copy_style,
+                                                    self.context_menu.copy_value,
+                                                );
+                                                match action {
+                                                    ContextAction::InsertColumnLeft => {
+                                                        sheet.insert_columns(anchor_col, m, false, copy_options);
+                                                    }
+                                                    ContextAction::InsertColumnRight => {
+                                                        sheet.insert_columns(anchor_col, m, true, copy_options);
+                                                    }
+                                                    _ => {}
+                                                }
+                                                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                                             }
-                                            _ => {}
                                         }
-                                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                                     }
                                 }
                             }
