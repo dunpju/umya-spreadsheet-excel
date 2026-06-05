@@ -1811,7 +1811,9 @@ pub fn draw_table_content(
                 .and_then(|s| s.cells.get(&(edit_row, edit_col)))
                 .map(|c| {
                     if edit_value.starts_with('=') {
-                        c.formula.clone()
+                        // 公式比较：归一化 = 前缀，与编辑模式进入时的逻辑一致
+                        let f = &c.formula;
+                        if f.starts_with('=') { f.clone() } else { format!("={}", f) }
                     } else {
                         cell_display_text(c).into_owned()
                     }

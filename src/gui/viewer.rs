@@ -568,7 +568,7 @@ impl ExcelViewer {
         self.save_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let result = ExcelData::save_to_file(&original_path, &excel_data, &output_path);
+            let result = crate::excel::writer::save_to_file(&original_path, &excel_data, &output_path);
             match result {
                 Ok(()) => {
                     let _ = tx.send(Ok(output_path));
