@@ -1140,6 +1140,8 @@ impl eframe::App for ExcelViewer {
                                     if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
                                         match action {
                                             ContextAction::ClearCell => {
+                                                // 保存撤销快照（清空前）
+                                                Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
                                                 // 清空单元格的值和公式（保留样式）
                                                 if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
                                                     cell.value.clear();
