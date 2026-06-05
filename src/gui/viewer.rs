@@ -49,6 +49,8 @@ pub struct ContextMenuState {
     pub insert_rows_count: u32,
     /// 插入列数
     pub insert_cols_count: u32,
+    /// 选中行/列数量（0=选到边界）
+    pub select_count: u32,
     /// 确认弹窗是否可见
     pub confirm_visible: bool,
     /// 确认弹窗是否已显示超过一帧（用于跳过首帧外部点击检测）
@@ -73,6 +75,10 @@ pub enum ContextAction {
     InsertColumnLeft,
     InsertColumnRight,
     ClearCell,
+    SelectDown,
+    SelectUp,
+    SelectLeft,
+    SelectRight,
 }
 
 impl Default for ContextMenuState {
@@ -83,6 +89,7 @@ impl Default for ContextMenuState {
             target_cell: None,
             insert_rows_count: 1,
             insert_cols_count: 1,
+            select_count: 0,
             confirm_visible: false,
             confirm_established: false,
             confirm_action: None,
@@ -253,6 +260,8 @@ pub struct ExcelViewer {
     pub error_message: Option<String>,
     /// 当前选中的单元格坐标（列, 行）
     pub selected_cell: Option<(u32, u32)>,
+    /// 选中范围：Some((start_col, start_row, end_col, end_row))，None 表示仅单格选中
+    pub selected_range: Option<(u32, u32, u32, u32)>,
     /// 当前正在编辑的单元格坐标（列, 行）
     pub editing_cell: Option<(u32, u32)>,
     /// 当前编辑的值
@@ -305,6 +314,7 @@ impl ExcelViewer {
             current_sheet: 0,
             error_message: None,
             selected_cell: None,
+            selected_range: None,
             editing_cell: None,
             edit_value: String::new(),
             just_entered_edit_mode: false,
@@ -417,6 +427,7 @@ impl ExcelViewer {
                         self.excel_data = Some(data);
                         self.current_sheet = 0;
                         self.selected_cell = None;
+                        self.selected_range = None;
                         self.editing_cell = None;
                         self.edit_value.clear();
                         self.pending_formula_save = None;
@@ -640,6 +651,7 @@ impl eframe::App for ExcelViewer {
                             if ui.selectable_label(self.current_sheet == i, &sheet.name).clicked() {
                                 self.current_sheet = i;
                                 self.selected_cell = None;
+                                self.selected_range = None;
                             }
                         }
                     });
@@ -660,6 +672,7 @@ impl eframe::App for ExcelViewer {
                             if excel_data.sheets.len() > sheet_index {
                                 excel_data.sheets[sheet_index] = sheet_data;
                                 self.selected_cell = None;
+                                self.selected_range = None;
                                 self.editing_cell = None;
                                 self.edit_value.clear();
                                 self.current_sheet = sheet_index;
@@ -755,7 +768,10 @@ impl eframe::App for ExcelViewer {
                 }
                 
                 ui.separator();
-                
+
+                // 记录调用前的选中单元格，用于检测变化后清除选中范围
+                let prev_selected = self.selected_cell;
+
                 // 冻结窗格布局：列标题固定顶部，行标题固定左侧
                 // 双向滚动区域（垂直+水平），替代嵌套 ScrollArea
                 // 嵌套 ScrollArea 会导致 scroll_to_rect 无法同时作用于两个方向
@@ -767,6 +783,7 @@ impl eframe::App for ExcelViewer {
                             excel_data,
                             self.current_sheet,
                             &mut self.selected_cell,
+                            &self.selected_range,
                             &mut self.editing_cell,
                             &mut self.edit_value,
                             &mut self.just_entered_edit_mode,
@@ -774,6 +791,11 @@ impl eframe::App for ExcelViewer {
                             &mut self.original_cell_data,
                             &mut self.context_menu,
                         );
+
+                        // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
+                        if self.selected_cell != prev_selected {
+                            self.selected_range = None;
+                        }
 
                         // 添加列后滚动到最右列，使新列出现在可视区域内
                         if self.scroll_to_last_col {
@@ -966,11 +988,51 @@ impl eframe::App for ExcelViewer {
                                                 self.context_menu.confirm_action = Some(ContextAction::ClearCell);
                                                 self.context_menu.confirm_visible = true;
                                             }
+
+                                            ui.separator();
+
+                                            // 选中方向操作
+                                            ui.horizontal(|ui| {
+                                                if ui.button("向下选中").clicked() {
+                                                    pending_action = Some(ContextAction::SelectDown);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                    .range(0..=10000)
+                                                    .speed(0.1));
+                                                ui.label("行");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("向上选中").clicked() {
+                                                    pending_action = Some(ContextAction::SelectUp);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                    .range(0..=10000)
+                                                    .speed(0.1));
+                                                ui.label("行");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("向左选中").clicked() {
+                                                    pending_action = Some(ContextAction::SelectLeft);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                    .range(0..=10000)
+                                                    .speed(0.1));
+                                                ui.label("列");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("向右选中").clicked() {
+                                                    pending_action = Some(ContextAction::SelectRight);
+                                                }
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                    .range(0..=10000)
+                                                    .speed(0.1));
+                                                ui.label("列");
+                                            });
                                         });
                                     });
                             });
 
-                        // 执行插入操作（在闭包外处理，避免借用冲突）
+                        // 执行操作（在闭包外处理，避免借用冲突）
                         if let Some(action) = pending_action {
                             if let Some((col, row)) = self.context_menu.target_cell {
                                 // 先关闭编辑状态
@@ -980,55 +1042,82 @@ impl eframe::App for ExcelViewer {
                                 self.validation_error = None;
                                 self.validation_error_pos = None;
 
-                                if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                                    // 计算锚点：
-                                    // 1. 单元格本身在合并范围内 → 使用合并边界
-                                    // 2. 单元格不在合并范围，但该列属于跨列合并 → 使用列合并的边界
-                                    // 3. 无合并 → 使用单元格自身坐标
-                                    let (anchor_col, anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
-                                        match action {
-                                            ContextAction::InsertRowAbove => (col, mr.start_row),
-                                            ContextAction::InsertRowBelow => (col, mr.end_row),
-                                            ContextAction::InsertColumnLeft => (mr.start_col, row),
-                                            ContextAction::InsertColumnRight => (mr.end_col, row),
-                                            ContextAction::ClearCell => (col, row),
-                                        }
-                                    } else if let Some(cm) = sheet.get_column_merge(col) {
-                                        // 该列属于跨列合并，左侧插入用合并起始列，右侧插入用合并结束列
-                                        match action {
-                                            ContextAction::InsertColumnLeft => (cm.start_col, row),
-                                            ContextAction::InsertColumnRight => (cm.end_col, row),
-                                            _ => (col, row),
-                                        }
-                                    } else {
-                                        (col, row)
-                                    };
+                                match action {
+                                    // 选中操作：直接设置 selected_range
+                                    ContextAction::SelectDown | ContextAction::SelectUp
+                                    | ContextAction::SelectLeft | ContextAction::SelectRight => {
+                                        let n = self.context_menu.select_count;
+                                        let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(row);
+                                        let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(col);
+                                        let (start_col, start_row, end_col, end_row) = match action {
+                                            ContextAction::SelectDown => {
+                                                let er = if n == 0 { max_row } else { (row + n).min(max_row) };
+                                                (col, row, col, er)
+                                            }
+                                            ContextAction::SelectUp => {
+                                                let sr = if n == 0 { 1 } else { row.saturating_sub(n).max(1) };
+                                                (col, sr, col, row)
+                                            }
+                                            ContextAction::SelectRight => {
+                                                let ec = if n == 0 { max_col } else { (col + n).min(max_col) };
+                                                (col, row, ec, row)
+                                            }
+                                            ContextAction::SelectLeft => {
+                                                let sc = if n == 0 { 1 } else { col.saturating_sub(n).max(1) };
+                                                (sc, row, col, row)
+                                            }
+                                            _ => (col, row, col, row),
+                                        };
+                                        self.selected_range = Some((start_col, start_row, end_col, end_row));
+                                    }
+                                    // 插入/清空操作
+                                    _ => {
+                                        if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                                            let (anchor_col, anchor_row) = if let Some(mr) = sheet.get_merged_range(col, row) {
+                                                match action {
+                                                    ContextAction::InsertRowAbove => (col, mr.start_row),
+                                                    ContextAction::InsertRowBelow => (col, mr.end_row),
+                                                    ContextAction::InsertColumnLeft => (mr.start_col, row),
+                                                    ContextAction::InsertColumnRight => (mr.end_col, row),
+                                                    _ => (col, row),
+                                                }
+                                            } else if let Some(cm) = sheet.get_column_merge(col) {
+                                                match action {
+                                                    ContextAction::InsertColumnLeft => (cm.start_col, row),
+                                                    ContextAction::InsertColumnRight => (cm.end_col, row),
+                                                    _ => (col, row),
+                                                }
+                                            } else {
+                                                (col, row)
+                                            };
 
-                                    let n = self.context_menu.insert_rows_count;
-                                    let m = self.context_menu.insert_cols_count;
+                                            let n = self.context_menu.insert_rows_count;
+                                            let m = self.context_menu.insert_cols_count;
 
-                                    // 保存撤销快照（全量：插入行/列是结构性操作）
-                                    Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
+                                            Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
 
-                                    let default_options = crate::excel::reader::ColumnCopyOptions::default();
-                                    match action {
-                                        ContextAction::InsertRowAbove => {
-                                            sheet.insert_rows(anchor_row, n, false);
-                                        }
-                                        ContextAction::InsertRowBelow => {
-                                            sheet.insert_rows(anchor_row, n, true);
-                                        }
-                                        ContextAction::InsertColumnLeft => {
-                                            sheet.insert_columns(anchor_col, m, false, default_options);
-                                        }
-                                        ContextAction::InsertColumnRight => {
-                                            sheet.insert_columns(anchor_col, m, true, default_options);
-                                        }
-                                        ContextAction::ClearCell => {
-                                            // 清空走确认弹窗路径，这里不应到达
+                                            let default_options = crate::excel::reader::ColumnCopyOptions::default();
+                                            match action {
+                                                ContextAction::InsertRowAbove => {
+                                                    sheet.insert_rows(anchor_row, n, false);
+                                                }
+                                                ContextAction::InsertRowBelow => {
+                                                    sheet.insert_rows(anchor_row, n, true);
+                                                }
+                                                ContextAction::InsertColumnLeft => {
+                                                    sheet.insert_columns(anchor_col, m, false, default_options);
+                                                }
+                                                ContextAction::InsertColumnRight => {
+                                                    sheet.insert_columns(anchor_col, m, true, default_options);
+                                                }
+                                                ContextAction::ClearCell => {
+                                                    // 清空走确认弹窗路径，这里不应到达
+                                                }
+                                                _ => {}
+                                            }
+                                            crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                                         }
                                     }
-                                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                                 }
                             }
                             self.context_menu.visible = false;

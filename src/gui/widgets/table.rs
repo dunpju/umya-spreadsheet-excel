@@ -40,6 +40,7 @@ pub fn draw_table_content(
     excel_data: &mut ExcelData,
     current_sheet: usize,
     selected_cell: &mut Option<(u32, u32)>,
+    selected_range: &Option<(u32, u32, u32, u32)>,
     editing_cell: &mut Option<(u32, u32)>,
     edit_value: &mut String,
     just_entered_edit_mode: &mut bool,
@@ -1583,6 +1584,47 @@ pub fn draw_table_content(
                 egui::Pos2::new(sel_x, sel_y),
                 egui::vec2(sel_w, sel_h),
             ));
+        }
+
+        // ========== 绘制选中范围（蓝色半透明背景） ==========
+        if let Some((sr_col, sr_row, er_col, er_row)) = selected_range {
+            // 确保范围有效且在可见区域内
+            let r_start_col = (*sr_col).max(visible_cols_start);
+            let r_end_col = (*er_col).min(visible_cols_end);
+            let r_start_row = (*sr_row).max(visible_rows_start);
+            let r_end_row = (*er_row).min(visible_rows_end);
+            if r_start_col <= r_end_col && r_start_row <= r_end_row {
+                // 计算起始位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
+                let rx = if r_start_col <= fc {
+                    viewport_rect.min.x + col_cumulative_width[r_start_col as usize]
+                } else {
+                    tl_x + border_width + col_cumulative_width[r_start_col as usize]
+                };
+                let ry = if r_start_row <= fr {
+                    viewport_rect.min.y + row_cumulative_height[r_start_row as usize]
+                } else {
+                    tl_y + border_width + row_cumulative_height[r_start_row as usize]
+                };
+                let mut rw = 0.0f32;
+                for c in r_start_col..=r_end_col { rw += get_col_width(c) + border_width; }
+                rw -= border_width;
+                let mut rh = 0.0f32;
+                for r in r_start_row..=r_end_row { rh += get_row_height(r) + border_width; }
+                rh -= border_width;
+                // 绘制半透明蓝色背景
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(0, 112, 192, 40),
+                );
+                // 绘制范围边框
+                painter.rect_stroke(
+                    egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
+                    0.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 112, 192, 120)),
+                    egui::StrokeKind::Outside,
+                );
+            }
         }
 
         // ========== 编辑模式：显示输入框（在冻结覆盖层之后绘制，防止覆盖层遮挡） ==========
