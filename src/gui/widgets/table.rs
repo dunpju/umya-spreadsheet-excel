@@ -40,7 +40,7 @@ pub fn draw_table_content(
     excel_data: &mut ExcelData,
     current_sheet: usize,
     selected_cell: &mut Option<(u32, u32)>,
-    selected_range: &Option<(u32, u32, u32, u32)>,
+    selected_range: &mut Option<(u32, u32, u32, u32)>,
     editing_cell: &mut Option<(u32, u32)>,
     edit_value: &mut String,
     just_entered_edit_mode: &mut bool,
@@ -48,6 +48,7 @@ pub fn draw_table_content(
     original_cell_data: &mut Option<((u32, u32), String, String)>,
     context_menu: &mut crate::gui::viewer::ContextMenuState,
     dirty: &mut bool,
+    drag_anchor: &mut Option<(u32, u32)>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -876,6 +877,78 @@ pub fn draw_table_content(
                         context_menu.insert_cols_count = default_cols;
                     }
                 }
+            }
+        }
+
+        // ========== 拖拽选择：按住左键拖拽扩大选中范围 ==========
+        // 使用与点击处理相同的坐标转换逻辑（冻结区域感知）
+        // 兼容合并单元格：锚点和当前格都会展开到所在合并区域的完整边界
+        if !validation_error_active && editing_cell.is_none() {
+            let screen_to_cell = |pos: egui::Pos2| -> Option<(u32, u32)> {
+                let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
+                let rel_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
+                let rel_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
+
+                let mut col: Option<u32> = None;
+                for (i, &width) in col_cumulative_width.iter().enumerate() {
+                    if rel_x < width && i > 1 {
+                        col = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+                let mut row: Option<u32> = None;
+                for (i, &height) in row_cumulative_height.iter().enumerate() {
+                    if rel_y < height && i > 0 {
+                        row = Some(i as u32 - 1);
+                        break;
+                    }
+                }
+                match (col, row) {
+                    (Some(c), Some(r)) if c > 0 && r > 0 => Some((c, r)),
+                    _ => None,
+                }
+            };
+
+            // 将单元格扩展到所在合并区域的完整边界
+            let expand_to_merge = |col: u32, row: u32| -> (u32, u32, u32, u32) {
+                if let Some(mr) = sheet.get_merged_range(col, row) {
+                    return (mr.start_col, mr.start_row, mr.end_col, mr.end_row);
+                }
+                (col, row, col, row)
+            };
+
+            if response.drag_started() {
+                if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    if let Some((col, row)) = screen_to_cell(pos) {
+                        let (asc, asr, aec, aer) = expand_to_merge(col, row);
+                        // 锚点记录合并区域的左上角
+                        *drag_anchor = Some((asc, asr));
+                        *selected_cell = Some((col, row));
+                        *selected_range = Some((asc, asr, aec, aer));
+                    }
+                }
+            }
+
+            if response.dragged() {
+                if let Some((anchor_col, anchor_row)) = *drag_anchor {
+                    if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if let Some((cur_col, cur_row)) = screen_to_cell(pos) {
+                            // 展开锚点和当前格到各自合并区域的完整边界，取并集
+                            let (asc, asr, aec, aer) = expand_to_merge(anchor_col, anchor_row);
+                            let (csc, csr, cec, cer) = expand_to_merge(cur_col, cur_row);
+                            let sr_col = asc.min(csc);
+                            let er_col = aec.max(cec);
+                            let sr_row = asr.min(csr);
+                            let er_row = aer.max(cer);
+                            *selected_range = Some((sr_col, sr_row, er_col, er_row));
+                        }
+                    }
+                }
+            }
+
+            if response.drag_stopped() {
+                *drag_anchor = None;
             }
         }
 

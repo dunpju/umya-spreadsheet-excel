@@ -317,6 +317,8 @@ pub struct ExcelViewer {
     pub add_column: bool,
     /// 标记当前确认弹窗由"编辑 → 添加列"触发（区别于右键菜单）
     add_column_pending: bool,
+    /// 拖拽选择锚点（鼠标按下时的单元格），None 表示未在拖拽
+    pub drag_anchor: Option<(u32, u32)>,
     /// 插入完成后滚动到最右列，使新列出现在可视区域
     scroll_to_last_col: bool,
     /// 菜单栏触发的"添加行"操作标志
@@ -370,6 +372,7 @@ impl ExcelViewer {
             save_path: None,
             save_rx: None,
             save_requested: false,
+            drag_anchor: None,
         }
     }
 
@@ -1020,7 +1023,7 @@ impl eframe::App for ExcelViewer {
                             excel_data,
                             self.current_sheet,
                             &mut self.selected_cell,
-                            &self.selected_range,
+                            &mut self.selected_range,
                             &mut self.editing_cell,
                             &mut self.edit_value,
                             &mut self.just_entered_edit_mode,
@@ -1028,10 +1031,12 @@ impl eframe::App for ExcelViewer {
                             &mut self.original_cell_data,
                             &mut self.context_menu,
                             &mut self.dirty,
+                            &mut self.drag_anchor,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
-                        if self.selected_cell != prev_selected {
+                        // 拖拽选择期间不清除范围（drag_anchor 非 None）
+                        if self.selected_cell != prev_selected && self.drag_anchor.is_none() {
                             self.selected_range = None;
                         }
 
