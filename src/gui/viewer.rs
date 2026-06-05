@@ -994,7 +994,8 @@ impl eframe::App for ExcelViewer {
                                 .order(egui::Order::Foreground)
                                 .fixed_pos(self.context_menu.position)
                                 .show(ui.ctx(), |ui| {
-                                    ui.set_min_width(260.0);
+                                    ui.set_width(160.0);
+                                    ui.set_height(25.0);
                                     ui.vertical_centered(|ui| {
                                         ui.label(egui::RichText::new("确定清空该单元格的内容？").size(13.0));
                                     });
