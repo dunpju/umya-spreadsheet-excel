@@ -19,14 +19,21 @@ use std::sync::mpsc::Receiver;
 /// 撤销栈最大深度
 const MAX_UNDO_DEPTH: usize = 20;
 
-/// 撤销快照：保存操作前的整个工作表状态
-struct UndoSnapshot {
-    /// 操作前的工作表数据（深拷贝）
-    sheet_data: crate::excel::reader::SheetData,
-    /// 操作前的工作表索引
-    sheet_index: usize,
-    /// 操作前选中的单元格
-    selected_cell: Option<(u32, u32)>,
+/// 撤销操作：支持全量快照和单单元格两种粒度
+enum UndoAction {
+    /// 全量快照：用于插入行/列等结构性操作
+    FullSnapshot {
+        sheet_data: crate::excel::reader::SheetData,
+        sheet_index: usize,
+    },
+    /// 单单元格变更：用于清空、编辑等单格操作
+    CellChange {
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+        old_cell: Option<crate::excel::reader::CellData>,
+        old_selected: Option<(u32, u32)>,
+    },
 }
 
 /// 右键菜单状态
@@ -277,7 +284,7 @@ pub struct ExcelViewer {
     /// 当前加载的文件路径
     pub file_path: Option<String>,
     /// 撤销栈：存储可撤销操作前的快照
-    undo_stack: Vec<UndoSnapshot>,
+    undo_stack: Vec<UndoAction>,
     /// 菜单栏触发的"添加列"操作标志
     pub add_column: bool,
     /// 标记当前确认弹窗由"编辑 → 添加列"触发（区别于右键菜单）
@@ -323,20 +330,46 @@ impl ExcelViewer {
     }
 
     /// 保存当前工作表快照到撤销栈（不借用 self，避免与 excel_data 借用冲突）
-    fn push_undo(
-        undo_stack: &mut Vec<UndoSnapshot>,
+    /// 推入全量快照撤销（用于插入行/列等结构性操作）
+    fn push_undo_full(
+        undo_stack: &mut Vec<UndoAction>,
         sheet: &crate::excel::reader::SheetData,
         sheet_index: usize,
+    ) {
+        if undo_stack.len() >= MAX_UNDO_DEPTH {
+            undo_stack.remove(0);
+        }
+        undo_stack.push(UndoAction::FullSnapshot {
+            sheet_data: sheet.clone(),
+            sheet_index,
+        });
+    }
+
+    /// 推入单单元格撤销（用于清空、编辑等单格操作）
+    fn push_undo_cell(
+        undo_stack: &mut Vec<UndoAction>,
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+        sheet: &crate::excel::reader::SheetData,
         selected_cell: Option<(u32, u32)>,
     ) {
         if undo_stack.len() >= MAX_UNDO_DEPTH {
             undo_stack.remove(0);
         }
-        undo_stack.push(UndoSnapshot {
-            sheet_data: sheet.clone(),
+        let old_cell = sheet.cells.get(&(row, col)).cloned();
+        undo_stack.push(UndoAction::CellChange {
             sheet_index,
-            selected_cell,
+            row,
+            col,
+            old_cell,
+            old_selected: selected_cell,
         });
+    }
+
+    /// 从撤销栈取出一个操作
+    fn take_undo(&mut self) -> Option<UndoAction> {
+        self.undo_stack.pop()
     }
 
     /// 启动异步加载 Excel 文件
@@ -453,8 +486,8 @@ impl eframe::App for ExcelViewer {
             self.add_row = false;
             if let Some(excel_data) = &mut self.excel_data {
                 if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
-                    // 保存撤销快照
-                    Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                    // 保存撤销快照（全量：追加行是结构性操作）
+                    Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
                     // 在末尾追加一行，公式引用范围自动扩展
                     sheet.append_row();
                 }
@@ -615,19 +648,37 @@ impl eframe::App for ExcelViewer {
 
         // 主内容区域
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            // Ctrl+Z 撤销：在借用 excel_data 之前取出 undo action
+            let pending_undo = ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift)
+                .then(|| self.take_undo()).flatten();
+
             if let Some(excel_data) = &mut self.excel_data {
-                // Ctrl+Z 撤销
-                if ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
-                    if let Some(snapshot) = self.undo_stack.pop() {
-                        if excel_data.sheets.len() > snapshot.sheet_index {
-                            excel_data.sheets[snapshot.sheet_index] = snapshot.sheet_data;
-                            self.selected_cell = snapshot.selected_cell;
-                            self.editing_cell = None;
-                            self.edit_value.clear();
-                            self.current_sheet = snapshot.sheet_index;
-                            crate::excel::formula::evaluate_sheet(
-                                &mut excel_data.sheets[snapshot.sheet_index],
-                            );
+                // 应用撤销
+                if let Some(action) = pending_undo {
+                    match action {
+                        UndoAction::FullSnapshot { sheet_data, sheet_index } => {
+                            if excel_data.sheets.len() > sheet_index {
+                                excel_data.sheets[sheet_index] = sheet_data;
+                                self.selected_cell = None;
+                                self.editing_cell = None;
+                                self.edit_value.clear();
+                                self.current_sheet = sheet_index;
+                                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[sheet_index]);
+                            }
+                        }
+                        UndoAction::CellChange { sheet_index, row, col, old_cell, old_selected } => {
+                            if excel_data.sheets.len() > sheet_index {
+                                if let Some(old) = old_cell {
+                                    excel_data.sheets[sheet_index].cells.insert((row, col), old);
+                                } else {
+                                    excel_data.sheets[sheet_index].cells.remove(&(row, col));
+                                }
+                                self.selected_cell = old_selected;
+                                self.editing_cell = None;
+                                self.edit_value.clear();
+                                self.current_sheet = sheet_index;
+                                crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[sheet_index], row, col);
+                            }
                         }
                     }
                 }
@@ -956,8 +1007,8 @@ impl eframe::App for ExcelViewer {
                                     let n = self.context_menu.insert_rows_count;
                                     let m = self.context_menu.insert_cols_count;
 
-                                    // 保存撤销快照
-                                    Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                                    // 保存撤销快照（全量：插入行/列是结构性操作）
+                                    Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
 
                                     let default_options = crate::excel::reader::ColumnCopyOptions::default();
                                     match action {
@@ -1140,8 +1191,8 @@ impl eframe::App for ExcelViewer {
                                     if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
                                         match action {
                                             ContextAction::ClearCell => {
-                                                // 保存撤销快照（清空前）
-                                                Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                                                // 保存单单元格撤销快照
+                                                Self::push_undo_cell(&mut self.undo_stack, self.current_sheet, row, col, sheet, self.selected_cell);
                                                 // 清空单元格的值和公式（保留样式）
                                                 if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
                                                     cell.value.clear();
@@ -1177,8 +1228,8 @@ impl eframe::App for ExcelViewer {
                                                     }
                                                 }
 
-                                                // 保存撤销快照
-                                                Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                                                // 保存撤销快照（全量：插入列是结构性操作）
+                                                Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
 
                                                 let copy_options = crate::excel::reader::ColumnCopyOptions::new(
                                                     self.context_menu.copy_merge,
@@ -1216,9 +1267,11 @@ impl eframe::App for ExcelViewer {
                 // 处理公式栏的待保存值
                 if let Some(formula_value) = self.pending_formula_save.take() {
                     if let Some((col, row)) = self.selected_cell {
-                        // 保存撤销快照
-                        if let Some(sheet) = excel_data.sheets.get(self.current_sheet) {
-                            Self::push_undo(&mut self.undo_stack, sheet, self.current_sheet, self.selected_cell);
+                        // 保存单单元格撤销快照
+                        if let Some((col, row)) = self.selected_cell {
+                            if let Some(sheet) = excel_data.sheets.get(self.current_sheet) {
+                                Self::push_undo_cell(&mut self.undo_stack, self.current_sheet, row, col, sheet, self.selected_cell);
+                            }
                         }
                         // 非公式值做数据有效性校验
                         if !formula_value.starts_with('=') {
