@@ -19,7 +19,7 @@ use std::sync::mpsc::Receiver;
 /// 撤销栈最大深度
 const MAX_UNDO_DEPTH: usize = 20;
 
-/// 撤销操作：支持全量快照和单单元格两种粒度
+/// 撤销操作：支持全量快照、单单元格和范围清空三种粒度
 enum UndoAction {
     /// 全量快照：用于插入行/列等结构性操作
     FullSnapshot {
@@ -33,6 +33,13 @@ enum UndoAction {
         col: u32,
         old_cell: Option<crate::excel::reader::CellData>,
         old_selected: Option<(u32, u32)>,
+    },
+    /// 范围清空：保存范围内所有单元格原始数据
+    RangeClear {
+        sheet_index: usize,
+        old_cells: Vec<(u32, u32, Option<crate::excel::reader::CellData>)>,
+        old_selected: Option<(u32, u32)>,
+        old_range: Option<(u32, u32, u32, u32)>,
     },
 }
 
@@ -63,6 +70,8 @@ pub struct ContextMenuState {
     pub confirm_established: bool,
     /// 确认弹窗对应的操作
     pub confirm_action: Option<ContextAction>,
+    /// 清空操作是否针对选中范围（true=范围清空，false=单格清空）
+    pub clear_is_range: bool,
     /// 确认弹窗：复制合并
     pub copy_merge: bool,
     /// 确认弹窗：复制公式
@@ -102,6 +111,7 @@ impl Default for ContextMenuState {
             confirm_visible: false,
             confirm_established: false,
             confirm_action: None,
+            clear_is_range: false,
             copy_merge: false,
             copy_formula: true,
             copy_style: true,
@@ -383,6 +393,36 @@ impl ExcelViewer {
             col,
             old_cell,
             old_selected: selected_cell,
+        });
+    }
+
+    /// 保存范围内所有单元格的撤销快照
+    fn push_undo_range(
+        undo_stack: &mut Vec<UndoAction>,
+        sheet_index: usize,
+        start_col: u32,
+        start_row: u32,
+        end_col: u32,
+        end_row: u32,
+        sheet: &crate::excel::reader::SheetData,
+        selected_cell: Option<(u32, u32)>,
+        selected_range: Option<(u32, u32, u32, u32)>,
+    ) {
+        if undo_stack.len() >= MAX_UNDO_DEPTH {
+            undo_stack.remove(0);
+        }
+        let mut old_cells = Vec::new();
+        for r in start_row..=end_row {
+            for c in start_col..=end_col {
+                let old = sheet.cells.get(&(r, c)).cloned();
+                old_cells.push((r, c, old));
+            }
+        }
+        undo_stack.push(UndoAction::RangeClear {
+            sheet_index,
+            old_cells,
+            old_selected: selected_cell,
+            old_range: selected_range,
         });
     }
 
@@ -696,10 +736,28 @@ impl eframe::App for ExcelViewer {
                                     excel_data.sheets[sheet_index].cells.remove(&(row, col));
                                 }
                                 self.selected_cell = old_selected;
+                                self.selected_range = None;
                                 self.editing_cell = None;
                                 self.edit_value.clear();
                                 self.current_sheet = sheet_index;
                                 crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[sheet_index], row, col);
+                            }
+                        }
+                        UndoAction::RangeClear { sheet_index, old_cells, old_selected, old_range } => {
+                            if excel_data.sheets.len() > sheet_index {
+                                for (r, c, old) in old_cells {
+                                    if let Some(cell) = old {
+                                        excel_data.sheets[sheet_index].cells.insert((r, c), cell);
+                                    } else {
+                                        excel_data.sheets[sheet_index].cells.remove(&(r, c));
+                                    }
+                                }
+                                self.selected_cell = old_selected;
+                                self.selected_range = old_range;
+                                self.editing_cell = None;
+                                self.edit_value.clear();
+                                self.current_sheet = sheet_index;
+                                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[sheet_index]);
                             }
                         }
                     }
@@ -708,23 +766,47 @@ impl eframe::App for ExcelViewer {
                 // Delete 键清空单元格（有内容时才弹窗确认）
                 if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                     if self.selected_cell.is_some() && self.editing_cell.is_none() && !self.context_menu.confirm_visible {
-                        let has_content = self.selected_cell.map(|(col, row)| {
-                            excel_data.get_sheet(self.current_sheet)
-                                .and_then(|s| s.get_cell(row, col))
-                                .map(|c| !c.value.is_empty() || !c.formula.is_empty())
-                                .unwrap_or(false)
-                        }).unwrap_or(false);
-                        if has_content {
-                            self.context_menu.target_cell = self.selected_cell;
-                            self.context_menu.confirm_action = Some(ContextAction::ClearCell);
-                            self.context_menu.confirm_visible = true;
-                            self.context_menu.confirm_established = false;
-                            // 计算弹窗位置：表格滚动区域中心
-                            self.context_menu.position = ui.ctx().memory(|mem| {
-                                mem.area_rect(egui::Id::new("table_scroll"))
-                                    .map(|r| r.center())
-                                    .unwrap_or(egui::Pos2::new(400.0, 300.0))
-                            });
+                        // 优先处理选中范围
+                        if let Some((sc, sr, ec, er)) = self.selected_range {
+                            let has_content = excel_data.get_sheet(self.current_sheet).map(|sheet| {
+                                (sr..=er).any(|r| (sc..=ec).any(|c| {
+                                    sheet.get_cell(r, c)
+                                        .map(|cell| !cell.value.is_empty() || !cell.formula.is_empty())
+                                        .unwrap_or(false)
+                                }))
+                            }).unwrap_or(false);
+                            if has_content {
+                                self.context_menu.target_cell = self.selected_cell;
+                                self.context_menu.confirm_action = Some(ContextAction::ClearCell);
+                                self.context_menu.clear_is_range = true;
+                                self.context_menu.confirm_visible = true;
+                                self.context_menu.confirm_established = false;
+                                self.context_menu.position = ui.ctx().memory(|mem| {
+                                    mem.area_rect(egui::Id::new("table_scroll"))
+                                        .map(|r| r.center())
+                                        .unwrap_or(egui::Pos2::new(400.0, 300.0))
+                                });
+                            }
+                        } else {
+                            // 单格清空（原有逻辑）
+                            let has_content = self.selected_cell.map(|(col, row)| {
+                                excel_data.get_sheet(self.current_sheet)
+                                    .and_then(|s| s.get_cell(row, col))
+                                    .map(|c| !c.value.is_empty() || !c.formula.is_empty())
+                                    .unwrap_or(false)
+                            }).unwrap_or(false);
+                            if has_content {
+                                self.context_menu.target_cell = self.selected_cell;
+                                self.context_menu.confirm_action = Some(ContextAction::ClearCell);
+                                self.context_menu.clear_is_range = false;
+                                self.context_menu.confirm_visible = true;
+                                self.context_menu.confirm_established = false;
+                                self.context_menu.position = ui.ctx().memory(|mem| {
+                                    mem.area_rect(egui::Id::new("table_scroll"))
+                                        .map(|r| r.center())
+                                        .unwrap_or(egui::Pos2::new(400.0, 300.0))
+                                });
+                            }
                         }
                     }
                 }
@@ -985,16 +1067,31 @@ impl eframe::App for ExcelViewer {
 
                                             ui.separator();
 
-                                            // 清空单元格（无内容时灰色不可点击）
-                                            let has_content = self.context_menu.target_cell.map(|(col, row)| {
-                                                excel_data.get_sheet(self.current_sheet)
-                                                    .and_then(|s| s.get_cell(row, col))
-                                                    .map(|c| !c.value.is_empty() || !c.formula.is_empty())
-                                                    .unwrap_or(false)
-                                            }).unwrap_or(false);
-                                            let clear_response = ui.add_enabled(has_content, egui::Button::new("清空单元格"));
+                                            // 清空单元格/选中范围（无内容时灰色不可点击）
+                                            let (clear_label, has_content, is_range) = if let Some((sc, sr, ec, er)) = self.selected_range {
+                                                // 选中范围：检查范围内是否有内容
+                                                let has = excel_data.get_sheet(self.current_sheet).map(|sheet| {
+                                                    (sr..=er).any(|r| (sc..=ec).any(|c| {
+                                                        sheet.get_cell(r, c)
+                                                            .map(|cell| !cell.value.is_empty() || !cell.formula.is_empty())
+                                                            .unwrap_or(false)
+                                                    }))
+                                                }).unwrap_or(false);
+                                                ("清空选中范围", has, true)
+                                            } else {
+                                                // 单格清空
+                                                let has = self.context_menu.target_cell.map(|(col, row)| {
+                                                    excel_data.get_sheet(self.current_sheet)
+                                                        .and_then(|s| s.get_cell(row, col))
+                                                        .map(|c| !c.value.is_empty() || !c.formula.is_empty())
+                                                        .unwrap_or(false)
+                                                }).unwrap_or(false);
+                                                ("清空单元格", has, false)
+                                            };
+                                            let clear_response = ui.add_enabled(has_content, egui::Button::new(clear_label));
                                             if clear_response.clicked() {
                                                 self.context_menu.confirm_action = Some(ContextAction::ClearCell);
+                                                self.context_menu.clear_is_range = is_range;
                                                 self.context_menu.confirm_visible = true;
                                             }
 
@@ -1199,7 +1296,12 @@ impl eframe::App for ExcelViewer {
 
                         // 根据操作类型显示不同的确认弹窗
                         if confirm_action == Some(ContextAction::ClearCell) {
-                            // 清空单元格确认弹窗
+                            // 清空确认弹窗（区分范围/单格）
+                            let confirm_text = if self.context_menu.clear_is_range {
+                                "确定清空选中范围的内容？"
+                            } else {
+                                "确定清空该单元格的内容？"
+                            };
                             egui::Window::new("clear_confirm")
                                 .title_bar(false)
                                 .open(&mut keep_open)
@@ -1208,10 +1310,10 @@ impl eframe::App for ExcelViewer {
                                 .order(egui::Order::Foreground)
                                 .fixed_pos(self.context_menu.position)
                                 .show(ui.ctx(), |ui| {
-                                    ui.set_width(160.0);
+                                    ui.set_width(200.0);
                                     ui.set_height(25.0);
                                     ui.vertical_centered(|ui| {
-                                        ui.label(egui::RichText::new("确定清空该单元格的内容？").size(13.0));
+                                        ui.label(egui::RichText::new(confirm_text).size(13.0));
                                     });
                                     ui.add_space(8.0);
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1307,15 +1409,38 @@ impl eframe::App for ExcelViewer {
                                     if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
                                         match action {
                                             ContextAction::ClearCell => {
-                                                // 保存单单元格撤销快照
-                                                Self::push_undo_cell(&mut self.undo_stack, self.current_sheet, row, col, sheet, self.selected_cell);
-                                                // 清空单元格的值和公式（保留样式）
-                                                if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                                                    cell.value.clear();
-                                                    cell.formula.clear();
+                                                if self.context_menu.clear_is_range {
+                                                    // 范围清空：保存范围内所有单元格撤销快照
+                                                    if let Some((sc, sr, ec, er)) = self.selected_range {
+                                                        Self::push_undo_range(
+                                                            &mut self.undo_stack,
+                                                            self.current_sheet,
+                                                            sc, sr, ec, er,
+                                                            sheet,
+                                                            self.selected_cell,
+                                                            self.selected_range,
+                                                        );
+                                                        // 清空范围内所有单元格的值和公式
+                                                        for r in sr..=er {
+                                                            for c in sc..=ec {
+                                                                if let Some(cell) = sheet.cells.get_mut(&(r, c)) {
+                                                                    cell.value.clear();
+                                                                    cell.formula.clear();
+                                                                }
+                                                            }
+                                                        }
+                                                        // 范围清空后触发全表公式重算
+                                                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                                                    }
+                                                } else {
+                                                    // 单格清空（原有逻辑）
+                                                    Self::push_undo_cell(&mut self.undo_stack, self.current_sheet, row, col, sheet, self.selected_cell);
+                                                    if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                                                        cell.value.clear();
+                                                        cell.formula.clear();
+                                                    }
+                                                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
                                                 }
-                                                // 清空后触发依赖公式重算
-                                                crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
                                             }
                                             _ => {
                                                 // 插入列逻辑
