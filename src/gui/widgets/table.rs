@@ -646,8 +646,8 @@ pub fn draw_table_content(
         // 从累积数组直接获取冻结区域尺寸和总宽高
         let frozen_left_width = col_cumulative_width[(sheet.frozen_cols + 1) as usize];
         let frozen_top_height = row_cumulative_height[(sheet.frozen_rows + 1) as usize];
-        let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + border_width + 11.0;
-        let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + 11.0;
+        let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + 11.0;
+        let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + border_width + 11.0;
 
         // 我们已经在前面分配了空间，直接使用保存的 rect
         let rect = egui::Rect::from_min_size(table_top_left, egui::vec2(total_width, total_height));
