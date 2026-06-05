@@ -106,7 +106,7 @@ fn apply_cell_style(
         style.set_background_color(format!("{:02X}{:02X}{:02X}", r, g, b));
     }
 
-    // 字体大小和颜色
+    // 字体大小、颜色和加粗
     let font = style.font_mut();
     if let Some(size) = cell_data.font_size {
         font.set_size(size);
@@ -114,10 +114,37 @@ fn apply_cell_style(
     if let Some((r, g, b)) = cell_data.font_color {
         font.color_mut().set_argb_str(format!("FF{:02X}{:02X}{:02X}", r, g, b));
     }
+    if cell_data.bold {
+        font.set_bold(true);
+    }
+
+    // 边框
+    apply_borders(style, &cell_data.borders);
 
     // 数字格式
     if let Some(ref fmt) = cell_data.number_format {
         style.number_format_mut().set_format_code(fmt);
+    }
+}
+
+/// 将边框信息应用到 Style
+fn apply_borders(style: &mut umya_spreadsheet::Style, borders: &super::reader::CellBorders) {
+    let b = style.borders_mut();
+    apply_border_side(b.left_mut(), &borders.left);
+    apply_border_side(b.right_mut(), &borders.right);
+    apply_border_side(b.top_mut(), &borders.top);
+    apply_border_side(b.bottom_mut(), &borders.bottom);
+}
+
+/// 将单个边框属性应用到 Border 对象
+fn apply_border_side(border: &mut umya_spreadsheet::structs::Border, cell_border: &super::reader::CellBorder) {
+    if !cell_border.style.is_empty() {
+        border.set_border_style(&cell_border.style);
+    }
+    if let Some((r, g, b)) = cell_border.color {
+        let mut color = umya_spreadsheet::structs::Color::default();
+        color.set_argb_str(format!("FF{:02X}{:02X}{:02X}", r, g, b));
+        border.set_color(color);
     }
 }
 

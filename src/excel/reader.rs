@@ -45,6 +45,44 @@ impl Default for CellAlignment {
     }
 }
 
+/// 单个边框样式
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellBorder {
+    /// 边框样式字符串（如 "thin", "medium", "none" 等）
+    pub style: String,
+    /// 边框颜色（RGB）
+    pub color: Option<(u8, u8, u8)>,
+}
+
+impl Default for CellBorder {
+    fn default() -> Self {
+        Self {
+            style: String::new(),
+            color: None,
+        }
+    }
+}
+
+/// 单元格四边边框
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellBorders {
+    pub left: CellBorder,
+    pub right: CellBorder,
+    pub top: CellBorder,
+    pub bottom: CellBorder,
+}
+
+impl Default for CellBorders {
+    fn default() -> Self {
+        Self {
+            left: CellBorder::default(),
+            right: CellBorder::default(),
+            top: CellBorder::default(),
+            bottom: CellBorder::default(),
+        }
+    }
+}
+
 /// 单元格数据结构，存储单元格的值和公式
 #[derive(Debug, Clone)]
 pub struct CellData {
@@ -64,6 +102,10 @@ pub struct CellData {
     pub font_color: Option<(u8, u8, u8)>,
     /// 数字格式代码（如日期格式 "yyyy/m/d"）
     pub number_format: Option<String>,
+    /// 字体是否加粗
+    pub bold: bool,
+    /// 单元格边框：上/下/左/右边框样式和颜色
+    pub borders: CellBorders,
 }
 
 /// CellData 的默认实现，创建空值和空公式的单元格
@@ -78,6 +120,8 @@ impl Default for CellData {
             font_size: None,
             font_color: None,
             number_format: None,
+            bold: false,
+            borders: CellBorders::default(),
         }
     }
 }
@@ -477,6 +521,8 @@ impl SheetData {
                     font_size: template.font_size,
                     font_color: template.font_color,
                     number_format: template.number_format.clone(),
+                    bold: template.bold,
+                    borders: template.borders.clone(),
                 };
                 for offset in 0..n {
                     let new_row = insert_at + offset;
@@ -658,6 +704,8 @@ impl SheetData {
                     font_size: template.font_size,
                     font_color: template.font_color,
                     number_format: template.number_format.clone(),
+                    bold: template.bold,
+                    borders: template.borders.clone(),
                 };
                 self.cells.insert((old_max_row + 1, col), styled);
             }
@@ -955,6 +1003,16 @@ impl SheetData {
                         } else {
                             None
                         },
+                        bold: if options.copy_style {
+                            source_cell.bold
+                        } else {
+                            false
+                        },
+                        borders: if options.copy_style {
+                            source_cell.borders.clone()
+                        } else {
+                            CellBorders::default()
+                        },
                     };
                     new_cells_to_insert.push(((row, new_col), new_cell));
                 }
@@ -989,6 +1047,8 @@ impl SheetData {
                                 font_size: template.font_size,
                                 font_color: template.font_color,
                                 number_format: template.number_format.clone(),
+                                bold: template.bold,
+                                borders: template.borders.clone(),
                             };
                             new_cells_to_insert.push(((row, new_col), styled));
                         }
@@ -1165,7 +1225,7 @@ impl ExcelData {
                         let value = cell.value().to_string();
                         let raw_number = cell.value_number();
                         let style = worksheet.style((col_idx, row_idx));
-                        let (alignment, background_color, font_size, font_color, number_format) = Self::parse_style(style, theme);
+                        let (alignment, background_color, font_size, font_color, number_format, bold, borders) = Self::parse_style(style, theme);
 
                         let cell_data = CellData {
                             value,
@@ -1176,6 +1236,8 @@ impl ExcelData {
                             font_size,
                             font_color,
                             number_format,
+                            bold,
+                            borders,
                         };
                         // 内部存储仍使用 (row, col) 顺序
                         sheet.cells.insert((row_idx, col_idx), cell_data);
@@ -1329,20 +1391,23 @@ impl ExcelData {
 
     /// 解析 Excel 单元格样式
     ///
-    /// 从 umya-spreadsheet 的 Style 对象中提取对齐方式、背景颜色、字体大小和字体颜色
+    /// 从 umya-spreadsheet 的 Style 对象中提取对齐方式、背景颜色、字体大小、字体颜色、
+    /// 字体加粗、边框和数字格式
     ///
     /// # 参数
     /// * `style` - Excel 单元格样式对象
     /// * `theme` - 工作簿主题对象，用于解析主题颜色
     ///
     /// # 返回值
-    /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB))
-    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>) {
+    /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB), 数字格式, 是否加粗, 边框)
+    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders) {
         let mut alignment = CellAlignment::default();
         let mut background_color: Option<(u8, u8, u8)> = None;
         let mut font_size: Option<f64> = None;
         let mut font_color: Option<(u8, u8, u8)> = None;
         let mut number_format: Option<String> = None;
+        let mut bold = false;
+        let mut borders = CellBorders::default();
 
         // 解析对齐方式
         if let Some(align) = style.alignment() {
@@ -1382,7 +1447,7 @@ impl ExcelData {
             }
         }
 
-        // 解析字体信息（大小和颜色）
+        // 解析字体信息（大小、颜色、加粗）
         if let Some(font) = style.font() {
             font_size = Some(font.size());
 
@@ -1394,6 +1459,36 @@ impl ExcelData {
                     font_color = Some(rgb);
                 }
             }
+
+            // 解析字体加粗
+            bold = font.font_bold().val();
+        }
+
+        // 解析边框
+        if let Some(style_borders) = style.borders() {
+            let parse_border = |border: &umya_spreadsheet::structs::Border| -> CellBorder {
+                let mut style_str = String::new();
+                let mut color = None;
+                // 检查边框样式：非 "none" 或空字符串表示有边框
+                let bs = border.border_style();
+                if !bs.is_empty() && bs != "none" {
+                    style_str = bs.to_string();
+                }
+                // 解析边框颜色
+                if let Some(border_color) = border.color() {
+                    let resolved = border_color.argb_with_theme(theme);
+                    if !resolved.is_empty() && resolved != "00000000" {
+                        if let Ok(rgb) = Self::parse_hex_color(&resolved) {
+                            color = Some(rgb);
+                        }
+                    }
+                }
+                CellBorder { style: style_str, color }
+            };
+            borders.left = parse_border(style_borders.left());
+            borders.right = parse_border(style_borders.right());
+            borders.top = parse_border(style_borders.top());
+            borders.bottom = parse_border(style_borders.bottom());
         }
 
         // 解析数字格式
@@ -1404,7 +1499,7 @@ impl ExcelData {
             }
         }
 
-        (alignment, background_color, font_size, font_color, number_format)
+        (alignment, background_color, font_size, font_color, number_format, bold, borders)
     }
     
     /// 将十六进制颜色字符串转换为 RGB 元组
