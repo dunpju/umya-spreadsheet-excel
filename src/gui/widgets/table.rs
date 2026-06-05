@@ -47,6 +47,7 @@ pub fn draw_table_content(
     validation_error: &mut Option<(String, String)>,
     original_cell_data: &mut Option<((u32, u32), String, String)>,
     context_menu: &mut crate::gui::viewer::ContextMenuState,
+    dirty: &mut bool,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -529,6 +530,7 @@ pub fn draw_table_content(
                     // 值变更只需增量求值受影响的公式
                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
                 }
+                *dirty = true;
             }
         }
     }
@@ -1789,6 +1791,7 @@ pub fn draw_table_content(
                     } else {
                         crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
                     }
+                    *dirty = true;
                 }
                 if clear_edit {
                     *editing_cell = None;
@@ -1844,6 +1847,7 @@ pub fn draw_table_content(
                 } else {
                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
                 }
+                *dirty = true;
             }
         }
     }

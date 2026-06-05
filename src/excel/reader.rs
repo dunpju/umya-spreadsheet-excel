@@ -1,5 +1,5 @@
 // 引入 umya-spreadsheet 库用于读取 Excel 文件
-use umya_spreadsheet::{reader, EnumTrait};
+use umya_spreadsheet::{reader, writer, EnumTrait};
 // 引入 HashMap 用于存储单元格和列宽数据
 use std::collections::HashMap;
 
@@ -1618,14 +1618,61 @@ impl ExcelData {
     }
 
     /// 根据索引获取工作表
-    /// 
+    ///
     /// # 参数
     /// * `index` - 工作表索引（从0开始）
-    /// 
+    ///
     /// # 返回值
     /// 成功返回 Some(&SheetData)，索引越界返回 None
     pub fn get_sheet(&self, index: usize) -> Option<&SheetData> {
         self.sheets.get(index)
+    }
+
+    /// 将 Excel 数据保存到文件
+    ///
+    /// 重新读取原始文件以获取完整的 Workbook 对象（保留所有原始属性），
+    /// 然后将 ExcelData 中的单元格变更应用回 Workbook，最后写入新文件。
+    ///
+    /// 保留的原始属性包括：单元格合并、公式、样式、数据有效性、
+    /// 字体大小、字体颜色、单元格背景颜色、列宽与行高、冻结区域。
+    ///
+    /// # 参数
+    /// * `original_path` - 原始导入的文件路径
+    /// * `output_path` - 输出文件路径
+    pub fn save_to_file(original_path: &str, excel_data: &ExcelData, output_path: &str) -> Result<(), String> {
+        // 重新读取原始文件，保留所有格式属性
+        let mut book = reader::xlsx::read(original_path)
+            .map_err(|e| format!("重新读取原文件失败: {}", e))?;
+
+        // 将 ExcelData 中的单元格数据写回 Workbook
+        for (sheet_idx, sheet_data) in excel_data.sheets.iter().enumerate() {
+            if let Some(worksheet) = book.sheet_collection_mut().get_mut(sheet_idx) {
+                for ((row, col), cell_data) in &sheet_data.cells {
+                    // 获取或创建单元格（保留原有样式：边框、背景色、字体等）
+                    let cell = worksheet.cell_mut((*col, *row));
+                    if cell_data.value.is_empty() && cell_data.formula.is_empty() {
+                        // 值和公式均为空：仅清除值和公式，不移除单元格（保留样式）
+                        cell.set_value("");
+                        cell.set_formula("");
+                    } else {
+                        // 设置值
+                        cell.set_value(cell_data.value.as_str());
+                        // 设置公式
+                        if cell_data.formula.is_empty() {
+                            cell.set_formula("");
+                        } else {
+                            cell.set_formula(cell_data.formula.as_str());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 写入新文件
+        writer::xlsx::write(&book, output_path)
+            .map_err(|e| format!("写入文件失败: {}", e))?;
+
+        Ok(())
     }
 }
 

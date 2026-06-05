@@ -323,6 +323,16 @@ pub struct ExcelViewer {
     pub add_row: bool,
     /// 插入完成后滚动到最后一行，使新行出现在可视区域
     scroll_to_last_row: bool,
+    /// 是否有未保存的单元格变更
+    pub dirty: bool,
+    /// 是否正在保存中（用于显示 loading 动画）
+    saving: bool,
+    /// 最近一次保存的文件路径（用于状态栏显示）
+    save_path: Option<String>,
+    /// 异步保存的通道接收器
+    save_rx: Option<Receiver<Result<String, String>>>,
+    /// 保存请求标志（用于延迟到 excel_data 借用释放后执行）
+    save_requested: bool,
 }
 
 impl ExcelViewer {
@@ -355,6 +365,11 @@ impl ExcelViewer {
             scroll_to_last_col: false,
             add_row: false,
             scroll_to_last_row: false,
+            dirty: false,
+            saving: false,
+            save_path: None,
+            save_rx: None,
+            save_requested: false,
         }
     }
 
@@ -483,6 +498,10 @@ impl ExcelViewer {
                         self.hovered_cell = None;
                         self.error_message = None;
                         self.undo_stack.clear();
+                        self.dirty = false;
+                        self.saving = false;
+                        self.save_path = None;
+                        self.save_rx = None;
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
                     Err(e) => {
@@ -493,6 +512,90 @@ impl ExcelViewer {
                 }
                 // 清除接收器
                 self.rx = None;
+            }
+        }
+    }
+
+    /// 生成带日期后缀的保存路径
+    ///
+    /// 基于当前导入的文件路径，在文件名与扩展名之间插入日期后缀。
+    /// 例如: `template.xlsx` → `template_20260605.xlsx`
+    fn generate_save_path(&self) -> Option<String> {
+        let path = self.file_path.as_ref()?;
+        let pb = std::path::Path::new(path);
+        let stem = pb.file_stem()?.to_str()?;
+        let ext = pb.extension()?.to_str()?;
+        let dir = pb.parent()?;
+
+        // 使用 Unix 纪元 + Howard Hinnant 算法计算当前日期（无需额外依赖）
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let days_since_epoch = duration.as_secs() / 86400;
+        let z = days_since_epoch as i64 + 719468;
+        let era = z / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+        let y = if m <= 2 { y + 1 } else { y };
+        let date_suffix = format!("{}{:02}{:02}", y, m, d);
+
+        let new_name = format!("{}_{}.{}", stem, date_suffix, ext);
+        Some(dir.join(new_name).to_string_lossy().to_string())
+    }
+
+    /// 启动异步保存 Excel 文件
+    fn start_async_save(&mut self, ctx: egui::Context) {
+        let output_path = match self.generate_save_path() {
+            Some(p) => p,
+            None => return,
+        };
+        let original_path = match &self.file_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let excel_data = match &self.excel_data {
+            Some(d) => d.clone(),
+            None => return,
+        };
+
+        self.saving = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.save_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = ExcelData::save_to_file(&original_path, &excel_data, &output_path);
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(Ok(output_path));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// 检查异步保存结果
+    fn check_save_result(&mut self) {
+        if let Some(ref rx) = self.save_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(path) => {
+                        self.save_path = Some(path);
+                        self.dirty = false;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(e);
+                    }
+                }
+                self.saving = false;
+                self.save_rx = None;
             }
         }
     }
@@ -550,6 +653,7 @@ impl eframe::App for ExcelViewer {
                     Self::push_undo_full(&mut self.undo_stack, sheet, self.current_sheet);
                     // 在末尾追加一行，公式引用范围自动扩展
                     sheet.append_row();
+                    self.dirty = true;
                 }
                 crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                 self.scroll_to_last_row = true;
@@ -669,6 +773,21 @@ impl eframe::App for ExcelViewer {
         // 检查异步加载结果
         self.check_load_result();
 
+        // 检查异步保存结果
+        self.check_save_result();
+
+        // 保存中持续请求重绘（驱动 loading 动画）
+        if self.saving {
+            ctx.request_repaint();
+        }
+
+        // Ctrl+S 保存快捷键
+        if ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
+            if self.dirty && !self.saving && self.excel_data.is_some() {
+                self.start_async_save(ctx.clone());
+            }
+        }
+
         // 底部区域：工作表选择器 + 文件路径状态栏
         // 注意：TopBottomPanel 按代码顺序从下往上堆叠，先渲染的在最底部
         // 先渲染 status_bar（最底部），再渲染 sheet_bar（其上方），CentralPanel 在最上面
@@ -686,6 +805,26 @@ impl eframe::App for ExcelViewer {
                                 .color(egui::Color32::from_rgb(100, 100, 100)),
                         );
                     }
+                    // 右侧：保存路径 + loading 动画
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        if self.saving {
+                            // 保存中：显示 loading 动画 + 临时文本
+                            ui.spinner();
+                            ui.label(
+                                egui::RichText::new("正在保存...")
+                                    .font(egui::FontId::proportional(12.0))
+                                    .color(egui::Color32::from_rgb(0, 150, 0)),
+                            );
+                        } else if let Some(save_path) = &self.save_path {
+                            // 保存完成：显示绿色文件路径
+                            ui.label(
+                                egui::RichText::new(save_path.as_str())
+                                    .font(egui::FontId::proportional(12.0))
+                                    .color(egui::Color32::from_rgb(0, 150, 0)),
+                            );
+                        }
+                    });
                 });
             });
 
@@ -761,6 +900,8 @@ impl eframe::App for ExcelViewer {
                             }
                         }
                     }
+                    // 撤销操作也视为数据变更
+                    self.dirty = true;
                 }
 
                 // Delete 键清空单元格（有内容时才弹窗确认）
@@ -846,7 +987,7 @@ impl eframe::App for ExcelViewer {
                 ui.set_min_height(28.0);
                 ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 4.0);
                 
-                if let Some((col, row)) = draw_name_box(
+                let (nav_result, save_clicked) = draw_name_box(
                     ui,
                     &mut self.name_box_state,
                     self.selected_cell,  // 直接使用选中的单元格，不转换为合并单元格的左上角
@@ -854,10 +995,15 @@ impl eframe::App for ExcelViewer {
                     max_col,
                     max_row,
                     &mut self.pending_formula_save,
-                ) {
+                    self.dirty && !self.saving,
+                );
+                if let Some((col, row)) = nav_result {
                     self.selected_cell = Some((col, row));
                 }
-                
+                if save_clicked {
+                    self.save_requested = true;
+                }
+
                 ui.separator();
 
                 // 记录调用前的选中单元格，用于检测变化后清除选中范围
@@ -881,6 +1027,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.validation_error,
                             &mut self.original_cell_data,
                             &mut self.context_menu,
+                            &mut self.dirty,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
@@ -982,6 +1129,7 @@ impl eframe::App for ExcelViewer {
                                                                     .or_insert_with(crate::excel::reader::CellData::default);
                                                                 cell.value = orig_value.clone();
                                                                 cell.formula = orig_formula.clone();
+                                                                self.dirty = true;
                                                                 // 触发公式重算
                                                                 if orig_formula.is_empty() {
                                                                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
@@ -1212,15 +1360,19 @@ impl eframe::App for ExcelViewer {
                                             match action {
                                                 ContextAction::InsertRowAbove => {
                                                     sheet.insert_rows(anchor_row, n, false);
+                                                    self.dirty = true;
                                                 }
                                                 ContextAction::InsertRowBelow => {
                                                     sheet.insert_rows(anchor_row, n, true);
+                                                    self.dirty = true;
                                                 }
                                                 ContextAction::InsertColumnLeft => {
                                                     sheet.insert_columns(anchor_col, m, false, default_options);
+                                                    self.dirty = true;
                                                 }
                                                 ContextAction::InsertColumnRight => {
                                                     sheet.insert_columns(anchor_col, m, true, default_options);
+                                                    self.dirty = true;
                                                 }
                                                 ContextAction::ClearCell => {
                                                     // 清空走确认弹窗路径，这里不应到达
@@ -1431,6 +1583,7 @@ impl eframe::App for ExcelViewer {
                                                         }
                                                         // 范围清空后触发全表公式重算
                                                         crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                                                        self.dirty = true;
                                                     }
                                                 } else {
                                                     // 单格清空（原有逻辑）
@@ -1440,6 +1593,7 @@ impl eframe::App for ExcelViewer {
                                                         cell.formula.clear();
                                                     }
                                                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
+                                                    self.dirty = true;
                                                 }
                                             }
                                             _ => {
@@ -1481,9 +1635,11 @@ impl eframe::App for ExcelViewer {
                                                 match action {
                                                     ContextAction::InsertColumnLeft => {
                                                         sheet.insert_columns(anchor_col, m, false, copy_options);
+                                                        self.dirty = true;
                                                     }
                                                     ContextAction::InsertColumnRight => {
                                                         sheet.insert_columns(anchor_col, m, true, copy_options);
+                                                        self.dirty = true;
                                                     }
                                                     _ => {}
                                                 }
@@ -1543,6 +1699,7 @@ impl eframe::App for ExcelViewer {
                                     cell.value = save_value;
                                     cell.formula.clear();
                                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
+                                    self.dirty = true;
                                 }
                             }
                         } else {
@@ -1552,6 +1709,7 @@ impl eframe::App for ExcelViewer {
                                 .or_insert_with(|| crate::excel::reader::CellData::default());
                             cell.formula = formula_value;
                             crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
+                            self.dirty = true;
                         }
                     }
                 }
@@ -1577,6 +1735,12 @@ impl eframe::App for ExcelViewer {
                 }
             }
         });
+
+        // 处理延迟的保存请求（在 excel_data 借用释放后执行）
+        if self.save_requested {
+            self.save_requested = false;
+            self.start_async_save(ctx);
+        }
     }
 }
 
