@@ -1264,9 +1264,20 @@ fn extract_dependencies(node: &FormulaNode) -> HashSet<(u32, u32)> {
     match node {
         FormulaNode::CellRef { col, row } => { deps.insert((*row, *col)); }
         FormulaNode::RangeRef { start_col, start_row, end_col, end_row } => {
-            for r in *start_row..=*end_row {
-                for c in *start_col..=*end_col {
-                    deps.insert((r, c));
+            // 防止超大范围引用导致依赖集爆炸（如 A1:Z100000）
+            // 超过阈值的范围仅标记四角，避免 O(range_area) 内存和时间开销
+            let cell_count = (end_row - start_row + 1) as u64 * (end_col - start_col + 1) as u64;
+            const MAX_RANGE_CELLS: u64 = 50000;
+            if cell_count > MAX_RANGE_CELLS {
+                deps.insert((*start_row, *start_col));
+                deps.insert((*start_row, *end_col));
+                deps.insert((*end_row, *start_col));
+                deps.insert((*end_row, *end_col));
+            } else {
+                for r in *start_row..=*end_row {
+                    for c in *start_col..=*end_col {
+                        deps.insert((r, c));
+                    }
                 }
             }
         }

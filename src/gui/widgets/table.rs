@@ -620,79 +620,8 @@ pub fn draw_table_content(
             }
         };
 
-        // 计算冻结区域总尺寸（用于冻结窗格覆盖层渲染）
-        let frozen_left_width: f32 = {
-            let mut w = header_width + border_width; // col 0 (行号列)
-            for c in 1..=sheet.frozen_cols {
-                w += get_col_width(c) + border_width;
-            }
-            w
-        };
-        let frozen_top_height: f32 = {
-            let mut h = 0.0f32;
-            for r in 0..=sheet.frozen_rows {
-                h += get_row_height(r) + border_width;
-            }
-            h
-        };
-
-        // 重新计算 total_width 和 total_height（因为之前的变量可能不在作用域）
-        let mut total_width = header_width;
-        for col in 1..=sheet.max_col {
-            total_width += get_col_width(col) + border_width;
-        }
-        total_width += border_width + 11.0; // +11 像素用于垂直滚动条
-        
-        let mut total_height = border_width; // 顶部边框
-        for row in 0..=sheet.max_row {
-            total_height += get_row_height(row) + border_width;
-        }
-        total_height += 11.0; // +11 像素用于水平滚动条
-        
-        // 我们已经在前面分配了空间，直接使用保存的 rect
-        let rect = egui::Rect::from_min_size(table_top_left, egui::vec2(total_width, total_height));
-        let top_left = table_top_left;
-        
-        // 获取painter用于绘制
-        let painter = ui.painter_at(rect);
-        
-        // 保存标题区域尺寸（用于冻结窗格）- 现在使用累积数组方式，不再需要这些变量
-        
-        // 创建交互区域来处理点击事件（使用同一个rect）
-        let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
-        
-        // 如果表格被点击，请求焦点
-        if response.clicked() {
-            response.request_focus();
-        }
-        
-        // 如果选中了单元格但表格没有焦点，重新请求焦点
-        // 仅在Tab键或方向键操作时请求焦点，不每帧强制抢焦点
-        // 否则会阻止名称框/公式输入框获取焦点
-        if !editing_cell.is_some() && selected_cell.is_some() && input.key_pressed(egui::Key::Tab) {
-            response.request_focus();
-        }
-        
-        
-        let tl_x = top_left.x;
-        let tl_y = top_left.y;
-        
-        // 绘制灰色背景
-        painter.rect_filled(
-            egui::Rect::from_min_size(egui::Pos2::new(tl_x, tl_y), egui::vec2(total_width, total_height)),
-            0.0,
-            egui::Color32::GRAY,
-        );
-        
-        // 获取当前可见区域，用于虚拟渲染
-        let viewport_rect = ui.clip_rect();
-        let margin = 100.0; // 适当的边距即可，不需要太大
-            
-        // 先计算所有列的累积宽度，用于准确计算可见列
-        // 索引 0: 0.0 (起点)
-        // 索引 1: 行号列结束位置
-        // 索引 2: A列结束位置
-        // ...
+        // 先计算所有列的累积宽度（索引即为列左边缘位置，严格单调递增）
+        // 索引 0: 0.0 (起点), 索引 1: 行号列右边缘, 索引 2: A列右边缘, ...
         let mut col_cumulative_width = vec![0.0];
         let mut current_width = 0.0;
 
@@ -705,6 +634,57 @@ pub fn draw_table_content(
             current_width += get_col_width(col) + border_width;
             col_cumulative_width.push(current_width);
         }
+
+        // 计算累积行高（索引即为行上边缘位置，严格单调递增）
+        let mut row_cumulative_height = vec![0.0];
+        let mut current_height = 0.0;
+        for row in 0..=sheet.max_row {
+            current_height += get_row_height(row) + border_width;
+            row_cumulative_height.push(current_height);
+        }
+
+        // 从累积数组直接获取冻结区域尺寸和总宽高
+        let frozen_left_width = col_cumulative_width[(sheet.frozen_cols + 1) as usize];
+        let frozen_top_height = row_cumulative_height[(sheet.frozen_rows + 1) as usize];
+        let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + border_width + 11.0;
+        let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + 11.0;
+
+        // 我们已经在前面分配了空间，直接使用保存的 rect
+        let rect = egui::Rect::from_min_size(table_top_left, egui::vec2(total_width, total_height));
+        let top_left = table_top_left;
+
+        // 获取painter用于绘制
+        let painter = ui.painter_at(rect);
+
+        // 创建交互区域来处理点击事件（使用同一个rect）
+        let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
+
+        // 如果表格被点击，请求焦点
+        if response.clicked() {
+            response.request_focus();
+        }
+
+        // 如果选中了单元格但表格没有焦点，重新请求焦点
+        // 仅在Tab键或方向键操作时请求焦点，不每帧强制抢焦点
+        // 否则会阻止名称框/公式输入框获取焦点
+        if !editing_cell.is_some() && selected_cell.is_some() && input.key_pressed(egui::Key::Tab) {
+            response.request_focus();
+        }
+
+
+        let tl_x = top_left.x;
+        let tl_y = top_left.y;
+
+        // 绘制灰色背景
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::Pos2::new(tl_x, tl_y), egui::vec2(total_width, total_height)),
+            0.0,
+            egui::Color32::GRAY,
+        );
+
+        // 获取当前可见区域，用于虚拟渲染
+        let viewport_rect = ui.clip_rect();
+        let margin = 100.0; // 适当的边距即可，不需要太大
 
         // 根据实际列宽计算可见列范围
         let target_start_x = viewport_rect.min.x - tl_x - margin;
@@ -726,14 +706,6 @@ pub fn draw_table_content(
 
         // 确保第 0 列（行号列）始终可见
         visible_cols_start = 0;
-
-        // 计算累积行高用于确定可见行范围
-        let mut row_cumulative_height = vec![0.0];
-        let mut current_height = 0.0;
-        for row in 0..=sheet.max_row {
-            current_height += get_row_height(row) + border_width;
-            row_cumulative_height.push(current_height);
-        }
 
         // 使用累积行高计算可见行范围（与列的可见范围计算逻辑一致）
         let target_start_y = viewport_rect.min.y - tl_y - margin;
@@ -779,23 +751,13 @@ pub fn draw_table_content(
                     pos.y - tl_y
                 };
 
-                // 查找被点击的列（使用 < 确保边界位置归属于后一列）
-                let mut clicked_col: Option<u32> = None;
-                for (i, &width) in col_cumulative_width.iter().enumerate() {
-                    if click_x < width && i > 1 {
-                        clicked_col = Some(i as u32 - 1);
-                        break;
-                    }
-                }
+                // 查找被点击的列（二分查找，累积数组严格单调递增）
+                let col_idx = col_cumulative_width.partition_point(|&w| w <= click_x);
+                let clicked_col = if col_idx > 1 { Some(col_idx as u32 - 1) } else { None };
 
-                // 查找被点击的行（使用 < 确保边界位置归属于后一行）
-                let mut clicked_row: Option<u32> = None;
-                for (i, &height) in row_cumulative_height.iter().enumerate() {
-                    if click_y < height && i > 0 {
-                        clicked_row = Some(i as u32 - 1);
-                        break;
-                    }
-                }
+                // 查找被点击的行（二分查找，累积数组严格单调递增）
+                let row_idx = row_cumulative_height.partition_point(|&h| h <= click_y);
+                let clicked_row = if row_idx > 0 { Some(row_idx as u32 - 1) } else { None };
 
                 // 更新选中单元格（保持 col, row 顺序）
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
@@ -848,20 +810,10 @@ pub fn draw_table_content(
                 let click_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
                 let click_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
 
-                let mut clicked_col: Option<u32> = None;
-                for (i, &width) in col_cumulative_width.iter().enumerate() {
-                    if click_x < width && i > 1 {
-                        clicked_col = Some(i as u32 - 1);
-                        break;
-                    }
-                }
-                let mut clicked_row: Option<u32> = None;
-                for (i, &height) in row_cumulative_height.iter().enumerate() {
-                    if click_y < height && i > 0 {
-                        clicked_row = Some(i as u32 - 1);
-                        break;
-                    }
-                }
+                let col_idx = col_cumulative_width.partition_point(|&w| w <= click_x);
+                let clicked_col = if col_idx > 1 { Some(col_idx as u32 - 1) } else { None };
+                let row_idx = row_cumulative_height.partition_point(|&h| h <= click_y);
+                let clicked_row = if row_idx > 0 { Some(row_idx as u32 - 1) } else { None };
 
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
                     if col > 0 && row > 0 {
@@ -890,20 +842,11 @@ pub fn draw_table_content(
                 let rel_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
                 let rel_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
 
-                let mut col: Option<u32> = None;
-                for (i, &width) in col_cumulative_width.iter().enumerate() {
-                    if rel_x < width && i > 1 {
-                        col = Some(i as u32 - 1);
-                        break;
-                    }
-                }
-                let mut row: Option<u32> = None;
-                for (i, &height) in row_cumulative_height.iter().enumerate() {
-                    if rel_y < height && i > 0 {
-                        row = Some(i as u32 - 1);
-                        break;
-                    }
-                }
+                // 二分查找（累积数组严格单调递增）
+                let col_idx = col_cumulative_width.partition_point(|&w| w <= rel_x);
+                let col = if col_idx > 1 { Some(col_idx as u32 - 1) } else { None };
+                let row_idx = row_cumulative_height.partition_point(|&h| h <= rel_y);
+                let row = if row_idx > 0 { Some(row_idx as u32 - 1) } else { None };
                 match (col, row) {
                     (Some(c), Some(r)) if c > 0 && r > 0 => Some((c, r)),
                     _ => None,
@@ -1261,30 +1204,22 @@ pub fn draw_table_content(
                 return;
             }
 
+            // 获取单元格数据（只查一次，避免后续重复 get_cell）
+            let cell_data = sheet.get_cell(row, col);
+
             // 获取背景色
-            let bg_color = if let Some(cell) = sheet.get_cell(row, col) {
-                if let Some((r, g, b)) = cell.background_color {
-                    egui::Color32::from_rgb(r, g, b)
-                } else {
-                    egui::Color32::WHITE
-                }
-            } else {
-                egui::Color32::WHITE
-            };
+            let bg_color = cell_data.and_then(|c| c.background_color)
+                .map(|(r, g, b)| egui::Color32::from_rgb(r, g, b))
+                .unwrap_or(egui::Color32::WHITE);
 
             // 绘制背景
             if is_merged_top_left {
                 if let Some(merged_range) = merged_range {
-                    let mut mw = 0.0;
-                    for c in merged_range.start_col..=merged_range.end_col {
-                        mw += get_col_width(c) + border_width;
-                    }
-                    mw -= border_width;
-                    let mut mh = 0.0;
-                    for r in merged_range.start_row..=merged_range.end_row {
-                        mh += get_row_height(r) + border_width;
-                    }
-                    mh -= border_width;
+                    // 使用累积数组差值替代循环累加
+                    let mw = col_cumulative_width[merged_range.end_col as usize + 1]
+                        - col_cumulative_width[merged_range.start_col as usize] - border_width;
+                    let mh = row_cumulative_height[merged_range.end_row as usize + 1]
+                        - row_cumulative_height[merged_range.start_row as usize] - border_width;
 
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(mw, mh)),
@@ -1301,7 +1236,7 @@ pub fn draw_table_content(
                     );
 
                     // 绘制内容
-                    if let Some(cell) = sheet.get_cell(row, col) {
+                    if let Some(cell) = cell_data {
                         let display = cell_display_text(cell);
                         if !display.is_empty() {
                             let egui_align = alignment_to_egui(&cell.alignment);
@@ -1337,8 +1272,8 @@ pub fn draw_table_content(
                     egui::StrokeKind::Outside,
                 );
 
-                // 绘制内容
-                if let Some(cell) = sheet.get_cell(row, col) {
+                // 绘制内容（复用 cell_data 避免重复 get_cell 查询）
+                if let Some(cell) = cell_data {
                     let display = cell_display_text(cell);
                     if !display.is_empty() {
                         let egui_align = alignment_to_egui(&cell.alignment);
@@ -1419,8 +1354,8 @@ pub fn draw_table_content(
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
             }
-            // 非冻结列部分（cols > fc）- scroll-dependent x
-            for col in (fc + 1)..=sheet.max_col {
+            // 非冻结列部分（cols > fc）- scroll-dependent x，限可见范围
+            for col in (fc + 1).max(visible_cols_start)..=visible_cols_end.min(sheet.max_col) {
                 let col_x = tl_x + border_width + col_cumulative_width[col as usize];
                 if col_x >= viewport_rect.max.x { break; }
                 draw_frozen_cell(&painter, col, row, col_x, fixed_y);
@@ -1520,7 +1455,7 @@ pub fn draw_table_content(
 
         // 冻结左侧数据列（rows > fr，cols 1..=fc）
         // 注意：这些单元格按滚动 y 绘制，可能向上溢出到冻结顶部区域（如 A15 遮盖 A14）
-        for row in (fr + 1)..=sheet.max_row {
+        for row in (fr + 1).max(visible_rows_start)..=visible_rows_end.min(sheet.max_row) {
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
             if row_y >= viewport_rect.max.y { break; }
@@ -1621,30 +1556,23 @@ pub fn draw_table_content(
             };
 
             // 计算选中单元格位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
+            // 使用累积数组索引替代循环累加
             let sel_x = if start_col <= fc {
-                let mut fx = viewport_rect.min.x + header_width + border_width;
-                for c in 1..start_col { fx += get_col_width(c) + border_width; }
-                fx
+                viewport_rect.min.x + col_cumulative_width[start_col as usize]
             } else {
-                let mut sx = tl_x + border_width;
-                for c in 0..start_col { sx += if c == 0 { header_width } else { get_col_width(c) } + border_width; }
-                sx
+                tl_x + border_width + col_cumulative_width[start_col as usize]
             };
             let sel_y = if start_row <= fr {
-                let mut fy = viewport_rect.min.y;
-                for r in 0..start_row { fy += get_row_height(r) + border_width; }
-                fy
+                viewport_rect.min.y + row_cumulative_height[start_row as usize]
             } else {
                 tl_y + border_width + row_cumulative_height[start_row as usize]
             };
 
-            // 计算选中区域宽高
-            let mut sel_w = 0.0f32;
-            for c in start_col..=end_col { sel_w += get_col_width(c) + border_width; }
-            sel_w -= border_width;
-            let mut sel_h = 0.0f32;
-            for r in start_row..=end_row { sel_h += get_row_height(r) + border_width; }
-            sel_h -= border_width;
+            // 计算选中区域宽高：使用累积数组差值替代循环累加
+            let sel_w = col_cumulative_width[end_col as usize + 1]
+                - col_cumulative_width[start_col as usize] - border_width;
+            let sel_h = row_cumulative_height[end_row as usize + 1]
+                - row_cumulative_height[start_row as usize] - border_width;
 
             // 绘制2px蓝色选中边框
             painter.rect_stroke(
@@ -1680,12 +1608,10 @@ pub fn draw_table_content(
                 } else {
                     tl_y + border_width + row_cumulative_height[r_start_row as usize]
                 };
-                let mut rw = 0.0f32;
-                for c in r_start_col..=r_end_col { rw += get_col_width(c) + border_width; }
-                rw -= border_width;
-                let mut rh = 0.0f32;
-                for r in r_start_row..=r_end_row { rh += get_row_height(r) + border_width; }
-                rh -= border_width;
+                let rw = col_cumulative_width[r_end_col as usize + 1]
+                    - col_cumulative_width[r_start_col as usize] - border_width;
+                let rh = row_cumulative_height[r_end_row as usize + 1]
+                    - row_cumulative_height[r_start_row as usize] - border_width;
                 // 绘制半透明蓝色背景
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
@@ -1712,51 +1638,27 @@ pub fn draw_table_content(
 
                 // 计算编辑单元格的位置
                 // 冻结区域使用固定视口坐标，非冻结区域使用表格内容坐标
+                // 使用累积数组索引替代循环累加
                 let x = if edit_col <= fc {
-                    // 冻结列：使用固定视口位置
-                    let mut fx = viewport_rect.min.x + header_width + border_width;
-                    for c in 1..edit_col {
-                        fx += get_col_width(c) + border_width;
-                    }
-                    fx
+                    viewport_rect.min.x + col_cumulative_width[edit_col as usize]
                 } else {
-                    // 非冻结列：使用表格内容坐标
-                    let mut x = tl_x + border_width;
-                    for c in 0..edit_col {
-                        x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
-                    }
-                    x
+                    tl_x + border_width + col_cumulative_width[edit_col as usize]
                 };
                 let y = if edit_row <= fr {
-                    // 冻结行：使用固定视口位置
-                    let mut fy = viewport_rect.min.y;
-                    for r in 0..edit_row {
-                        fy += get_row_height(r) + border_width;
-                    }
-                    fy
+                    viewport_rect.min.y + row_cumulative_height[edit_row as usize]
                 } else {
-                    // 非冻结行：使用表格内容坐标
                     tl_y + border_width + row_cumulative_height[edit_row as usize]
                 };
 
                 // 检查是否是合并单元格，如果是则计算合并区域的尺寸
+                // 使用累积数组差值替代循环累加
                 let (cell_width, cell_height) = if let Some(merged_range) = sheet.get_merged_range(edit_col, edit_row) {
-                    // 合并单元格：计算整个合并区域的宽度和高度
-                    let mut merged_width = 0.0;
-                    for c in merged_range.start_col..=merged_range.end_col {
-                        merged_width += get_col_width(c) + border_width;
-                    }
-                    merged_width -= border_width;
-
-                    let mut merged_height = 0.0;
-                    for r in merged_range.start_row..=merged_range.end_row {
-                        merged_height += get_row_height(r) + border_width;
-                    }
-                    merged_height -= border_width;
-
-                    (merged_width, merged_height)
+                    let mw = col_cumulative_width[merged_range.end_col as usize + 1]
+                        - col_cumulative_width[merged_range.start_col as usize] - border_width;
+                    let mh = row_cumulative_height[merged_range.end_row as usize + 1]
+                        - row_cumulative_height[merged_range.start_row as usize] - border_width;
+                    (mw, mh)
                 } else {
-                    // 普通单元格：使用单个单元格的尺寸
                     (get_col_width(edit_col), get_row_height(edit_row))
                 };
 

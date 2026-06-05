@@ -1217,32 +1217,29 @@ impl ExcelData {
             let highest_row = worksheet.highest_row();
             let highest_col = worksheet.highest_column();
 
-            // 遍历所有单元格，读取有数据的单元格
-            for row_idx in 1..=highest_row {
-                for col_idx in 1..=highest_col {
-                    // umya-spreadsheet 的 get_cell 方法期望 (col, row) 顺序（符合 Excel 惯例）
-                    if let Some(cell) = worksheet.cell((col_idx, row_idx)) {
-                        let value = cell.value().to_string();
-                        let raw_number = cell.value_number();
-                        let style = worksheet.style((col_idx, row_idx));
-                        let (alignment, background_color, font_size, font_color, number_format, bold, borders) = Self::parse_style(style, theme);
+            // 遍历实际存在的单元格（仅非空单元格有 XML 记录），避免 O(rows×cols) 全量扫描
+            for cell in worksheet.cells() {
+                let col_idx = cell.coordinate().col_num();
+                let row_idx = cell.coordinate().row_num();
+                let value = cell.value().to_string();
+                let raw_number = cell.value_number();
+                let style = worksheet.style((col_idx, row_idx));
+                let (alignment, background_color, font_size, font_color, number_format, bold, borders) = Self::parse_style(style, theme);
 
-                        let cell_data = CellData {
-                            value,
-                            raw_number,
-                            formula: cell.formula().to_string(),
-                            alignment,
-                            background_color,
-                            font_size,
-                            font_color,
-                            number_format,
-                            bold,
-                            borders,
-                        };
-                        // 内部存储仍使用 (row, col) 顺序
-                        sheet.cells.insert((row_idx, col_idx), cell_data);
-                    }
-                }
+                let cell_data = CellData {
+                    value,
+                    raw_number,
+                    formula: cell.formula().to_string(),
+                    alignment,
+                    background_color,
+                    font_size,
+                    font_color,
+                    number_format,
+                    bold,
+                    borders,
+                };
+                // 内部存储仍使用 (row, col) 顺序
+                sheet.cells.insert((row_idx, col_idx), cell_data);
             }
 
             // 设置工作表的最大行和最大列
