@@ -49,8 +49,14 @@ pub struct ContextMenuState {
     pub insert_rows_count: u32,
     /// 插入列数
     pub insert_cols_count: u32,
-    /// 选中行/列数量（0=选到边界）
-    pub select_count: u32,
+    /// 向下选中行数（0=选到边界）
+    pub select_down_count: u32,
+    /// 向上选中行数（0=选到边界）
+    pub select_up_count: u32,
+    /// 向左选中列数（0=选到边界）
+    pub select_left_count: u32,
+    /// 向右选中列数（0=选到边界）
+    pub select_right_count: u32,
     /// 确认弹窗是否可见
     pub confirm_visible: bool,
     /// 确认弹窗是否已显示超过一帧（用于跳过首帧外部点击检测）
@@ -89,7 +95,10 @@ impl Default for ContextMenuState {
             target_cell: None,
             insert_rows_count: 1,
             insert_cols_count: 1,
-            select_count: 0,
+            select_down_count: 0,
+            select_up_count: 0,
+            select_left_count: 0,
+            select_right_count: 0,
             confirm_visible: false,
             confirm_established: false,
             confirm_action: None,
@@ -996,7 +1005,7 @@ impl eframe::App for ExcelViewer {
                                                 if ui.button("向下选中").clicked() {
                                                     pending_action = Some(ContextAction::SelectDown);
                                                 }
-                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_down_count)
                                                     .range(0..=10000)
                                                     .speed(0.1));
                                                 ui.label("行");
@@ -1005,7 +1014,7 @@ impl eframe::App for ExcelViewer {
                                                 if ui.button("向上选中").clicked() {
                                                     pending_action = Some(ContextAction::SelectUp);
                                                 }
-                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_up_count)
                                                     .range(0..=10000)
                                                     .speed(0.1));
                                                 ui.label("行");
@@ -1014,7 +1023,7 @@ impl eframe::App for ExcelViewer {
                                                 if ui.button("向左选中").clicked() {
                                                     pending_action = Some(ContextAction::SelectLeft);
                                                 }
-                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_left_count)
                                                     .range(0..=10000)
                                                     .speed(0.1));
                                                 ui.label("列");
@@ -1023,7 +1032,7 @@ impl eframe::App for ExcelViewer {
                                                 if ui.button("向右选中").clicked() {
                                                     pending_action = Some(ContextAction::SelectRight);
                                                 }
-                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_count)
+                                                ui.add(egui::DragValue::new(&mut self.context_menu.select_right_count)
                                                     .range(0..=10000)
                                                     .speed(0.1));
                                                 ui.label("列");
@@ -1046,7 +1055,13 @@ impl eframe::App for ExcelViewer {
                                     // 选中操作：直接设置 selected_range
                                     ContextAction::SelectDown | ContextAction::SelectUp
                                     | ContextAction::SelectLeft | ContextAction::SelectRight => {
-                                        let n = self.context_menu.select_count;
+                                        let n = match action {
+                                            ContextAction::SelectDown => self.context_menu.select_down_count,
+                                            ContextAction::SelectUp => self.context_menu.select_up_count,
+                                            ContextAction::SelectLeft => self.context_menu.select_left_count,
+                                            ContextAction::SelectRight => self.context_menu.select_right_count,
+                                            _ => 0,
+                                        };
                                         let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(row);
                                         let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(col);
                                         let (start_col, start_row, end_col, end_row) = match action {
@@ -1124,6 +1139,10 @@ impl eframe::App for ExcelViewer {
                             self.context_menu.confirm_visible = false;
                             self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
+                            self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                         }
 
                         // 点击菜单外部关闭
@@ -1139,6 +1158,10 @@ impl eframe::App for ExcelViewer {
                                         self.context_menu.confirm_visible = false;
                                         self.context_menu.confirm_established = false;
                                         self.context_menu.confirm_action = None;
+                                        self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                                     }
                                 }
                             }
@@ -1149,6 +1172,10 @@ impl eframe::App for ExcelViewer {
                             self.context_menu.confirm_visible = false;
                             self.context_menu.confirm_established = false;
                             self.context_menu.confirm_action = None;
+                            self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                         }
                     }
 
