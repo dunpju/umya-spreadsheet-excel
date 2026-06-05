@@ -632,6 +632,30 @@ impl eframe::App for ExcelViewer {
                     }
                 }
 
+                // Delete 键清空单元格（有内容时才弹窗确认）
+                if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                    if self.selected_cell.is_some() && self.editing_cell.is_none() && !self.context_menu.confirm_visible {
+                        let has_content = self.selected_cell.map(|(col, row)| {
+                            excel_data.get_sheet(self.current_sheet)
+                                .and_then(|s| s.get_cell(row, col))
+                                .map(|c| !c.value.is_empty() || !c.formula.is_empty())
+                                .unwrap_or(false)
+                        }).unwrap_or(false);
+                        if has_content {
+                            self.context_menu.target_cell = self.selected_cell;
+                            self.context_menu.confirm_action = Some(ContextAction::ClearCell);
+                            self.context_menu.confirm_visible = true;
+                            self.context_menu.confirm_established = false;
+                            // 计算弹窗位置：表格滚动区域中心
+                            self.context_menu.position = ui.ctx().memory(|mem| {
+                                mem.area_rect(egui::Id::new("table_scroll"))
+                                    .map(|r| r.center())
+                                    .unwrap_or(egui::Pos2::new(400.0, 300.0))
+                            });
+                        }
+                    }
+                }
+
                 // 预先获取工作表信息
                 let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(0);
                 let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(0);
@@ -879,8 +903,15 @@ impl eframe::App for ExcelViewer {
 
                                             ui.separator();
 
-                                            // 清空单元格
-                                            if ui.button("清空单元格").clicked() {
+                                            // 清空单元格（无内容时灰色不可点击）
+                                            let has_content = self.context_menu.target_cell.map(|(col, row)| {
+                                                excel_data.get_sheet(self.current_sheet)
+                                                    .and_then(|s| s.get_cell(row, col))
+                                                    .map(|c| !c.value.is_empty() || !c.formula.is_empty())
+                                                    .unwrap_or(false)
+                                            }).unwrap_or(false);
+                                            let clear_response = ui.add_enabled(has_content, egui::Button::new("清空单元格"));
+                                            if clear_response.clicked() {
                                                 self.context_menu.confirm_action = Some(ContextAction::ClearCell);
                                                 self.context_menu.confirm_visible = true;
                                             }
@@ -981,8 +1012,15 @@ impl eframe::App for ExcelViewer {
                         }
                     }
 
-                    // 绘制插入列确认弹窗
+                    // 绘制确认弹窗（插入列 / 清空单元格）
                     if self.context_menu.confirm_visible {
+                        // Escape 关闭确认弹窗
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.context_menu.confirm_visible = false;
+                            self.context_menu.confirm_established = false;
+                            self.context_menu.confirm_action = None;
+                        }
+
                         // 首帧标记为已建立，后续帧才检测外部点击
                         let is_established = self.context_menu.confirm_established;
                         self.context_menu.confirm_established = true;
