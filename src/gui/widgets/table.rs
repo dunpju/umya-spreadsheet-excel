@@ -644,8 +644,14 @@ pub fn draw_table_content(
         }
 
         // 从累积数组直接获取冻结区域尺寸和总宽高
-        let frozen_left_width = col_cumulative_width[(sheet.frozen_cols + 1) as usize];
-        let frozen_top_height = row_cumulative_height[(sheet.frozen_rows + 1) as usize];
+        let frozen_left_width = col_cumulative_width
+            .get((sheet.frozen_cols + 1) as usize)
+            .copied()
+            .unwrap_or(0.0);
+        let frozen_top_height = row_cumulative_height
+            .get((sheet.frozen_rows + 1) as usize)
+            .copied()
+            .unwrap_or(0.0);
         let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + 11.0;
         let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + border_width + 11.0;
 
@@ -1556,23 +1562,29 @@ pub fn draw_table_content(
             };
 
             // 计算选中单元格位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
-            // 使用累积数组索引替代循环累加
+            // 使用累积数组索引替代循环累加（索引已通过受信任来源保证在下界内；上界通过 min 安全裁剪）
             let sel_x = if start_col <= fc {
-                viewport_rect.min.x + col_cumulative_width[start_col as usize]
+                let idx = (start_col as usize).min(col_cumulative_width.len() - 1);
+                viewport_rect.min.x + col_cumulative_width[idx]
             } else {
-                tl_x + border_width + col_cumulative_width[start_col as usize]
+                let idx = (start_col as usize).min(col_cumulative_width.len() - 1);
+                tl_x + border_width + col_cumulative_width[idx]
             };
             let sel_y = if start_row <= fr {
-                viewport_rect.min.y + row_cumulative_height[start_row as usize]
+                let idx = (start_row as usize).min(row_cumulative_height.len() - 1);
+                viewport_rect.min.y + row_cumulative_height[idx]
             } else {
-                tl_y + border_width + row_cumulative_height[start_row as usize]
+                let idx = (start_row as usize).min(row_cumulative_height.len() - 1);
+                tl_y + border_width + row_cumulative_height[idx]
             };
 
             // 计算选中区域宽高：使用累积数组差值替代循环累加
-            let sel_w = col_cumulative_width[end_col as usize + 1]
-                - col_cumulative_width[start_col as usize] - border_width;
-            let sel_h = row_cumulative_height[end_row as usize + 1]
-                - row_cumulative_height[start_row as usize] - border_width;
+            let end_col_idx = ((end_col as usize).saturating_add(1)).min(col_cumulative_width.len() - 1);
+            let sel_w = col_cumulative_width[end_col_idx]
+                - col_cumulative_width[(start_col as usize).min(col_cumulative_width.len() - 1)] - border_width;
+            let end_row_idx = ((end_row as usize).saturating_add(1)).min(row_cumulative_height.len() - 1);
+            let sel_h = row_cumulative_height[end_row_idx]
+                - row_cumulative_height[(start_row as usize).min(row_cumulative_height.len() - 1)] - border_width;
 
             // 绘制2px蓝色选中边框
             painter.rect_stroke(
@@ -1599,19 +1611,25 @@ pub fn draw_table_content(
             if r_start_col <= r_end_col && r_start_row <= r_end_row {
                 // 计算起始位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
                 let rx = if r_start_col <= fc {
-                    viewport_rect.min.x + col_cumulative_width[r_start_col as usize]
+                    let idx = (r_start_col as usize).min(col_cumulative_width.len() - 1);
+                    viewport_rect.min.x + col_cumulative_width[idx]
                 } else {
-                    tl_x + border_width + col_cumulative_width[r_start_col as usize]
+                    let idx = (r_start_col as usize).min(col_cumulative_width.len() - 1);
+                    tl_x + border_width + col_cumulative_width[idx]
                 };
                 let ry = if r_start_row <= fr {
-                    viewport_rect.min.y + row_cumulative_height[r_start_row as usize]
+                    let idx = (r_start_row as usize).min(row_cumulative_height.len() - 1);
+                    viewport_rect.min.y + row_cumulative_height[idx]
                 } else {
-                    tl_y + border_width + row_cumulative_height[r_start_row as usize]
+                    let idx = (r_start_row as usize).min(row_cumulative_height.len() - 1);
+                    tl_y + border_width + row_cumulative_height[idx]
                 };
-                let rw = col_cumulative_width[r_end_col as usize + 1]
-                    - col_cumulative_width[r_start_col as usize] - border_width;
-                let rh = row_cumulative_height[r_end_row as usize + 1]
-                    - row_cumulative_height[r_start_row as usize] - border_width;
+                let end_col_idx = ((r_end_col as usize).saturating_add(1)).min(col_cumulative_width.len() - 1);
+                let rw = col_cumulative_width[end_col_idx]
+                    - col_cumulative_width[(r_start_col as usize).min(col_cumulative_width.len() - 1)] - border_width;
+                let end_row_idx = ((r_end_row as usize).saturating_add(1)).min(row_cumulative_height.len() - 1);
+                let rh = row_cumulative_height[end_row_idx]
+                    - row_cumulative_height[(r_start_row as usize).min(row_cumulative_height.len() - 1)] - border_width;
                 // 绘制半透明蓝色背景
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
