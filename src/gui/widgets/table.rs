@@ -81,33 +81,39 @@ pub fn draw_table_content(
         }
         default_col_width
     };
-    
+
     // 获取行高的辅助函数
     let get_row_height = |row: u32| -> f32 {
         if let Some(s) = sheet {
             if let Some(&height) = s.row_heights.get(&row) {
-                // Excel 行高单位是磅，转换为像素（1磅 ≈ 1.333像素）
-                // 使用 max 确保行高不小于默认行高
                 return (height as f32 * 1.333).max(default_row_height);
             }
         }
         default_row_height
     };
-    
-    // 先获取表格的尺寸和位置（这一步很关键，先做）
-    // 计算表格总宽度（添加滚动条宽度边距，避免右侧单元格被覆盖）
-    let mut total_width = header_width;
+
+    // 一次性构建累积宽度/高度数组，后续全部通过数组索引取值（避免每帧重复 HashMap 查询）
+    let mut col_cumulative_width = vec![0.0];
+    let mut cur_w = 0.0;
+    cur_w += header_width + border_width;
+    col_cumulative_width.push(cur_w);
     for col in 1..=max_col {
-        total_width += get_col_width(col) + border_width;
+        cur_w += get_col_width(col) + border_width;
+        col_cumulative_width.push(cur_w);
     }
-    total_width += border_width + 11.0; // +11 像素用于垂直滚动条
-    
-    // 计算表格总高度（添加滚动条高度边距，避免底部单元格被覆盖）
-    let mut total_height = border_width; // 顶部边框
+
+    let mut row_cumulative_height = vec![0.0];
+    let mut cur_h = 0.0;
     for row in 0..=max_row {
-        total_height += get_row_height(row) + border_width;
+        cur_h += get_row_height(row) + border_width;
+        row_cumulative_height.push(cur_h);
     }
-    total_height += 11.0; // +11 像素用于水平滚动条
+
+    // 从累积数组推导总尺寸和冻结区域尺寸（替代循环累加）
+    let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + 11.0;
+    let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + border_width + 11.0;
+    let frozen_left_width = col_cumulative_width.get((frozen_cols + 1) as usize).copied().unwrap_or(0.0);
+    let frozen_top_height = row_cumulative_height.get((frozen_rows + 1) as usize).copied().unwrap_or(0.0);
     
     // 使用 allocate_space 分配表格空间
     let (_id, rect) = ui.allocate_space(egui::vec2(total_width, total_height));
@@ -132,22 +138,7 @@ pub fn draw_table_content(
         (x, y, width, height)
     };
     
-    // 计算冻结区域的总尺寸（行标题列 + 冻结数据列，列标题行 + 冻结数据行）
-    // 用于 is_cell_in_viewport 和滚动补偿计算
-    let frozen_left_width: f32 = {
-        let mut w = header_width + border_width; // col 0 (行号列)
-        for c in 1..=frozen_cols {
-            w += get_col_width(c) + border_width;
-        }
-        w
-    };
-    let frozen_top_height: f32 = {
-        let mut h = 0.0f32;
-        for r in 0..=frozen_rows {
-            h += get_row_height(r) + border_width;
-        }
-        h
-    };
+    // frozen_left_width / frozen_top_height 已从累积数组推导（见上方），此处直接使用
 
     // 检查单元格是否在可视区域内（使用全局坐标）
     // 有效可见区域 = clip_rect 减去冻结窗格区域（左侧冻结列 + 顶部冻结行）
@@ -620,42 +611,11 @@ pub fn draw_table_content(
             }
         };
 
-        // 先计算所有列的累积宽度（索引即为列左边缘位置，严格单调递增）
-        // 索引 0: 0.0 (起点), 索引 1: 行号列右边缘, 索引 2: A列右边缘, ...
-        let mut col_cumulative_width = vec![0.0];
-        let mut current_width = 0.0;
+        // 复用外层已构建的累积数组和尺寸（避免每帧重复 HashMap 查询）
+        // col_cumulative_width / row_cumulative_height / frozen_left_width /
+        // frozen_top_height / total_width / total_height 均在外层计算
 
-        // 第 0 列（行号列）
-        current_width += header_width + border_width;
-        col_cumulative_width.push(current_width);
-
-        // 第 1 列及以后（数据列）
-        for col in 1..=sheet.max_col {
-            current_width += get_col_width(col) + border_width;
-            col_cumulative_width.push(current_width);
-        }
-
-        // 计算累积行高（索引即为行上边缘位置，严格单调递增）
-        let mut row_cumulative_height = vec![0.0];
-        let mut current_height = 0.0;
-        for row in 0..=sheet.max_row {
-            current_height += get_row_height(row) + border_width;
-            row_cumulative_height.push(current_height);
-        }
-
-        // 从累积数组直接获取冻结区域尺寸和总宽高
-        let frozen_left_width = col_cumulative_width
-            .get((sheet.frozen_cols + 1) as usize)
-            .copied()
-            .unwrap_or(0.0);
-        let frozen_top_height = row_cumulative_height
-            .get((sheet.frozen_rows + 1) as usize)
-            .copied()
-            .unwrap_or(0.0);
-        let total_width = col_cumulative_width.last().copied().unwrap_or(0.0) + 11.0;
-        let total_height = row_cumulative_height.last().copied().unwrap_or(0.0) + border_width + 11.0;
-
-        // 我们已经在前面分配了空间，直接使用保存的 rect
+        // 外层已分配空间，直接使用保存的 table_top_left 和 total_width / total_height 构建 rect
         let rect = egui::Rect::from_min_size(table_top_left, egui::vec2(total_width, total_height));
         let top_left = table_top_left;
 
@@ -696,42 +656,32 @@ pub fn draw_table_content(
         let target_start_x = viewport_rect.min.x - tl_x - margin;
         let target_end_x = viewport_rect.max.x - tl_x + margin;
 
-        // 查找可见列范围
-        let mut visible_cols_start = 0;
-        let mut visible_cols_end = sheet.max_col + 1;
-
-        for (i, &width) in col_cumulative_width.iter().enumerate() {
-            if width > target_start_x && visible_cols_start == 0 {
-                visible_cols_start = i.saturating_sub(1).max(0) as u32;
-            }
-            if width > target_end_x {
-                visible_cols_end = i.min((sheet.max_col + 1) as usize) as u32;
-                break;
-            }
-        }
+        // 二分查找可见列范围（累积数组严格单调递增）
+        let visible_cols_start = col_cumulative_width
+            .partition_point(|&w| w <= target_start_x)
+            .saturating_sub(1)
+            .max(0) as u32;
+        let visible_cols_end = col_cumulative_width
+            .partition_point(|&w| w <= target_end_x)
+            .min(sheet.max_col as usize + 1) as u32;
 
         // 确保第 0 列（行号列）始终可见
-        visible_cols_start = 0;
+        // (visible_cols_start 已 >= 0，无需额外处理)
 
-        // 使用累积行高计算可见行范围（与列的可见范围计算逻辑一致）
+        // 二分查找可见行范围（累积数组严格单调递增）
         let target_start_y = viewport_rect.min.y - tl_y - margin;
         let target_end_y = viewport_rect.max.y - tl_y + margin;
 
-        let mut visible_rows_start = 0u32;
-        let mut visible_rows_end = sheet.max_row;
-
-        for (i, &height) in row_cumulative_height.iter().enumerate() {
-            if height > target_start_y && visible_rows_start == 0 {
-                visible_rows_start = i.saturating_sub(1).max(0) as u32;
-            }
-            if height > target_end_y {
-                visible_rows_end = i.min(sheet.max_row as usize) as u32;
-                break;
-            }
-        }
+        let visible_rows_start = row_cumulative_height
+            .partition_point(|&h| h <= target_start_y)
+            .saturating_sub(1)
+            .max(0) as u32;
+        let visible_rows_end = row_cumulative_height
+            .partition_point(|&h| h <= target_end_y)
+            .min(sheet.max_row as usize) as u32;
 
         // 确保第0行（列标题行）始终可见
-        visible_rows_start = 0;
+        // (visible_rows_start 已 >= 0，无需额外处理)
 
         // 冻结区域边界：主网格渲染跳过这些行列，由冻结覆盖层单独绘制
         let fr = sheet.frozen_rows;
@@ -1603,11 +1553,11 @@ pub fn draw_table_content(
 
         // ========== 绘制选中范围（蓝色半透明背景） ==========
         if let Some((sr_col, sr_row, er_col, er_row)) = selected_range {
-            // 确保范围有效且在可见区域内
-            let r_start_col = (*sr_col).max(visible_cols_start);
-            let r_end_col = (*er_col).min(visible_cols_end);
-            let r_start_row = (*sr_row).max(visible_rows_start);
-            let r_end_row = (*er_row).min(visible_rows_end);
+            // 确保范围有效且在可见区域内（冻结区域始终可见）
+            let r_start_col = (*sr_col).max(0u32);
+            let r_end_col = (*er_col).min(visible_cols_end.max(fc));
+            let r_start_row = (*sr_row).max(0u32);
+            let r_end_row = (*er_row).min(visible_rows_end.max(fr));
             if r_start_col <= r_end_col && r_start_row <= r_end_row {
                 // 计算起始位置：冻结区域用固定视口坐标，非冻结区域用表格坐标
                 let rx = if r_start_col <= fc {
@@ -1650,9 +1600,12 @@ pub fn draw_table_content(
         // 复制编辑单元格坐标，避免在闭包中借用冲突
         let editing_coords = editing_cell.map(|(c, r)| (c, r));
         if let Some((edit_col, edit_row)) = editing_coords {
-            // 检查是否在可见范围内
-            if edit_col >= visible_cols_start && edit_col <= visible_cols_end &&
-               edit_row >= visible_rows_start && edit_row <= visible_rows_end {
+            // 检查是否在可见范围内（冻结区域单元格始终可见）
+            let col_visible = edit_col <= fc
+                || (edit_col >= visible_cols_start && edit_col <= visible_cols_end);
+            let row_visible = edit_row <= fr
+                || (edit_row >= visible_rows_start && edit_row <= visible_rows_end);
+            if col_visible && row_visible {
 
                 // 计算编辑单元格的位置
                 // 冻结区域使用固定视口坐标，非冻结区域使用表格内容坐标
