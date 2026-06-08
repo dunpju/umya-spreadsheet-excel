@@ -1222,60 +1222,136 @@ impl ExcelData {
             // 预分配 HashMap 容量，避免加载过程中的多次 rehash
             sheet.cells.reserve(cells.len());
 
-            // 样式缓存：基于 style 的原始属性（主题解析前）构建复合键
-            // 默认格式的单元格键为 (None,None,None,None,None)，无需分配
-            type StyleKey = (
-                Option<(u64, String, bool)>,                                                              // font
-                Option<String>,                                                                           // fill bg
-                Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>, // borders
-                Option<(String, String)>,                                                                 // alignment
-                Option<String>,                                                                           // number format
-            );
-            let mut style_cache: std::collections::HashMap<StyleKey, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> = std::collections::HashMap::new();
+            // 多线程阈值：低于此数量直接顺序处理，减少线程调度开销
+            const PARALLEL_THRESHOLD: usize = 5000;
+            if cells.len() >= PARALLEL_THRESHOLD {
+                // ===== 多线程并行解析单元格 =====
+                let num_threads = std::thread::available_parallelism()
+                    .map(|n| n.get()).unwrap_or(1);
+                let chunk_size = (cells.len() + num_threads - 1) / num_threads;
 
-            for cell in cells {
-                let col_idx = cell.coordinate().col_num();
-                let row_idx = cell.coordinate().row_num();
-                let value = cell.value().to_string();
-                let raw_number = cell.value_number();
-                let style = worksheet.style((col_idx, row_idx));
+                std::thread::scope(|s| {
+                    let mut handles = Vec::with_capacity(num_threads);
+                    for chunk in cells.chunks(chunk_size) {
+                        // 每个线程需要的数据：单元格引用 + worksheet 引用 + theme 引用
+                        let handle = s.spawn(move || {
+                            // 样式缓存键类型
+                            type SK = (
+                                Option<(u64, String, bool)>,
+                                Option<String>,
+                                Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>,
+                                Option<(String, String)>,
+                                Option<String>,
+                            );
+                            let mut local_cells: std::collections::HashMap<(u32, u32), CellData> =
+                                std::collections::HashMap::with_capacity(chunk.len());
+                            let mut local_cache: std::collections::HashMap<SK, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> =
+                                std::collections::HashMap::new();
 
-                // 构建缓存键（仅当 style 有非默认属性时才分配字符串）
-                let cache_key: StyleKey = (
-                    style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
-                    style.background_color().map(|c| c.argb_str()),
-                    style.borders().map(|b| (
-                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
-                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
-                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
-                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
-                    )),
-                    style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
-                    style.number_format().map(|n| n.format_code().to_string()),
+                            for cell in chunk {
+                                let col_idx = cell.coordinate().col_num();
+                                let row_idx = cell.coordinate().row_num();
+                                let value = cell.value().to_string();
+                                let raw_number = cell.value_number();
+                                let style = worksheet.style((col_idx, row_idx));
+
+                                let cache_key: SK = (
+                                    style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
+                                    style.background_color().map(|c| c.argb_str()),
+                                    style.borders().map(|b| (
+                                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
+                                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
+                                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
+                                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
+                                    )),
+                                    style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
+                                    style.number_format().map(|n| n.format_code().to_string()),
+                                );
+                                let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
+                                    if let Some(cached) = local_cache.get(&cache_key) {
+                                        cached.clone()
+                                    } else {
+                                        let parsed = Self::parse_style(style, theme);
+                                        local_cache.insert(cache_key, parsed.clone());
+                                        parsed
+                                    };
+
+                                local_cells.insert((row_idx, col_idx), CellData {
+                                    value,
+                                    raw_number,
+                                    formula: cell.formula().to_string(),
+                                    alignment,
+                                    background_color,
+                                    font_size,
+                                    font_color,
+                                    number_format,
+                                    bold,
+                                    borders,
+                                });
+                            }
+                            local_cells
+                        });
+                        handles.push(handle);
+                    }
+                    // 合并各线程结果
+                    for handle in handles {
+                        if let Ok(local) = handle.join() {
+                            sheet.cells.extend(local);
+                        }
+                    }
+                });
+            } else {
+                // ===== 顺序解析（小文件） =====
+                type StyleKey = (
+                    Option<(u64, String, bool)>,
+                    Option<String>,
+                    Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>,
+                    Option<(String, String)>,
+                    Option<String>,
                 );
-                let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
-                    if let Some(cached) = style_cache.get(&cache_key) {
-                        cached.clone()
-                    } else {
-                        let parsed = Self::parse_style(style, theme);
-                        style_cache.insert(cache_key, parsed.clone());
-                        parsed
-                    };
+                let mut style_cache: std::collections::HashMap<StyleKey, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> = std::collections::HashMap::new();
 
-                let cell_data = CellData {
-                    value,
-                    raw_number,
-                    formula: cell.formula().to_string(),
-                    alignment,
-                    background_color,
-                    font_size,
-                    font_color,
-                    number_format,
-                    bold,
-                    borders,
-                };
-                // 内部存储仍使用 (row, col) 顺序
-                sheet.cells.insert((row_idx, col_idx), cell_data);
+                for cell in cells {
+                    let col_idx = cell.coordinate().col_num();
+                    let row_idx = cell.coordinate().row_num();
+                    let value = cell.value().to_string();
+                    let raw_number = cell.value_number();
+                    let style = worksheet.style((col_idx, row_idx));
+
+                    let cache_key: StyleKey = (
+                        style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
+                        style.background_color().map(|c| c.argb_str()),
+                        style.borders().map(|b| (
+                            b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
+                            b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
+                            b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
+                            b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
+                        )),
+                        style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
+                        style.number_format().map(|n| n.format_code().to_string()),
+                    );
+                    let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
+                        if let Some(cached) = style_cache.get(&cache_key) {
+                            cached.clone()
+                        } else {
+                            let parsed = Self::parse_style(style, theme);
+                            style_cache.insert(cache_key, parsed.clone());
+                            parsed
+                        };
+
+                    sheet.cells.insert((row_idx, col_idx), CellData {
+                        value,
+                        raw_number,
+                        formula: cell.formula().to_string(),
+                        alignment,
+                        background_color,
+                        font_size,
+                        font_color,
+                        number_format,
+                        bold,
+                        borders,
+                    });
+                }
             }
 
             // 设置工作表的最大行和最大列
