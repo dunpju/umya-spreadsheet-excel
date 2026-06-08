@@ -1217,14 +1217,50 @@ impl ExcelData {
             let highest_row = worksheet.highest_row();
             let highest_col = worksheet.highest_column();
 
-            // 遍历实际存在的单元格（仅非空单元格有 XML 记录），避免 O(rows×cols) 全量扫描
-            for cell in worksheet.cells() {
+            // 获取所有实际存在的单元格（仅非空单元格有 XML 记录）
+            let cells = worksheet.cells();
+            // 预分配 HashMap 容量，避免加载过程中的多次 rehash
+            sheet.cells.reserve(cells.len());
+
+            // 样式缓存：基于 style 的原始属性（主题解析前）构建复合键
+            // 默认格式的单元格键为 (None,None,None,None,None)，无需分配
+            type StyleKey = (
+                Option<(u64, String, bool)>,                                                              // font
+                Option<String>,                                                                           // fill bg
+                Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>, // borders
+                Option<(String, String)>,                                                                 // alignment
+                Option<String>,                                                                           // number format
+            );
+            let mut style_cache: std::collections::HashMap<StyleKey, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> = std::collections::HashMap::new();
+
+            for cell in cells {
                 let col_idx = cell.coordinate().col_num();
                 let row_idx = cell.coordinate().row_num();
                 let value = cell.value().to_string();
                 let raw_number = cell.value_number();
                 let style = worksheet.style((col_idx, row_idx));
-                let (alignment, background_color, font_size, font_color, number_format, bold, borders) = Self::parse_style(style, theme);
+
+                // 构建缓存键（仅当 style 有非默认属性时才分配字符串）
+                let cache_key: StyleKey = (
+                    style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
+                    style.background_color().map(|c| c.argb_str()),
+                    style.borders().map(|b| (
+                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
+                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
+                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
+                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
+                    )),
+                    style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
+                    style.number_format().map(|n| n.format_code().to_string()),
+                );
+                let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
+                    if let Some(cached) = style_cache.get(&cache_key) {
+                        cached.clone()
+                    } else {
+                        let parsed = Self::parse_style(style, theme);
+                        style_cache.insert(cache_key, parsed.clone());
+                        parsed
+                    };
 
                 let cell_data = CellData {
                     value,
