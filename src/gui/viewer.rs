@@ -423,6 +423,8 @@ pub struct ExcelViewer {
     pub search_window: SearchWindowState,
     /// 隐藏的列号集合（1-based），由搜索功能写入，table 渲染时读取
     pub hidden_columns: HashSet<u32>,
+    /// 隐藏的行号集合（1-based），由行筛选功能写入，table 渲染时读取
+    pub hidden_rows: HashSet<u32>,
 }
 
 impl ExcelViewer {
@@ -463,6 +465,7 @@ impl ExcelViewer {
             drag_anchor: None,
             search_window: SearchWindowState::default(),
             hidden_columns: HashSet::new(),
+            hidden_rows: HashSet::new(),
         }
     }
 
@@ -596,6 +599,7 @@ impl ExcelViewer {
                         self.save_path = None;
                         self.save_rx = None;
                         self.hidden_columns.clear();
+                        self.hidden_rows.clear();
                         self.search_window.options_loaded = false;
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
@@ -962,6 +966,7 @@ impl eframe::App for ExcelViewer {
                 excel_data_ref,
                 self.current_sheet,
                 &mut self.hidden_columns,
+                &mut self.hidden_rows,
             );
         }
 
@@ -1037,6 +1042,7 @@ impl eframe::App for ExcelViewer {
                                 self.selected_range = None;
                                 // 切换工作表时重置搜索状态
                                 self.hidden_columns.clear();
+                                self.hidden_rows.clear();
                                 self.search_window.options_loaded = false;
                             }
                         }
@@ -1228,6 +1234,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.dirty,
                             &mut self.drag_anchor,
                             &self.hidden_columns,
+                            &self.hidden_rows,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）

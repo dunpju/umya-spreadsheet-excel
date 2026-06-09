@@ -51,6 +51,7 @@ pub fn draw_table_content(
     dirty: &mut bool,
     drag_anchor: &mut Option<(u32, u32)>,
     hidden_columns: &HashSet<u32>,
+    hidden_rows: &HashSet<u32>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -111,7 +112,10 @@ pub fn draw_table_content(
     let mut row_cumulative_height = vec![0.0];
     let mut cur_h = 0.0;
     for row in 0..=max_row {
-        cur_h += get_row_height(row) + border_width;
+        // 隐藏行高度贡献为 0
+        if !hidden_rows.contains(&row) {
+            cur_h += get_row_height(row) + border_width;
+        }
         row_cumulative_height.push(cur_h);
     }
 
@@ -863,6 +867,10 @@ pub fn draw_table_content(
             if row <= fr {
                 continue;
             }
+            // 跳过隐藏行
+            if row > 0 && hidden_rows.contains(&row) {
+                continue;
+            }
 
             // 使用累积行高计算 y 坐标
             let y = tl_y + border_width + row_cumulative_height[row as usize];
@@ -962,6 +970,10 @@ pub fn draw_table_content(
         for row in visible_rows_start..=visible_rows_end {
             // 跳过冻结区域内的行（由冻结覆盖层单独绘制，避免重影）
             if row <= fr {
+                continue;
+            }
+            // 跳过隐藏行
+            if row > 0 && hidden_rows.contains(&row) {
                 continue;
             }
 
@@ -1300,6 +1312,7 @@ pub fn draw_table_content(
         // 绘制冻结顶部数据行（rows 1..=fr，所有数据列）
         // 注意：合并单元格可能向左溢出到冻结左侧区域
         for row in 1..=fr {
+            if hidden_rows.contains(&row) { continue; }
             let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             // 冻结列部分（cols 1..=fc）
             for col in 1..=fc {
@@ -1359,6 +1372,7 @@ pub fn draw_table_content(
 
         // 左上角冻结行范围内的行号（rows 1..=fr）
         for row in 1..=fr {
+            if hidden_rows.contains(&row) { continue; }
             let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             let row_height = get_row_height(row);
             painter.rect_filled(
@@ -1377,6 +1391,7 @@ pub fn draw_table_content(
 
         // 左上角冻结数据单元格（冻结行 ∩ 冻结列）
         for row in 1..=fr {
+            if hidden_rows.contains(&row) { continue; }
             let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             for col in 1..=fc {
                 if hidden_columns.contains(&col) { continue; }
@@ -1387,6 +1402,7 @@ pub fn draw_table_content(
 
         // 非冻结行的行号（col 0，rows > fr）
         for row in (fr + 1).max(visible_rows_start)..=visible_rows_end.min(sheet.max_row) {
+            if hidden_rows.contains(&row) { continue; }
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             let row_width = header_width;
             let row_height = get_row_height(row);
@@ -1412,6 +1428,7 @@ pub fn draw_table_content(
         // 冻结左侧数据列（rows > fr，cols 1..=fc）
         // 注意：这些单元格按滚动 y 绘制，可能向上溢出到冻结顶部区域（如 A15 遮盖 A14）
         for row in (fr + 1).max(visible_rows_start)..=visible_rows_end.min(sheet.max_row) {
+            if hidden_rows.contains(&row) { continue; }
             let row_y = tl_y + border_width + row_cumulative_height[row as usize];
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
             if row_y >= viewport_rect.max.y { break; }
@@ -1463,6 +1480,7 @@ pub fn draw_table_content(
             }
             // 重绘冻结行号
             for row in 1..=fr {
+                if hidden_rows.contains(&row) { continue; }
                 let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
                 let row_height = get_row_height(row);
                 painter.rect_filled(
@@ -1480,6 +1498,7 @@ pub fn draw_table_content(
             }
             // 重绘角落冻结数据单元格
             for row in 1..=fr {
+                if hidden_rows.contains(&row) { continue; }
                 let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
                 for col in 1..=fc {
                     if hidden_columns.contains(&col) { continue; }

@@ -66,6 +66,24 @@ pub struct SearchWindowState {
     pub use_binary_search: bool,
     /// 诊断信息：搜索目标行/列 + 前几个搜索值的采样
     pub debug_info: String,
+
+    // ========== 行筛选 ==========
+    /// 行筛选标题（从配置单元格读取的值，如 "日期"）
+    pub row_title: String,
+    /// 行筛选配置指向的列号（1-based）
+    pub row_search_col: u32,
+    /// 行筛选配置指向的行号（搜索从此行+1开始向下）
+    pub row_search_start_row: u32,
+    /// 行筛选关键字输入
+    pub row_search_keyword: String,
+    /// 行筛选是否已执行
+    pub is_row_searching: bool,
+    /// 行筛选匹配的行数
+    pub row_matched_count: usize,
+    /// 行筛选搜索的总行数
+    pub row_total_searched: usize,
+    /// 行筛选诊断信息
+    pub row_debug_info: String,
 }
 
 impl Default for SearchWindowState {
@@ -81,6 +99,14 @@ impl Default for SearchWindowState {
             total_searched: 0,
             use_binary_search: false,
             debug_info: String::new(),
+            row_title: String::new(),
+            row_search_col: 0,
+            row_search_start_row: 0,
+            row_search_keyword: String::new(),
+            is_row_searching: false,
+            row_matched_count: 0,
+            row_total_searched: 0,
+            row_debug_info: String::new(),
         }
     }
 }
@@ -468,6 +494,214 @@ pub fn execute_search(
 ///
 /// # 参数
 /// * `ctx` - egui 上下文
+// ═══════════════════════════════════════════════════════════════
+// 行筛选
+// ═══════════════════════════════════════════════════════════════
+
+/// 加载行筛选配置：读取 my-excel.yaml 中 search.row，解析单元格值作为标题
+pub fn load_row_filter_config(
+    excel_data: &ExcelData,
+    current_sheet: usize,
+) -> (String, u32, u32) {
+    // (title, col, start_row)
+    let sheet = match excel_data.get_sheet(current_sheet) {
+        Some(s) => s,
+        None => return (String::new(), 0, 0),
+    };
+
+    let path = config_path();
+    let range_str = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+            .and_then(|doc| {
+                doc.get("search")
+                    .and_then(|s| s.get("row"))
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    if range_str.is_empty() {
+        return (String::new(), 0, 0);
+    }
+
+    // 取第一个单元格引用（如 "A14,B14" → 取 A14）
+    let first_seg = range_str.split(',').next().unwrap_or(&range_str).trim();
+    let first_cell = if let Some(idx) = first_seg.find('-') {
+        &first_seg[..idx] // "D14-F14" → "D14"
+    } else {
+        first_seg
+    };
+
+    if let Some((col, row)) = parse_cell_ref(first_cell) {
+        let title = sheet
+            .get_cell(row, col)
+            .map(|c| cell_search_value(c))
+            .unwrap_or_default();
+        return (title, col, row);
+    }
+
+    (String::new(), 0, 0)
+}
+
+/// 解析行筛选关键字输入
+///
+/// 支持三种格式：
+/// - 单值: `xxxx` → vec!["xxxx"]
+/// - 多值: `'xxx1','xxx2'` → vec!["xxx1", "xxx2"]
+/// - 范围: `'xxx3'-'xxx4'` → vec!["xxx3", "xxx4"] (标记为范围)
+fn parse_row_keywords(input: &str) -> (Vec<String>, bool) {
+    // (keywords, is_range)
+    let input = input.trim();
+    if input.is_empty() {
+        return (Vec::new(), false);
+    }
+
+    // 检测范围格式：包含 '-' 且两端有引号值
+    if let Some(idx) = input.find('\'') {
+        let rest = &input[idx..];
+        if let Some(dash_pos) = rest.find('-') {
+            let before_dash = &rest[..dash_pos].trim();
+            let after_dash = rest[dash_pos + 1..].trim();
+            if before_dash.ends_with('\'') && after_dash.starts_with('\'') {
+                let v1 = before_dash.trim_matches('\'').to_string();
+                let v2 = after_dash.trim_matches('\'').to_string();
+                if !v1.is_empty() && !v2.is_empty() {
+                    return (vec![v1, v2], true);
+                }
+            }
+        }
+    }
+
+    // 检测多值格式：逗号分隔的引号值
+    if input.contains(',') {
+        let values: Vec<String> = input
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !values.is_empty() {
+            return (values, false);
+        }
+    }
+
+    // 单值
+    (vec![input.to_string()], false)
+}
+
+/// 行筛选模糊匹配：大小写不敏感子串匹配
+fn row_fuzzy_match(cell_value: &str, keyword: &str) -> bool {
+    cell_value.to_lowercase().contains(&keyword.to_lowercase())
+}
+
+/// 执行行筛选搜索
+///
+/// 从配置单元格所在列、下一行开始向下遍历，
+/// 对关键字进行模糊匹配，不匹配的行加入 hidden_rows。
+pub fn execute_row_search(
+    state: &mut SearchWindowState,
+    sheet: &SheetData,
+    hidden_rows: &mut HashSet<u32>,
+) {
+    hidden_rows.clear();
+
+    if state.row_search_col == 0 || state.row_search_start_row == 0 {
+        state.row_debug_info = "行筛选未配置".to_string();
+        return;
+    }
+
+    let (keywords, is_range) = parse_row_keywords(&state.row_search_keyword);
+    if keywords.is_empty() {
+        state.row_debug_info = "请输入行筛选关键字".to_string();
+        return;
+    }
+
+    let col = state.row_search_col;
+    let start_row = state.row_search_start_row;
+    let max_row = sheet.max_row;
+
+    // 收集搜索范围内所有行的值
+    let mut row_values: Vec<(u32, String)> = Vec::new();
+    for row in (start_row + 1)..=max_row {
+        let value = sheet
+            .get_cell(row, col)
+            .map(|c| cell_search_value(c).to_lowercase())
+            .unwrap_or_default();
+        row_values.push((row, value));
+    }
+
+    state.row_total_searched = row_values.len();
+
+    if is_range && keywords.len() == 2 {
+        // 范围匹配：值在 [kw1, kw2] 之间
+        let lo = &keywords[0];
+        let hi = &keywords[1];
+        for (row, value) in &row_values {
+            let v = value.trim();
+            if v < lo.as_str() || v > hi.as_str() {
+                hidden_rows.insert(*row);
+            }
+        }
+    } else {
+        // 单值或多值模糊匹配
+        for (row, value) in &row_values {
+            let matched = keywords.iter().any(|kw| row_fuzzy_match(value, kw));
+            if !matched {
+                hidden_rows.insert(*row);
+            }
+        }
+    }
+
+    // 处理跨行合并：以左上角为准
+    expand_hidden_rows_for_merged_cells(sheet, hidden_rows, col);
+
+    // 确保配置行自身不被隐藏
+    hidden_rows.remove(&start_row);
+
+    state.row_matched_count = state.row_total_searched.saturating_sub(hidden_rows.len());
+    state.is_row_searching = true;
+
+    // 诊断信息
+    let col_letter = crate::excel::reader::col_to_letter(col);
+    state.row_debug_info = format!(
+        "行筛选: {}列 行{}→{} 共{}行 | 匹配{}行 隐藏{}行",
+        col_letter, start_row + 1, max_row,
+        state.row_total_searched, state.row_matched_count, hidden_rows.len()
+    );
+}
+
+/// 合并单元格行可见性对齐（与 expand_hidden_for_merged_cells 对称）
+fn expand_hidden_rows_for_merged_cells(
+    sheet: &SheetData,
+    hidden_rows: &mut HashSet<u32>,
+    target_col: u32,
+) {
+    for mr in &sheet.merged_cells {
+        // 只处理跨行合并
+        if mr.start_row == mr.end_row {
+            continue;
+        }
+        // 只处理包含目标列的合并
+        if target_col < mr.start_col || target_col > mr.end_col {
+            continue;
+        }
+        // 以左上角是否匹配为准
+        let top_left_visible = !hidden_rows.contains(&mr.start_row);
+        if top_left_visible {
+            for r in mr.start_row..=mr.end_row {
+                hidden_rows.remove(&r);
+            }
+        } else {
+            for r in mr.start_row..=mr.end_row {
+                hidden_rows.insert(r);
+            }
+        }
+    }
+}
+
 /// * `state` - 搜索窗口状态（可变引用）
 /// * `excel_data` - Excel 数据（只读引用）
 /// * `current_sheet` - 当前工作表索引
@@ -478,6 +712,7 @@ pub fn draw_search_window(
     excel_data: Option<&ExcelData>,
     current_sheet: usize,
     hidden_columns: &mut HashSet<u32>,
+    hidden_rows: &mut HashSet<u32>,
 ) {
     if !state.visible {
         return;
@@ -528,28 +763,48 @@ pub fn draw_search_window(
                             state.visible = false;
                         }
 
-                        // 搜索按钮
-                        let can_search = excel_data.is_some()
+                        // 搜索按钮（统一执行列筛选 + 行筛选）
+                        let has_col_input = excel_data.is_some()
                             && state.selected_index < state.column_options.len()
                             && !state.search_keyword.is_empty();
+                        let has_row_input = excel_data.is_some()
+                            && !state.row_search_keyword.is_empty()
+                            && state.row_search_col > 0;
                         if ui
-                            .add_enabled(can_search, egui::Button::new("🔍 搜索"))
+                            .add_enabled(has_col_input || has_row_input, egui::Button::new("🔍 搜索"))
                             .clicked()
                         {
                             if let Some(data) = excel_data {
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
-                                    execute_search(state, sheet, hidden_columns);
+                                    // 第一步：列筛选（有输入则执行，否则清空旧结果）
+                                    if has_col_input {
+                                        execute_search(state, sheet, hidden_columns);
+                                    } else {
+                                        hidden_columns.clear();
+                                    }
+                                    // 第二步：行筛选（在列筛选结果上）
+                                    if has_row_input {
+                                        execute_row_search(state, sheet, hidden_rows);
+                                    } else {
+                                        hidden_rows.clear();
+                                    }
                                 }
                             }
                         }
 
-                        // 重置按钮
+                        // 重置按钮（统一清空列筛选 + 行筛选）
                         if ui.button("🔄 重置").clicked() {
                             hidden_columns.clear();
+                            hidden_rows.clear();
                             state.is_searching = false;
                             state.matched_count = 0;
                             state.total_searched = 0;
                             state.search_keyword.clear();
+                            state.is_row_searching = false;
+                            state.row_matched_count = 0;
+                            state.row_total_searched = 0;
+                            state.row_search_keyword.clear();
+                            state.row_debug_info.clear();
                         }
                     },
                 );
@@ -557,7 +812,7 @@ pub fn draw_search_window(
             ui.separator();
 
             // ══════ 内容区 ══════
-            // 延迟加载下拉选项（仅在窗口打开或切换 sheet 后首次渲染时加载）
+            // 延迟加载（仅在窗口打开或切换 sheet 后首次渲染时加载）
             if !state.options_loaded {
                 if let Some(data) = excel_data {
                     state.column_options = load_column_options(data, current_sheet);
@@ -567,6 +822,11 @@ pub fn draw_search_window(
                     {
                         state.selected_index = 0;
                     }
+                    // 同步加载行筛选配置
+                    let (title, col, row) = load_row_filter_config(data, current_sheet);
+                    state.row_title = title;
+                    state.row_search_col = col;
+                    state.row_search_start_row = row;
                 }
             }
 
@@ -592,6 +852,8 @@ pub fn draw_search_window(
                                     state.selected_index = i;
                                     // 切换列筛选 → 自动重置搜索结果，恢复表格
                                     hidden_columns.clear();
+                                    hidden_rows.clear();
+                                    state.search_keyword.clear();
                                     state.is_searching = false;
                                     state.matched_count = 0;
                                     state.total_searched = 0;
@@ -607,21 +869,79 @@ pub fn draw_search_window(
                     .hint_text("输入搜索关键字...");
                 let response = ui.add(input);
 
-                // Enter 键触发搜索（检查是否刚按下 Enter 且输入框仍有焦点）
+                // Enter 键触发统一搜索（列筛选 + 行筛选）
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
                     if let Some(data) = excel_data {
                         if let Some(sheet) = data.get_sheet(current_sheet) {
-                            if state.selected_index < state.column_options.len()
-                                && !state.search_keyword.is_empty()
-                            {
+                            let has_col = state.selected_index < state.column_options.len()
+                                && !state.search_keyword.is_empty();
+                            let has_row = !state.row_search_keyword.is_empty()
+                                && state.row_search_col > 0;
+                            if has_col {
                                 execute_search(state, sheet, hidden_columns);
-                                // 搜索后让输入框失去焦点（避免键盘拦截方向键等）
+                            } else {
+                                hidden_columns.clear();
+                            }
+                            if has_row {
+                                execute_row_search(state, sheet, hidden_rows);
+                            } else {
+                                hidden_rows.clear();
+                            }
+                            if has_col || has_row {
                                 response.surrender_focus();
                             }
                         }
                     }
                 }
             });
+
+            // ══════ 行筛选（列筛选下方） ══════
+            if !state.row_title.is_empty() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}:", state.row_title));
+                    let input = egui::TextEdit::singleline(&mut state.row_search_keyword)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
+                    let response = ui.add(input);
+
+                    // Enter 键触发统一搜索（列筛选 + 行筛选）
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
+                        if let Some(data) = excel_data {
+                            if let Some(sheet) = data.get_sheet(current_sheet) {
+                                let has_col = state.selected_index < state.column_options.len()
+                                    && !state.search_keyword.is_empty();
+                                let has_row = !state.row_search_keyword.is_empty()
+                                    && state.row_search_col > 0;
+                                if has_col {
+                                    execute_search(state, sheet, hidden_columns);
+                                } else {
+                                    hidden_columns.clear();
+                                }
+                                if has_row {
+                                    execute_row_search(state, sheet, hidden_rows);
+                                } else {
+                                    hidden_rows.clear();
+                                }
+                                if has_col || has_row {
+                                    response.surrender_focus();
+                                }
+                            }
+                        }
+                    }
+                });
+                // 行筛选诊断
+                if state.is_row_searching && !state.row_debug_info.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(&state.row_debug_info)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(0, 100, 0)),
+                    );
+                }
+            }
 
             // 诊断信息（搜索后显示，帮助排查搜索问题）
             if state.is_searching && !state.debug_info.is_empty() {
