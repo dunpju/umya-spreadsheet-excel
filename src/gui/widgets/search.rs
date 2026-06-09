@@ -854,6 +854,7 @@ pub fn draw_search_window(
                                     hidden_columns.clear();
                                     hidden_rows.clear();
                                     state.search_keyword.clear();
+                                    state.row_search_keyword.clear();
                                     state.is_searching = false;
                                     state.matched_count = 0;
                                     state.total_searched = 0;
