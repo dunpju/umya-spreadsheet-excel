@@ -228,6 +228,12 @@ impl SettingsPanelState {
                         self.search_column_input = s.to_string();
                     }
                 }
+                // 读取 search.row 节点
+                if let Some(val) = doc.get("search").and_then(|s| s.get("row")) {
+                    if let Some(s) = val.as_str() {
+                        self.search_row_input = s.to_string();
+                    }
+                }
             }
         }
     }
@@ -303,20 +309,25 @@ impl SettingsPanelState {
             serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
         };
 
-        // 获取或创建 search 节点，写入 column
+        // 获取或创建 search 节点，写入 column 和 row
         let doc_mapping = doc.as_mapping_mut().unwrap();
-        let search_value = serde_yaml::Value::String(self.search_column_input.clone());
+        let column_value = serde_yaml::Value::String(self.search_column_input.clone());
+        let row_value = serde_yaml::Value::String(self.search_row_input.clone());
+        let update_search_map = |search_map: &mut serde_yaml::Mapping| {
+            search_map.insert("column".into(), column_value);
+            search_map.insert("row".into(), row_value);
+        };
         if let Some(search_val) = doc_mapping.get_mut(&serde_yaml::Value::String("search".into())) {
             if let Some(search_map) = search_val.as_mapping_mut() {
-                search_map.insert("column".into(), search_value);
+                update_search_map(search_map);
             } else {
                 let mut search = serde_yaml::Mapping::new();
-                search.insert("column".into(), search_value);
+                update_search_map(&mut search);
                 *search_val = serde_yaml::Value::Mapping(search);
             }
         } else {
             let mut search = serde_yaml::Mapping::new();
-            search.insert("column".into(), search_value);
+            update_search_map(&mut search);
             doc_mapping.insert("search".into(), serde_yaml::Value::Mapping(search));
         }
 
@@ -920,17 +931,17 @@ impl eframe::App for ExcelViewer {
                             ui.vertical(|ui| {
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label("行范围:");
+                                        ui.label("行搜索标题范围:");
                                         ui.add(
                                             egui::TextEdit::singleline(&mut self.settings_panel.search_row_input)
                                                 .desired_width(f32::INFINITY)
-                                                .hint_text("例如: 1-10 或 1,3,5"),
+                                                .hint_text("例如: A14,B14 或 D14-F14"),
                                         );
                                     });
                                     ui.add_space(4.0);
                                     ui.colored_label(
                                         egui::Color32::GRAY,
-                                        egui::RichText::new("支持范围格式（1-10）和离散格式（1,3,5）").size(11.0),
+                                        egui::RichText::new("支持单元格引用（A14）、范围格式（D14-F14）和离散格式（A14,B14）").size(11.0),
                                     );
                                 });
                             });
