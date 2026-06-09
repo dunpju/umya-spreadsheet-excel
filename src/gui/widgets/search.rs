@@ -588,7 +588,14 @@ pub fn draw_search_window(
                                 .selectable_label(i == state.selected_index, &label)
                                 .clicked()
                             {
-                                state.selected_index = i;
+                                if i != state.selected_index {
+                                    state.selected_index = i;
+                                    // 切换列筛选 → 自动重置搜索结果，恢复表格
+                                    hidden_columns.clear();
+                                    state.is_searching = false;
+                                    state.matched_count = 0;
+                                    state.total_searched = 0;
+                                }
                             }
                         }
                     });
