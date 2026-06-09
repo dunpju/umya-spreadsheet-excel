@@ -570,7 +570,7 @@ pub fn draw_search_window(
                 }
             }
 
-            // 列筛选下拉框
+            // 列筛选下拉框 + 搜索关键字输入框（同行）
             ui.horizontal(|ui| {
                 ui.label("列筛选:");
                 let selected_text = state
@@ -580,7 +580,7 @@ pub fn draw_search_window(
                     .unwrap_or_else(|| "请选择列...".to_string());
                 egui::ComboBox::from_id_salt("search_column_select")
                     .selected_text(&selected_text)
-                    .width(200.0)
+                    .width(166.0)
                     .show_ui(ui, |ui| {
                         for (i, opt) in state.column_options.iter().enumerate() {
                             let label = format!("{} ({})", opt.title, opt.cell_ref);
@@ -599,13 +599,9 @@ pub fn draw_search_window(
                             }
                         }
                     });
-            });
 
-            ui.add_space(4.0);
+                ui.add_space(6.0);
 
-            // 搜索关键字输入框
-            ui.horizontal(|ui| {
-                ui.label("关键字:");
                 let input = egui::TextEdit::singleline(&mut state.search_keyword)
                     .desired_width(f32::INFINITY)
                     .hint_text("输入搜索关键字...");
@@ -625,10 +621,6 @@ pub fn draw_search_window(
                         }
                     }
                 }
-
-                // 搜索按钮点击：
-                // 当搜索按钮在标题栏被点击时，上面已处理；
-                // 此处再次点击输入框的响应不作为搜索触发器。
             });
 
             // 诊断信息（搜索后显示，帮助排查搜索问题）
