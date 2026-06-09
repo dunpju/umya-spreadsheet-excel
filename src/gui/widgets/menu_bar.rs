@@ -4,16 +4,26 @@
 
 use eframe::egui;
 use crate::gui::viewer::{SettingsPanelState, SettingsPage};
+use crate::gui::widgets::search::SearchWindowState;
 
 /// 绘制菜单栏
 ///
-/// 包含文件、编辑、设置、关于等菜单项
+/// 包含文件、编辑、搜索、设置、关于等菜单项
 ///
 /// # 参数
 /// * `ui` - egui UI 上下文
 /// * `show_import_dialog` - 用于控制是否显示导入对话框的可变引用
 /// * `settings_panel` - 设置面板状态
-pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_panel: &mut SettingsPanelState, add_column: &mut bool, add_row: &mut bool, has_data: bool) {
+/// * `search_window` - 搜索窗口状态
+pub fn draw_menu_bar(
+    ui: &mut egui::Ui,
+    show_import_dialog: &mut bool,
+    settings_panel: &mut SettingsPanelState,
+    search_window: &mut SearchWindowState,
+    add_column: &mut bool,
+    add_row: &mut bool,
+    has_data: bool,
+) {
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
         ui.menu_button("文件", |ui| {
@@ -33,6 +43,15 @@ pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_
             if ui.add_enabled(has_data, egui::Button::new("添加行")).clicked() {
                 ui.close();
                 *add_row = true;
+            }
+        });
+
+        // 搜索菜单（插入在编辑和设置之间）
+        ui.menu_button("搜索", |ui| {
+            if ui.add_enabled(has_data, egui::Button::new("搜索")).clicked() {
+                ui.close();
+                search_window.visible = true;
+                search_window.options_loaded = false; // 触发重新加载下拉选项
             }
         });
 

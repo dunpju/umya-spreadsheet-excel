@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::excel::reader::{CellAlignment, CellData, ExcelData, col_to_letter};
 use crate::gui::alignment::alignment_to_egui;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// 获取单元格的显示文本，处理日期格式转换
 /// 返回 Cow<str> 避免无谓的 String clone
@@ -49,6 +50,7 @@ pub fn draw_table_content(
     context_menu: &mut crate::gui::viewer::ContextMenuState,
     dirty: &mut bool,
     drag_anchor: &mut Option<(u32, u32)>,
+    hidden_columns: &HashSet<u32>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -98,7 +100,11 @@ pub fn draw_table_content(
     cur_w += header_width + border_width;
     col_cumulative_width.push(cur_w);
     for col in 1..=max_col {
-        cur_w += get_col_width(col) + border_width;
+        // 隐藏列宽度贡献为 0，确保后续 col_cumulative_width[col] 索引正确
+        // 且 partition_point 点击检测不受隐藏列影响
+        if !hidden_columns.contains(&col) {
+            cur_w += get_col_width(col) + border_width;
+        }
         col_cumulative_width.push(cur_w);
     }
 
@@ -857,20 +863,18 @@ pub fn draw_table_content(
             if row <= fr {
                 continue;
             }
-            let mut x = tl_x + border_width;
-            // 跳过不可见的左侧列
-            for c in 0..visible_cols_start {
-                x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
-            }
 
             // 使用累积行高计算 y 坐标
             let y = tl_y + border_width + row_cumulative_height[row as usize];
 
-            // 绘制可见列
+            // 绘制可见列（使用累积宽度数组定位，隐藏列自动跳过）
             for col in visible_cols_start..=visible_cols_end {
                 // 跳过冻结区域内的列（由冻结覆盖层单独绘制，避免重影）
                 if col <= fc {
-                    x += if col == 0 { header_width } else { get_col_width(col) } + border_width;
+                    continue;
+                }
+                // 跳过隐藏列
+                if col > 0 && hidden_columns.contains(&col) {
                     continue;
                 }
                 let cell_width = if col == 0 {
@@ -879,6 +883,8 @@ pub fn draw_table_content(
                     get_col_width(col)
                 };
                 let cell_height = get_row_height(row);
+                // 使用累积宽度数组计算 x（隐藏列贡献 0 宽度，自动正确）
+                let x = tl_x + border_width + col_cumulative_width[col as usize];
 
                 // 确定单元格背景色
                 let bg_color = if row == 0 && col == 0 {
@@ -916,18 +922,15 @@ pub fn draw_table_content(
 
                 // 如果是合并单元格的非左上角部分，跳过绘制背景（由左上角单元格绘制）
                 if is_merged_part {
-                    x += cell_width + border_width;
                     continue;
                 }
 
                 // 如果是合并单元格的左上角，绘制合并背景
                 if is_merged_top_left {
                     if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                        let mut merged_col_width = 0.0;
-                        for c in merged_range.start_col..=merged_range.end_col {
-                            merged_col_width += get_col_width(c) + border_width;
-                        }
-                        merged_col_width -= border_width;
+                        // 使用累积宽度差值计算合并宽度（自动处理隐藏列）
+                        let merged_col_width = col_cumulative_width[merged_range.end_col as usize + 1]
+                            - col_cumulative_width[merged_range.start_col as usize] - border_width;
 
                         let mut merged_row_height = 0.0;
                         for r in merged_range.start_row..=merged_range.end_row {
@@ -952,9 +955,6 @@ pub fn draw_table_content(
                         bg_color,
                     );
                 }
-
-                // 移动到下一列
-                x += cell_width + border_width;
             }
         }
 
@@ -964,20 +964,18 @@ pub fn draw_table_content(
             if row <= fr {
                 continue;
             }
-            let mut x = tl_x + border_width;
-            // 跳过不可见的左侧列
-            for c in 0..visible_cols_start {
-                x += if c == 0 { header_width } else { get_col_width(c) } + border_width;
-            }
 
             // 使用累积行高计算 y 坐标
             let y = tl_y + border_width + row_cumulative_height[row as usize];
 
-            // 绘制可见列
+            // 绘制可见列（使用累积宽度数组定位，隐藏列自动跳过）
             for col in visible_cols_start..=visible_cols_end {
                 // 跳过冻结区域内的列（由冻结覆盖层单独绘制，避免重影）
                 if col <= fc {
-                    x += if col == 0 { header_width } else { get_col_width(col) } + border_width;
+                    continue;
+                }
+                // 跳过隐藏列
+                if col > 0 && hidden_columns.contains(&col) {
                     continue;
                 }
                 let cell_width = if col == 0 {
@@ -986,6 +984,8 @@ pub fn draw_table_content(
                     get_col_width(col)
                 };
                 let cell_height = get_row_height(row);
+                // 使用累积宽度数组计算 x（隐藏列贡献 0 宽度，自动正确）
+                let x = tl_x + border_width + col_cumulative_width[col as usize];
 
                 // 绘制列标题（A, B, C...）
                 if row == 0 && col > 0 {
@@ -1041,18 +1041,15 @@ pub fn draw_table_content(
 
                     // 如果是合并单元格的非左上角部分，跳过绘制
                     if is_merged_part {
-                        x += cell_width + border_width;
                         continue;
                     }
 
                     // 绘制合并单元格内容
                     if is_merged_top_left {
                         if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                            let mut merged_col_width = 0.0;
-                            for c in merged_range.start_col..=merged_range.end_col {
-                                merged_col_width += get_col_width(c) + border_width;
-                            }
-                            merged_col_width -= border_width;
+                            // 使用累积宽度差值计算合并宽度（自动处理隐藏列）
+                            let merged_col_width = col_cumulative_width[merged_range.end_col as usize + 1]
+                                - col_cumulative_width[merged_range.start_col as usize] - border_width;
 
                             let mut merged_row_height = 0.0;
                             for r in merged_range.start_row..=merged_range.end_row {
@@ -1111,9 +1108,6 @@ pub fn draw_table_content(
                         }
                     }
                 }
-
-                // 移动到下一列
-                x += cell_width + border_width;
             }
         }
 
@@ -1260,6 +1254,7 @@ pub fn draw_table_content(
 
         // 绘制冻结列范围内的列标题（row 0，cols 1..=fc）
         for col in 1..=fc {
+            if hidden_columns.contains(&col) { continue; }
             let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
@@ -1279,6 +1274,7 @@ pub fn draw_table_content(
 
         // 绘制非冻结列的列标题（row 0，cols > fc）- scroll-dependent x
         for col in (fc + 1).max(visible_cols_start)..=visible_cols_end.min(sheet.max_col) {
+            if hidden_columns.contains(&col) { continue; }
             let col_x = tl_x + border_width + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
@@ -1307,11 +1303,13 @@ pub fn draw_table_content(
             let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             // 冻结列部分（cols 1..=fc）
             for col in 1..=fc {
+                if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
             }
             // 非冻结列部分（cols > fc）- scroll-dependent x，限可见范围
             for col in (fc + 1).max(visible_cols_start)..=visible_cols_end.min(sheet.max_col) {
+                if hidden_columns.contains(&col) { continue; }
                 let col_x = tl_x + border_width + col_cumulative_width[col as usize];
                 if col_x >= viewport_rect.max.x { break; }
                 draw_frozen_cell(&painter, col, row, col_x, fixed_y);
@@ -1341,6 +1339,7 @@ pub fn draw_table_content(
 
         // 左上角冻结列范围内的列标题（row 0，cols 1..=fc）
         for col in 1..=fc {
+            if hidden_columns.contains(&col) { continue; }
             let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
             let col_width = get_col_width(col);
             let col_height = get_row_height(0);
@@ -1380,6 +1379,7 @@ pub fn draw_table_content(
         for row in 1..=fr {
             let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
             for col in 1..=fc {
+                if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
             }
@@ -1416,6 +1416,7 @@ pub fn draw_table_content(
             if row_y + get_row_height(row) <= viewport_rect.min.y + frozen_top_height { continue; }
             if row_y >= viewport_rect.max.y { break; }
             for col in 1..=fc {
+                if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 draw_frozen_cell(&painter, col, row, fixed_x, row_y);
             }
@@ -1443,6 +1444,7 @@ pub fn draw_table_content(
             );
             // 重绘冻结列标题
             for col in 1..=fc {
+                if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                 let col_width = get_col_width(col);
                 let col_height = get_row_height(0);
@@ -1480,6 +1482,7 @@ pub fn draw_table_content(
             for row in 1..=fr {
                 let fixed_y = viewport_rect.min.y + row_cumulative_height[row as usize];
                 for col in 1..=fc {
+                    if hidden_columns.contains(&col) { continue; }
                     let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
                     draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
                 }

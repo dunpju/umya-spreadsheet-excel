@@ -13,7 +13,10 @@ use crate::gui::widgets::{
     draw_empty_state,
     draw_name_box,
     NameBoxState,
+    SearchWindowState,
+    draw_search_window,
 };
+use std::collections::HashSet;
 use std::sync::mpsc::Receiver;
 
 /// 撤销栈最大深度
@@ -405,6 +408,10 @@ pub struct ExcelViewer {
     save_rx: Option<Receiver<Result<String, String>>>,
     /// 保存请求标志（用于延迟到 excel_data 借用释放后执行）
     save_requested: bool,
+    /// 搜索窗口状态
+    pub search_window: SearchWindowState,
+    /// 隐藏的列号集合（1-based），由搜索功能写入，table 渲染时读取
+    pub hidden_columns: HashSet<u32>,
 }
 
 impl ExcelViewer {
@@ -443,6 +450,8 @@ impl ExcelViewer {
             save_rx: None,
             save_requested: false,
             drag_anchor: None,
+            search_window: SearchWindowState::default(),
+            hidden_columns: HashSet::new(),
         }
     }
 
@@ -575,6 +584,8 @@ impl ExcelViewer {
                         self.saving = false;
                         self.save_path = None;
                         self.save_rx = None;
+                        self.hidden_columns.clear();
+                        self.search_window.options_loaded = false;
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
                     Err(e) => {
@@ -689,7 +700,7 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.add_column, &mut self.add_row, has_data);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data);
         });
 
         // 绘制导入对话框
@@ -931,6 +942,18 @@ impl eframe::App for ExcelViewer {
             }
         }
 
+        // 绘制搜索窗口（非模态，独立于主窗口）
+        {
+            let excel_data_ref = self.excel_data.as_ref();
+            draw_search_window(
+                &ctx,
+                &mut self.search_window,
+                excel_data_ref,
+                self.current_sheet,
+                &mut self.hidden_columns,
+            );
+        }
+
         // 检查异步加载结果
         self.check_load_result();
 
@@ -1001,6 +1024,9 @@ impl eframe::App for ExcelViewer {
                                 self.current_sheet = i;
                                 self.selected_cell = None;
                                 self.selected_range = None;
+                                // 切换工作表时重置搜索状态
+                                self.hidden_columns.clear();
+                                self.search_window.options_loaded = false;
                             }
                         }
                     });
@@ -1190,6 +1216,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.context_menu,
                             &mut self.dirty,
                             &mut self.drag_anchor,
+                            &self.hidden_columns,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
