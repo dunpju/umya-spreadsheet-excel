@@ -50,6 +50,10 @@ pub fn draw_menu_bar(ui: &mut egui::Ui, show_import_dialog: &mut bool, settings_
                     settings_panel.active_page = Some(SettingsPage::RowConfig);
                 }
             });
+            if ui.button("搜索").clicked() {
+                ui.close();
+                settings_panel.show_search_dialog = true;
+            }
         });
 
         // 关于菜单

@@ -148,6 +148,16 @@ pub struct SettingsPanelState {
     pub copy_value: bool,
     /// 保存成功提示计时（秒）
     pub save_success_timer: f32,
+    /// 是否显示搜索对话框
+    pub show_search_dialog: bool,
+    /// 搜索：列筛选输入内容（如 "A1-A13" 或 "A1,A3"）
+    pub search_column_input: String,
+    /// 搜索保存成功提示计时（秒）
+    pub search_save_success_timer: f32,
+    /// 搜索对话框当前页签
+    pub search_active_page: SearchPage,
+    /// 搜索：行筛选输入内容
+    pub search_row_input: String,
 }
 
 impl Default for SettingsPanelState {
@@ -165,6 +175,11 @@ impl Default for SettingsPanelState {
             copy_style: false,
             copy_value: false,
             save_success_timer: 0.0,
+            show_search_dialog: false,
+            search_column_input: String::new(),
+            search_save_success_timer: 0.0,
+            search_active_page: SearchPage::ColumnFilter,
+            search_row_input: String::new(),
         };
         state.load_from_file();
         state
@@ -203,6 +218,12 @@ impl SettingsPanelState {
                         .and_then(|v| v.as_bool()).unwrap_or(false);
                     self.copy_value = column.get("copy_value")
                         .and_then(|v| v.as_bool()).unwrap_or(false);
+                }
+                // 读取 search.column 节点
+                if let Some(val) = doc.get("search").and_then(|s| s.get("column")) {
+                    if let Some(s) = val.as_str() {
+                        self.search_column_input = s.to_string();
+                    }
                 }
             }
         }
@@ -260,6 +281,48 @@ impl SettingsPanelState {
             Err(_) => false,
         }
     }
+
+    /// 保存到 search.column 节点（保留文件中已有的其他配置）
+    pub fn save_search_column(&self) -> bool {
+        let path = Self::config_path();
+
+        // 确保目录存在
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // 读取已有内容（保留其他配置块）
+        let mut doc = if path.exists() {
+            std::fs::read_to_string(&path).ok()
+                .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+                .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+
+        // 获取或创建 search 节点，写入 column
+        let doc_mapping = doc.as_mapping_mut().unwrap();
+        let search_value = serde_yaml::Value::String(self.search_column_input.clone());
+        if let Some(search_val) = doc_mapping.get_mut(&serde_yaml::Value::String("search".into())) {
+            if let Some(search_map) = search_val.as_mapping_mut() {
+                search_map.insert("column".into(), search_value);
+            } else {
+                let mut search = serde_yaml::Mapping::new();
+                search.insert("column".into(), search_value);
+                *search_val = serde_yaml::Value::Mapping(search);
+            }
+        } else {
+            let mut search = serde_yaml::Mapping::new();
+            search.insert("column".into(), search_value);
+            doc_mapping.insert("search".into(), serde_yaml::Value::Mapping(search));
+        }
+
+        // 写入文件
+        match serde_yaml::to_string(&doc) {
+            Ok(yaml_str) => std::fs::write(&path, yaml_str).is_ok(),
+            Err(_) => false,
+        }
+    }
 }
 
 /// 设置页类型
@@ -267,6 +330,13 @@ impl SettingsPanelState {
 pub enum SettingsPage {
     ColumnConfig,
     RowConfig,
+}
+
+/// 搜索对话框页签类型
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SearchPage {
+    ColumnFilter,
+    RowFilter,
 }
 
 /// Excel 查看器主结构体，管理所有 UI 状态和数据
@@ -770,6 +840,94 @@ impl eframe::App for ExcelViewer {
                 });
             if !keep_open {
                 self.settings_panel.visible = false;
+            }
+        }
+
+        // 搜索对话框
+        if self.settings_panel.show_search_dialog {
+            let mut keep_open = true;
+            let active_page = self.settings_panel.search_active_page;
+            egui::Window::new("search_dialog")
+                .title_bar(false)
+                .open(&mut keep_open)
+                .resizable(false)
+                .collapsible(false)
+                .default_pos(ctx.content_rect().center() - egui::vec2(190.0, 80.0))
+                .show(&ctx, |ui| {
+                    ui.set_min_width(420.0);
+                    // 自定义小字体标题栏
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("搜索配置").size(12.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("X").clicked() {
+                                self.settings_panel.show_search_dialog = false;
+                            }
+                            if ui.button("保存").clicked() {
+                                if self.settings_panel.save_search_column() {
+                                    self.settings_panel.search_save_success_timer = 2.0;
+                                }
+                            }
+                            if self.settings_panel.search_save_success_timer > 0.0 {
+                                ui.label(egui::RichText::new("保存成功").size(11.0).color(egui::Color32::GREEN));
+                                self.settings_panel.search_save_success_timer -= ui.input(|i| i.stable_dt);
+                            }
+                        });
+                    });
+                    ui.separator();
+                    // 选项卡切换
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(active_page == SearchPage::ColumnFilter, "列筛选").clicked() {
+                            self.settings_panel.search_active_page = SearchPage::ColumnFilter;
+                        }
+                        if ui.selectable_label(active_page == SearchPage::RowFilter, "行筛选").clicked() {
+                            self.settings_panel.search_active_page = SearchPage::RowFilter;
+                        }
+                    });
+                    ui.separator();
+
+                    match active_page {
+                        SearchPage::ColumnFilter => {
+                            ui.vertical(|ui| {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("单元格范围:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.settings_panel.search_column_input)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("例如: A1-A13 或 A1,A3"),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.colored_label(
+                                        egui::Color32::GRAY,
+                                        egui::RichText::new("支持范围格式（A1-A13）和离散格式（A1,A3）").size(11.0),
+                                    );
+                                });
+                            });
+                        }
+                        SearchPage::RowFilter => {
+                            ui.vertical(|ui| {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("行范围:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.settings_panel.search_row_input)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("例如: 1-10 或 1,3,5"),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.colored_label(
+                                        egui::Color32::GRAY,
+                                        egui::RichText::new("支持范围格式（1-10）和离散格式（1,3,5）").size(11.0),
+                                    );
+                                });
+                            });
+                        }
+                    }
+                });
+            if !keep_open {
+                self.settings_panel.show_search_dialog = false;
             }
         }
 
