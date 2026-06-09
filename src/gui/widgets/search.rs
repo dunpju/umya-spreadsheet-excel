@@ -7,6 +7,15 @@ use eframe::egui;
 use std::collections::HashSet;
 use crate::excel::reader::{CellData, ExcelData, SheetData};
 
+// ═══════════════════════════════════════════════════════════════
+// 性能优化参数
+// ═══════════════════════════════════════════════════════════════
+
+/// 并行行扫描阈值：超过此行数时启用多线程线性扫描
+const PARALLEL_ROW_THRESHOLD: usize = 5000;
+/// 每个线程最少处理的行数（避免线程粒度过细）
+const MIN_ROWS_PER_THREAD: usize = 2000;
+
 /// 获取单元格的搜索用显示值
 ///
 /// 与表格渲染 `cell_display_text` 保持一致：
@@ -624,10 +633,151 @@ fn row_fuzzy_match(cell_value: &str, keyword: &str) -> bool {
     cell_value.to_lowercase().contains(&keyword.to_lowercase())
 }
 
-/// 执行行筛选搜索（支持多列 AND 逻辑）
+// ═══════════════════════════════════════════════════════════════
+// 行筛选性能优化辅助函数
+// ═══════════════════════════════════════════════════════════════
+
+/// P1: 预收集某列的搜索用值
 ///
-/// 遍历所有激活的 row_filters，对每一行执行 AND 逻辑：
-/// 行必须匹配所有激活筛选器的关键字才会保留，否则加入 hidden_rows。
+/// 一次性提取 [start_row+1, max_row] 范围内指定列的所有单元格值，
+/// 完成日期格式化 + 小写转换，消除搜索循环内的重复 HashMap 查找。
+/// 返回按行号升序排列的 (行号, 值) 列表。
+fn collect_column_values(
+    sheet: &SheetData,
+    col: u32,
+    start_row: u32,
+    max_row: u32,
+) -> Vec<(u32, String)> {
+    (start_row + 1..=max_row)
+        .map(|row| {
+            let value = sheet
+                .get_cell(row, col)
+                .map(|c| cell_search_value(c).to_lowercase())
+                .unwrap_or_default();
+            (row, value)
+        })
+        .collect()
+}
+
+/// 检查单个值是否匹配筛选条件（统一范围匹配和模糊匹配逻辑）
+fn match_filter_value(value: &str, keywords: &[String], is_range: bool) -> bool {
+    if is_range && keywords.len() == 2 {
+        let v = value.trim();
+        v >= keywords[0].as_str() && v <= keywords[1].as_str()
+    } else {
+        keywords
+            .iter()
+            .any(|kw| row_fuzzy_match(value, kw))
+    }
+}
+
+/// P0: 在已排序行值中二分查找匹配行
+///
+/// 返回匹配行的行号集合。与列筛选 `search_sorted` 算法同构：
+/// - 范围查询: 二分定位 lo，向右扫描至 > hi
+/// - 模糊查询: 二分定位 keyword，双向扩展 + 前缀边界提前终止
+fn find_rows_in_sorted(
+    row_values: &[(u32, String)],
+    keywords: &[String],
+    is_range: bool,
+) -> HashSet<u32> {
+    let n = row_values.len();
+    if n == 0 {
+        return HashSet::new();
+    }
+
+    if is_range && keywords.len() == 2 {
+        // ── 范围匹配：二分定位 lo，区间扫描 ──
+        let lo = &keywords[0];
+        let hi = &keywords[1];
+
+        // 二分定位第一个 >= lo 的元素
+        let mut left = 0usize;
+        let mut right = n;
+        while left < right {
+            let mid = (left + right) / 2;
+            if row_values[mid].1.as_str() < lo.as_str() {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
+        // 从 left 向右扫描直到值 > hi
+        let mut matched = HashSet::new();
+        for i in left..n {
+            let val = row_values[i].1.as_str();
+            if val > hi.as_str() {
+                break;
+            }
+            matched.insert(row_values[i].0);
+        }
+        matched
+    } else {
+        // ── 模糊匹配：二分定位 + 双向扩展（与 search_sorted 同构） ──
+        let keyword = &keywords[0];
+
+        // 二分定位第一个 >= keyword 的元素
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if row_values[mid].1.as_str() < keyword.as_str() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        let mut matched = HashSet::new();
+
+        // 向右扩展
+        let mut i = lo;
+        while i < n {
+            let val = &row_values[i].1;
+            if keywords.iter().any(|kw| row_fuzzy_match(val, kw)) {
+                matched.insert(row_values[i].0);
+            } else if val.as_str() > keyword.as_str() {
+                let prefix_len = keyword.len().min(val.len());
+                if !val[..prefix_len].starts_with(&keyword[..prefix_len]) {
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        // 向左扩展
+        if lo > 0 {
+            let mut i = lo.saturating_sub(1);
+            loop {
+                let val = &row_values[i].1;
+                if keywords.iter().any(|kw| row_fuzzy_match(val, kw)) {
+                    matched.insert(row_values[i].0);
+                } else if val.as_str() < keyword.as_str() {
+                    let prefix_len = keyword.len().min(val.len());
+                    if !keyword[..prefix_len].starts_with(&val[..prefix_len]) {
+                        break;
+                    }
+                }
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+            }
+        }
+
+        matched
+    }
+}
+
+/// 执行行筛选搜索（支持多列 AND 逻辑 + 性能优化）
+///
+/// 自适应选择最优搜索路径：
+/// - **二分路径**: 第一列已排序 → O(log n + k×f)（k = 匹配行数）
+/// - **并行路径**: 未排序且 >5000 行 → 多线程分块线性扫描
+/// - **串行路径**: 未排序且 ≤5000 行 → 常规线性扫描
+///
+/// 所有路径均使用 P1 预收集消除重复 HashMap 查找。
 ///
 /// 每个筛选器独立解析关键字格式：
 /// - 单值: `xxxx` → 模糊匹配
@@ -658,11 +808,22 @@ pub fn execute_row_search(
     }
 
     let max_row = sheet.max_row;
+    let start_row = active_filters[0].row;
 
-    // 为每个激活的筛选器预解析关键字
-    // (filter, parsed_keywords, is_range)
-    struct ParsedFilter<'a> {
-        filter: &'a RowFilterState,
+    if max_row <= start_row {
+        state.row_total_searched = 0;
+        state.row_matched_count = 0;
+        state.is_row_searching = true;
+        state.row_debug_info = format!("行筛选: 行{}→{} 无数据行可搜索", start_row + 1, max_row);
+        return;
+    }
+
+    state.row_total_searched = (max_row - start_row) as usize;
+    let row_count = state.row_total_searched;
+
+    // ═══ 解析所有筛选器关键字（owned 数据，线程安全） ═══
+    struct ParsedFilter {
+        col: u32,
         keywords: Vec<String>,
         is_range: bool,
     }
@@ -672,58 +833,138 @@ pub fn execute_row_search(
         .map(|f| {
             let (keywords, is_range) = parse_row_keywords(&f.keyword);
             ParsedFilter {
-                filter: f,
+                col: f.col,
                 keywords,
                 is_range,
             }
         })
         .collect();
 
-    // 计算搜索的总行数（使用第一个筛选器的 start_row，假设所有筛选器在同一行）
-    let start_row = active_filters[0].row;
-    state.row_total_searched = if max_row > start_row {
-        (max_row - start_row) as usize
-    } else {
-        0
-    };
+    // 用于诊断信息的搜索模式标签
+    let search_mode: &str;
 
-    // 遍历所有行，AND 逻辑：任意一个筛选器不匹配 → 隐藏
-    for row in (start_row + 1)..=max_row {
-        let mut all_matched = true;
+    // ═══ P1: 预收集第一列的值（用于排序检测 + 二分查找） ═══
+    let first_col_data = collect_column_values(sheet, parsed[0].col, start_row, max_row);
 
-        for pf in &parsed {
-            let value = sheet
-                .get_cell(row, pf.filter.col)
-                .map(|c| cell_search_value(c).to_lowercase())
-                .unwrap_or_default();
+    // 检测第一列是否已排序（单调非递减）
+    let is_sorted = first_col_data
+        .windows(2)
+        .all(|w| w[0].1 <= w[1].1);
 
-            let matched = if pf.is_range && pf.keywords.len() == 2 {
-                // 范围匹配
-                let lo = &pf.keywords[0];
-                let hi = &pf.keywords[1];
-                let v = value.trim();
-                v >= lo.as_str() && v <= hi.as_str()
-            } else {
-                // 单值或多值模糊匹配
-                pf.keywords
-                    .iter()
-                    .any(|kw| row_fuzzy_match(&value, kw))
-            };
+    if is_sorted {
+        // ══════════ P0: 二分查找路径 ══════════
+        search_mode = "二分";
 
-            if !matched {
-                all_matched = false;
-                break; // 一个不匹配即可确定隐藏，无需检查剩余筛选器
+        // 在第一列中二分查找匹配行
+        let candidate_rows = find_rows_in_sorted(
+            &first_col_data,
+            &parsed[0].keywords,
+            parsed[0].is_range,
+        );
+
+        if parsed.len() == 1 {
+            // 仅一个筛选器：候选行之外的全部隐藏
+            for (row, _) in &first_col_data {
+                if !candidate_rows.contains(row) {
+                    hidden_rows.insert(*row);
+                }
+            }
+        } else {
+            // 多个筛选器：候选行需验证其余列，非候选行直接隐藏
+            for (row, _) in &first_col_data {
+                if !candidate_rows.contains(row) {
+                    hidden_rows.insert(*row);
+                } else {
+                    // 验证其余筛选器（按需 get_cell，候选集已被二分缩小）
+                    let all_matched = parsed[1..].iter().all(|pf| {
+                        let value = sheet
+                            .get_cell(*row, pf.col)
+                            .map(|c| cell_search_value(c).to_lowercase())
+                            .unwrap_or_default();
+                        match_filter_value(&value, &pf.keywords, pf.is_range)
+                    });
+                    if !all_matched {
+                        hidden_rows.insert(*row);
+                    }
+                }
             }
         }
+    } else if row_count > PARALLEL_ROW_THRESHOLD {
+        // ══════════ P2: 并行线性扫描路径 ══════════
+        search_mode = "并行";
 
-        if !all_matched {
-            hidden_rows.insert(row);
+        // P1: 预收集所有筛选器的列值
+        let all_col_data: Vec<Vec<(u32, String)>> = parsed
+            .iter()
+            .map(|pf| collect_column_values(sheet, pf.col, start_row, max_row))
+            .collect();
+
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let chunk_size = ((row_count + num_threads - 1) / num_threads)
+            .max(MIN_ROWS_PER_THREAD);
+        let num_chunks = (row_count + chunk_size - 1) / chunk_size;
+
+        // 使用 scope 允许线程借用栈上数据，无需 Arc
+        let thread_results: Vec<HashSet<u32>> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(num_chunks);
+
+            for chunk_idx in 0..num_chunks {
+                let start_idx = chunk_idx * chunk_size;
+                let end_idx = ((chunk_idx + 1) * chunk_size).min(row_count);
+
+                // 显式捕获引用（move 闭包中引用是 Copy，可安全传递到线程）
+                let all_col_data_ref = &all_col_data;
+                let parsed_ref = &parsed;
+
+                handles.push(s.spawn(move || {
+                    let mut local_hidden = HashSet::new();
+                    for idx in start_idx..end_idx {
+                        let row = all_col_data_ref[0][idx].0;
+                        let all_matched = parsed_ref.iter().enumerate().all(|(fi, pf)| {
+                            let value = &all_col_data_ref[fi][idx].1;
+                            match_filter_value(value, &pf.keywords, pf.is_range)
+                        });
+                        if !all_matched {
+                            local_hidden.insert(row);
+                        }
+                    }
+                    local_hidden
+                }));
+            }
+
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for set in thread_results {
+            hidden_rows.extend(set);
+        }
+    } else {
+        // ══════════ 串行线性扫描路径 ══════════
+        search_mode = "串行";
+
+        // P1: 预收集所有筛选器的列值
+        let all_col_data: Vec<Vec<(u32, String)>> = parsed
+            .iter()
+            .map(|pf| collect_column_values(sheet, pf.col, start_row, max_row))
+            .collect();
+
+        for idx in 0..row_count {
+            let row = all_col_data[0][idx].0;
+            let all_matched = parsed.iter().enumerate().all(|(fi, pf)| {
+                let value = &all_col_data[fi][idx].1;
+                match_filter_value(value, &pf.keywords, pf.is_range)
+            });
+            if !all_matched {
+                hidden_rows.insert(row);
+            }
         }
     }
 
     // 处理跨行合并：对每个激活筛选器的列进行合并单元格对齐
     for pf in &parsed {
-        expand_hidden_rows_for_merged_cells(sheet, hidden_rows, pf.filter.col);
+        expand_hidden_rows_for_merged_cells(sheet, hidden_rows, pf.col);
     }
 
     // 确保配置行自身不被隐藏
@@ -734,7 +975,7 @@ pub fn execute_row_search(
     state.row_matched_count = state.row_total_searched.saturating_sub(hidden_rows.len());
     state.is_row_searching = true;
 
-    // 诊断信息
+    // 诊断信息（含搜索模式标签）
     let col_labels: Vec<String> = active_filters
         .iter()
         .map(|f| {
@@ -743,7 +984,8 @@ pub fn execute_row_search(
         })
         .collect();
     state.row_debug_info = format!(
-        "行筛选: [{}] 行{}→{} 共{}行 | 匹配{}行 隐藏{}行",
+        "行筛选[{}]: [{}] 行{}→{} 共{}行 | 匹配{}行 隐藏{}行",
+        search_mode,
         col_labels.join(", "),
         start_row + 1,
         max_row,
