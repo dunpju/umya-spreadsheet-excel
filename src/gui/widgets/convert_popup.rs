@@ -66,11 +66,11 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
             .max_height(220.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_max_width(590.0);
+                ui.set_max_width(596.0);
                 egui::TextEdit::multiline(&mut state.text)
                     .hint_text("请输入要转换的内容...")
                     .desired_rows(9)
-                    .desired_width(590.0)
+                    .desired_width(596.0)
                     .show(ui);
             });
 
