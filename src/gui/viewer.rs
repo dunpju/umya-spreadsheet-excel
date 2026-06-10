@@ -12,6 +12,8 @@ use crate::gui::widgets::{
     draw_table_content,
     draw_empty_state,
     draw_name_box,
+    draw_convert_popup,
+    ConvertPopupState,
     NameBoxState,
     SearchWindowState,
     draw_search_window,
@@ -421,6 +423,8 @@ pub struct ExcelViewer {
     save_requested: bool,
     /// 搜索窗口状态
     pub search_window: SearchWindowState,
+    /// 转换弹窗状态
+    pub convert_popup: ConvertPopupState,
     /// 隐藏的列号集合（1-based），由搜索功能写入，table 渲染时读取
     pub hidden_columns: HashSet<u32>,
     /// 隐藏的行号集合（1-based），由行筛选功能写入，table 渲染时读取
@@ -464,6 +468,7 @@ impl ExcelViewer {
             save_requested: false,
             drag_anchor: None,
             search_window: SearchWindowState::default(),
+            convert_popup: ConvertPopupState::default(),
             hidden_columns: HashSet::new(),
             hidden_rows: HashSet::new(),
         }
@@ -715,13 +720,16 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup);
         });
 
         // 绘制导入对话框
         if let Some(path) = draw_import_dialog(&mut self.show_import_dialog) {
             self.start_async_load(path, ctx.clone());
         }
+
+        // 绘制转换弹窗
+        draw_convert_popup(&ctx, &mut self.convert_popup);
 
         // 处理"编辑 → 添加列"：复用 insert_confirm 确认弹窗流程
         // 在最后一列 (max_col, 1) 上触发"在右侧插入列"操作

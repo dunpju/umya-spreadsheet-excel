@@ -5,6 +5,7 @@
 use eframe::egui;
 use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 use crate::gui::widgets::search::SearchWindowState;
+use crate::gui::widgets::convert_popup::ConvertPopupState;
 
 /// 绘制菜单栏
 ///
@@ -23,6 +24,7 @@ pub fn draw_menu_bar(
     add_column: &mut bool,
     add_row: &mut bool,
     has_data: bool,
+    convert_popup: &mut ConvertPopupState,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
@@ -72,6 +74,14 @@ pub fn draw_menu_bar(
             if ui.button("搜索配置").clicked() {
                 ui.close();
                 settings_panel.show_search_dialog = true;
+            }
+        });
+
+        // 转换菜单
+        ui.menu_button("转换", |ui| {
+            if ui.button("打开转换工具").clicked() {
+                ui.close();
+                convert_popup.visible = true;
             }
         });
 

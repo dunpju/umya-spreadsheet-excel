@@ -8,6 +8,7 @@ pub mod table;
 pub mod empty_state;
 pub mod names_box;
 pub mod search;
+pub mod convert_popup;
 
 pub use menu_bar::*;
 pub use dialogs::*;
@@ -15,3 +16,4 @@ pub use table::*;
 pub use empty_state::*;
 pub use names_box::*;
 pub use search::*;
+pub use convert_popup::*;
