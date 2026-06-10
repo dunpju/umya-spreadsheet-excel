@@ -43,6 +43,8 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
     let mut visible = state.visible;
     egui::Modal::new(egui::Id::new("convert_popup")).show(ctx, |ui| {
         ui.set_min_width(600.0);
+        ui.set_min_height(296.0);
+        ui.set_max_height(296.0);
 
         // 顶部行：标题 + 关闭按钮
         ui.horizontal(|ui| {
@@ -66,13 +68,19 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
 
         ui.separator();
 
-        // 中间区域：多行文本输入框（限制宽高，TextEdit 自带滚动）
-        ui.add_sized(
-            egui::vec2(596.0, 220.0),
-            egui::TextEdit::multiline(&mut state.text)
-                .hint_text("请输入要转换的内容...")
-                .desired_rows(9),
-        );
+        // 中间区域：多行文本输入框（固定高度230px，内容超出时滚动）
+        egui::ScrollArea::vertical()
+            .max_height(230.0)
+            .max_width(ui.available_width())
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut state.text)
+                        .hint_text("请输入要转换的内容...")
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(13),
+                );
+            });
 
         ui.separator();
 
