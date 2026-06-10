@@ -48,15 +48,15 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("转换")
-                    .size(18.0)
+                    .size(13.0)
                     .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let response = ui.add(
                     egui::Button::new(
-                        egui::RichText::new("✕").size(14.0)
+                        egui::RichText::new("✖").size(13.0)
                     )
-                    .min_size(egui::vec2(24.0, 24.0))
+                    .min_size(egui::vec2(13.0, 13.0))
                 );
                 if response.clicked() {
                     visible = false;
