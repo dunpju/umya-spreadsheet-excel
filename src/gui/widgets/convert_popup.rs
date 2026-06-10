@@ -79,7 +79,7 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(text)
-                            .hint_text("请输入要转换规则...")
+                            .hint_text("请输入转换规则...")
                             .desired_width(f32::INFINITY)
                             .desired_rows(7),
                     );
