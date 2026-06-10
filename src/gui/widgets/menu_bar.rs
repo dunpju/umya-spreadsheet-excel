@@ -79,7 +79,7 @@ pub fn draw_menu_bar(
 
         // 转换菜单
         ui.menu_button("转换", |ui| {
-            if ui.button("打开转换工具").clicked() {
+            if ui.button("转换工具").clicked() {
                 ui.close();
                 convert_popup.visible = true;
             }

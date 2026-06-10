@@ -49,7 +49,7 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
         // 顶部行：标题 + 关闭按钮
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("转换")
+                egui::RichText::new("转换工具")
                     .size(13.0)
                     .strong(),
             );
@@ -76,7 +76,7 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut state.text)
-                        .hint_text("请输入要转换的内容...")
+                        .hint_text("请输入要转换规则...")
                         .desired_width(f32::INFINITY)
                         .desired_rows(13),
                 );
