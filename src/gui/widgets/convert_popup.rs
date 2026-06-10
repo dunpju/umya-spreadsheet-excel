@@ -89,7 +89,7 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
             // 进度条
             ui.add(
                 egui::ProgressBar::new(state.progress / 100.0)
-                    .desired_width(240.0)
+                    .desired_width(530.0)
                     .text(format!("{:.0}%", state.progress)),
             );
 
