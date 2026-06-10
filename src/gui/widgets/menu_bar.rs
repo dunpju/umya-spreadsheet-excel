@@ -55,21 +55,21 @@ pub fn draw_menu_bar(
             }
         });
 
-        // 设置菜单
-        ui.menu_button("设置", |ui| {
-            ui.menu_button("插入", |ui| {
-                if ui.button("列").clicked() {
+        // 配置菜单
+        ui.menu_button("配置", |ui| {
+            ui.menu_button("插入配置", |ui| {
+                if ui.button("列配置").clicked() {
                     ui.close();
                     settings_panel.visible = true;
                     settings_panel.active_page = Some(SettingsPage::ColumnConfig);
                 }
-                if ui.button("行").clicked() {
+                if ui.button("行配置").clicked() {
                     ui.close();
                     settings_panel.visible = true;
                     settings_panel.active_page = Some(SettingsPage::RowConfig);
                 }
             });
-            if ui.button("搜索").clicked() {
+            if ui.button("搜索配置").clicked() {
                 ui.close();
                 settings_panel.show_search_dialog = true;
             }
