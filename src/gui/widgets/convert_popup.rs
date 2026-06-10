@@ -52,7 +52,13 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
                     .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                let response = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("✕").size(14.0)
+                    )
+                    .min_size(egui::vec2(24.0, 24.0))
+                );
+                if response.clicked() {
                     visible = false;
                 }
             });
@@ -60,19 +66,13 @@ pub fn draw_convert_popup(ctx: &egui::Context, state: &mut ConvertPopupState) {
 
         ui.separator();
 
-        // 中间区域：多行文本输入框（限制宽高）
-        egui::ScrollArea::vertical()
-            .id_salt("convert_textarea")
-            .max_height(220.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width(596.0);
-                egui::TextEdit::multiline(&mut state.text)
-                    .hint_text("请输入要转换的内容...")
-                    .desired_rows(9)
-                    .desired_width(596.0)
-                    .show(ui);
-            });
+        // 中间区域：多行文本输入框（限制宽高，TextEdit 自带滚动）
+        ui.add_sized(
+            egui::vec2(596.0, 220.0),
+            egui::TextEdit::multiline(&mut state.text)
+                .hint_text("请输入要转换的内容...")
+                .desired_rows(9),
+        );
 
         ui.separator();
 
