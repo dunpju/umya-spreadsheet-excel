@@ -75,6 +75,13 @@ enum SourceRange {
         step: u32,
         end: CellRef,
     },
+    /// 批量列范围：(A:M)3:(A:M)12 — 每列同行号范围
+    BatchColumns {
+        col_start: u32,
+        col_end: u32,
+        row_start: u32,
+        row_end: u32,
+    },
 }
 
 /// 目标位置变体
@@ -84,6 +91,17 @@ enum TargetPosition {
     Simple(CellRef),
     /// 合并单元格目标：(B1:C1):
     Merged(CellRange),
+    /// 批量目标：B(1:13):C(1:13):
+    BatchTarget {
+        /// 数值填入列
+        value_col: u32,
+        /// 合并列（与 value_col 配对合并）
+        merge_col: u32,
+        /// 目标起始行
+        row_start: u32,
+        /// 目标结束行
+        row_end: u32,
+    },
 }
 
 /// 填充方向
@@ -254,19 +272,25 @@ impl RuleScanner {
         self.skip_ws();
         match self.peek() {
             Some('(') => {
-                // 保存位置，依次尝试 MergedPair 和 Stepped
+                // 保存位置，依次尝试 BatchColumns → MergedPair → Stepped
                 let saved_pos = self.pos;
                 let saved_line = self.line;
 
-                // Try MergedPair: (cell:cell):(cell:cell)
-                if let Ok(result) = self.try_parse_merged_pair() {
+                // 1) BatchColumns: (A:M)3:(A:M)12
+                if let Ok(result) = self.try_parse_batch_columns() {
                     return Ok(result);
                 }
-
-                // Reset and try Stepped: (cell+step):cell
                 self.pos = saved_pos;
                 self.line = saved_line;
 
+                // 2) MergedPair: (cell:cell):(cell:cell)
+                if let Ok(result) = self.try_parse_merged_pair() {
+                    return Ok(result);
+                }
+                self.pos = saved_pos;
+                self.line = saved_line;
+
+                // 3) Stepped: (cell+step):cell
                 self.try_parse_stepped()
             }
             Some(ch) if ch.is_ascii_alphabetic() => {
@@ -315,13 +339,45 @@ impl RuleScanner {
         Ok(SourceRange::Stepped { start, step, end })
     }
 
+    /// 尝试解析批量列范围：(A:M)3:(A:M)12
+    fn try_parse_batch_columns(&mut self) -> Result<SourceRange, String> {
+        self.expect_char('(')?;
+        let col_start_str = self.parse_col_letters()?;
+        self.expect_char(':')?;
+        let col_end_str = self.parse_col_letters()?;
+        self.expect_char(')')?;
+        let row_start = self.parse_row_digits()?;
+        self.expect_char(':')?;
+        // 第二部分：(A:M)12
+        self.expect_char('(')?;
+        let col_start2_str = self.parse_col_letters()?;
+        self.expect_char(':')?;
+        let col_end2_str = self.parse_col_letters()?;
+        self.expect_char(')')?;
+        let row_end = self.parse_row_digits()?;
+
+        // 校验起止列一致
+        if col_start_str != col_start2_str || col_end_str != col_end2_str {
+            return Err(format!(
+                "第{}行: 批量列范围起止列必须一致",
+                self.line
+            ));
+        }
+        let col_start = letter_to_col(&col_start_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+        let col_end = letter_to_col(&col_end_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+
+        Ok(SourceRange::BatchColumns { col_start, col_end, row_start, row_end })
+    }
+
     /// 解析目标位置
     fn parse_target_start(&mut self) -> Result<TargetPosition, String> {
         self.skip_ws();
         let saved_pos = self.pos;
         let saved_line = self.line;
 
-        // Try Merged target: (cell:cell) — 末尾的 ':' 由 parse_one_rule 统一消费
+        // 1) Try Merged target: (cell:cell)
         if self.peek() == Some('(') {
             if let Ok(result) = self.try_parse_merged_target() {
                 return Ok(result);
@@ -330,7 +386,15 @@ impl RuleScanner {
             self.line = saved_line;
         }
 
-        // Simple target
+        // 2) Try Batch target: B(1:13):C(1:13):
+        //    与 Simple 的区分：列字母后是 '(' 而非数字
+        if let Ok(result) = self.try_parse_batch_target() {
+            return Ok(result);
+        }
+        self.pos = saved_pos;
+        self.line = saved_line;
+
+        // 3) Simple target: A1
         let cell = self.parse_cell_ref()?;
         Ok(TargetPosition::Simple(cell))
     }
@@ -342,6 +406,92 @@ impl RuleScanner {
         // 不消费末尾的 ':' — 该冒号由 parse_one_rule 统一作为规则分隔符处理
 
         Ok(TargetPosition::Merged(range))
+    }
+
+    /// 尝试解析批量目标，支持两种格式：
+    /// - `B(1:13):C(1:13):`  （无外层括号）
+    /// - `(B(1:13):C(1:13)):`（有外层括号）
+    /// 末尾 ':' 由 parse_one_rule 统一消费
+    fn try_parse_batch_target(&mut self) -> Result<TargetPosition, String> {
+        let saved_pos = self.pos;
+        let saved_line = self.line;
+
+        // 检测可选外层 '('
+        let has_outer_paren = self.peek() == Some('(');
+        if has_outer_paren {
+            // 跳过外层 '('，但不消费——由 expect_char 处理
+            // 直接重新解析
+            self.pos = saved_pos;
+            self.line = saved_line;
+            return self.try_parse_batch_target_inner();
+        }
+
+        // 无外层括号：列字母开头
+        let value_col_str = self.parse_col_letters()?;
+        if self.peek() != Some('(') {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            return Err("不是批量目标".to_string());
+        }
+        self.parse_batch_target_body(value_col_str)
+    }
+
+    /// 解析外层带括号的批量目标：(B(1:13):C(1:13)):
+    fn try_parse_batch_target_inner(&mut self) -> Result<TargetPosition, String> {
+        let saved_pos = self.pos;
+        let saved_line = self.line;
+
+        // 可能已有外层 '(' 或需要从字母开始
+        if self.peek() == Some('(') {
+            self.advance();
+            self.skip_ws();
+        }
+
+        let value_col_str = self.parse_col_letters()?;
+        if self.peek() != Some('(') {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            return Err("不是批量目标".to_string());
+        }
+        let result = self.parse_batch_target_body(value_col_str)?;
+
+        // 如果有外层括号，消费 ')'
+        self.skip_ws();
+        if self.peek() == Some(')') {
+            self.advance();
+        }
+        // 末尾 ':' 由 parse_one_rule 统一消费
+
+        Ok(result)
+    }
+
+    /// 解析批量目标的核心部分（从组行号到合并列行号）
+    fn parse_batch_target_body(&mut self, value_col_str: String) -> Result<TargetPosition, String> {
+        let value_col = letter_to_col(&value_col_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+
+        self.expect_char('(')?;
+        let row_start = self.parse_row_digits()?;
+        self.expect_char(':')?;
+        let row_end = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        self.expect_char(':')?;
+        let merge_col_str = self.parse_col_letters()?;
+        self.expect_char('(')?;
+        let row_start2 = self.parse_row_digits()?;
+        self.expect_char(':')?;
+        let row_end2 = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        // 不消费末尾 ':' — 该冒号由 parse_one_rule 统一消费
+
+        if row_start != row_start2 || row_end != row_end2 {
+            return Err(format!("第{}行: 批量目标起止行必须一致", self.line));
+        }
+
+        let merge_col = letter_to_col(&merge_col_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+
+        Ok(TargetPosition::BatchTarget { value_col, merge_col, row_start, row_end })
     }
 
     /// 解析方向标记
@@ -544,6 +694,10 @@ fn resolve_source_items(
             }
             Ok(items)
         }
+
+        SourceRange::BatchColumns { .. } => {
+            Err("批量列规则应在展开阶段处理".to_string())
+        }
     }
 }
 
@@ -571,6 +725,9 @@ fn compute_targets(
                 1
             };
             (range.start_col, range.start_row, w, h)
+        }
+        TargetPosition::BatchTarget { .. } => {
+            (1, 1, 1, 1) // 批量目标应在展开阶段处理，此处为兜底
         }
     };
 
@@ -796,6 +953,43 @@ fn format_utc_timestamp() -> String {
 }
 
 // ============================================================================
+// 批量规则展开
+// ============================================================================
+
+/// 将批量规则展开为等价的逐列规则列表。
+/// 非批量规则直接返回原规则的单元素 Vec。
+fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
+    match (&rule.source_range, &rule.target_start) {
+        (
+            SourceRange::BatchColumns { col_start, col_end, row_start, row_end },
+            TargetPosition::BatchTarget { value_col, merge_col, row_start: tgt_row_start, row_end: _tgt_row_end },
+        ) => {
+            let _merge_width = merge_col - value_col + 1;
+            let mut expanded = Vec::new();
+
+            for (i, col) in (*col_start..=*col_end).enumerate() {
+                let src_start = CellRef::new(col, *row_start);
+                let src_end = CellRef::new(col, *row_end);
+                let tgt_row = tgt_row_start + i as u32;
+                let tgt_range = CellRange::new(
+                    tgt_row, *value_col,
+                    tgt_row, *merge_col,
+                );
+
+                expanded.push(ParsedRule {
+                    source_range: SourceRange::Continuous { start: src_start, end: src_end },
+                    target_start: TargetPosition::Merged(tgt_range),
+                    direction: rule.direction,
+                    line: rule.line,
+                });
+            }
+            expanded
+        }
+        _ => vec![rule.clone()],
+    }
+}
+
+// ============================================================================
 // 转换执行器
 // ============================================================================
 
@@ -808,6 +1002,12 @@ fn execute_convert(
 ) -> Result<(), String> {
     // 1. 解析规则
     let rules = parse_rules(&state.text)?;
+
+    // 1.5 展开批量规则 → 等价逐列规则
+    let rules: Vec<ParsedRule> = rules
+        .iter()
+        .flat_map(|r| expand_batch_rule(r))
+        .collect();
 
     // 2. 获取当前工作表
     let sheet = excel_data
@@ -1132,5 +1332,110 @@ N1:BW1->B14:-~;
         let text = "A2:M2->A1:|~;(N1:O1):(BV1:BW1)->A15:|~;A3:A12->(B1:C1):-~;N1:BW1->B14:-~;(N3+2):BV3->B15:|~;";
         let rules = parse_rules(text).unwrap();
         assert_eq!(rules.len(), 5);
+    }
+
+    #[test]
+    fn test_parse_batch_columns_rule() {
+        let text = "(A:M)3:(A:M)12->B(1:13):C(1:13):-~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        let r = &rules[0];
+        assert!(matches!(r.source_range, SourceRange::BatchColumns { .. }));
+        assert!(matches!(r.target_start, TargetPosition::BatchTarget { .. }));
+        assert_eq!(r.direction, Direction::Horizontal);
+    }
+
+    #[test]
+    fn test_batch_rule_expansion() {
+        let text = "(A:M)3:(A:M)12->B(1:13):C(1:13):-~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        // 13 列 (A..M) → 13 条逐列规则
+        assert_eq!(expanded.len(), 13);
+        // 每条应是 Continuous + Merged + Horizontal
+        for (i, r) in expanded.iter().enumerate() {
+            assert!(matches!(r.source_range, SourceRange::Continuous { .. }));
+            assert!(matches!(r.target_start, TargetPosition::Merged(_)));
+            assert_eq!(r.direction, Direction::Horizontal);
+            // 验证行号递增
+            if let TargetPosition::Merged(ref range) = r.target_start {
+                assert_eq!(range.start_row, (i + 1) as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_batch_rule_compact() {
+        let text = "(A:M)3:(A:M)12->B(1:13):C(1:13):-~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        // 应等价的13条逐列规则: A3:A12->(B1:C1):-~; 到 M3:M12->(B13:C13):-~;
+        assert_eq!(expanded.len(), 13);
+        // 第一条: A3:A12->(B1:C1):-~;
+        let first = &expanded[0];
+        if let SourceRange::Continuous { start, end } = &first.source_range {
+            assert_eq!(start.col, 1); // A
+            assert_eq!(start.row, 3);
+            assert_eq!(end.col, 1); // A
+            assert_eq!(end.row, 12);
+        } else {
+            panic!("Expected Continuous");
+        }
+        if let TargetPosition::Merged(range) = &first.target_start {
+            assert_eq!(range.start_col, 2); // B
+            assert_eq!(range.end_col, 3);   // C
+            assert_eq!(range.start_row, 1);
+        } else {
+            panic!("Expected Merged");
+        }
+        // 最后一条: M3:M12->(B13:C13):-~;
+        let last = &expanded[12];
+        if let SourceRange::Continuous { start, end } = &last.source_range {
+            assert_eq!(start.col, 13); // M
+            assert_eq!(start.row, 3);
+            assert_eq!(end.col, 13); // M
+            assert_eq!(end.row, 12);
+        } else {
+            panic!("Expected Continuous");
+        }
+        if let TargetPosition::Merged(range) = &last.target_start {
+            assert_eq!(range.start_col, 2); // B
+            assert_eq!(range.end_col, 3);   // C
+            assert_eq!(range.start_row, 13);
+        } else {
+            panic!("Expected Merged");
+        }
+    }
+
+    #[test]
+    fn test_parse_batch_target_outer_parens() {
+        // 外层括号格式：(B(1:13):C(1:13)):
+        let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)):-~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].target_start, TargetPosition::BatchTarget { .. }));
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        assert_eq!(expanded.len(), 13);
+        if let TargetPosition::Merged(range) = &expanded[0].target_start {
+            assert_eq!(range.start_row, 1);
+            assert_eq!(range.start_col, 2);
+            assert_eq!(range.end_col, 3);
+        } else {
+            panic!("Expected Merged");
+        }
+    }
+
+    #[test]
+    fn test_parse_user_six_rules() {
+        let text = "A2:M2->A1:|~;
+(N1:O1):(BV1:BW1)->A15:|~;
+(A:M)3:(A:M)12->(B(1:13):C(1:13)):-~;
+N2:BW2->B14:-~;
+(N3+2):BV3->B15:|~;
+(O3+2):BW3->C15:|~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 6);
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        assert_eq!(expanded.len(), 18);
     }
 }
