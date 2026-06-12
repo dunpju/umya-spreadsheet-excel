@@ -729,7 +729,13 @@ impl eframe::App for ExcelViewer {
         }
 
         // 绘制转换弹窗
-        draw_convert_popup(&ctx, &mut self.convert_popup);
+        draw_convert_popup(
+            &ctx,
+            &mut self.convert_popup,
+            self.excel_data.as_ref(),
+            self.file_path.as_deref(),
+            self.current_sheet,
+        );
 
         // 处理"编辑 → 添加列"：复用 insert_confirm 确认弹窗流程
         // 在最后一列 (max_col, 1) 上触发"在右侧插入列"操作
