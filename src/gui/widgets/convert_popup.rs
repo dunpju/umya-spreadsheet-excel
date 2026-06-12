@@ -82,6 +82,14 @@ enum SourceRange {
         row_start: u32,
         row_end: u32,
     },
+    /// 批量步进范围：(N(3:12)+2):BV(3:12) — 多行 × 列步进
+    BatchStepped {
+        col_start: u32,  // N
+        row_start: u32,  // 3
+        row_end: u32,    // 12
+        col_step: u32,   // 2
+        col_end: u32,    // BV
+    },
 }
 
 /// 目标位置变体
@@ -93,14 +101,16 @@ enum TargetPosition {
     Merged(CellRange),
     /// 批量目标：B(1:13):C(1:13):
     BatchTarget {
-        /// 数值填入列
         value_col: u32,
-        /// 合并列（与 value_col 配对合并）
         merge_col: u32,
-        /// 目标起始行
         row_start: u32,
-        /// 目标结束行
         row_end: u32,
+    },
+    /// 步进目标：(B+2)15 — 目标列按步长递增
+    SteppedTarget {
+        col_start: u32,  // B
+        col_step: u32,   // 2
+        row_start: u32,  // 15
     },
 }
 
@@ -272,25 +282,32 @@ impl RuleScanner {
         self.skip_ws();
         match self.peek() {
             Some('(') => {
-                // 保存位置，依次尝试 BatchColumns → MergedPair → Stepped
+                // 保存位置，依次尝试 BatchStepped → BatchColumns → MergedPair → Stepped
                 let saved_pos = self.pos;
                 let saved_line = self.line;
 
-                // 1) BatchColumns: (A:M)3:(A:M)12
+                // 1) BatchStepped: (N(3:12)+2):BV(3:12)
+                if let Ok(result) = self.try_parse_batch_stepped() {
+                    return Ok(result);
+                }
+                self.pos = saved_pos;
+                self.line = saved_line;
+
+                // 2) BatchColumns: (A:M)3:(A:M)12
                 if let Ok(result) = self.try_parse_batch_columns() {
                     return Ok(result);
                 }
                 self.pos = saved_pos;
                 self.line = saved_line;
 
-                // 2) MergedPair: (cell:cell):(cell:cell)
+                // 3) MergedPair: (cell:cell):(cell:cell)
                 if let Ok(result) = self.try_parse_merged_pair() {
                     return Ok(result);
                 }
                 self.pos = saved_pos;
                 self.line = saved_line;
 
-                // 3) Stepped: (cell+step):cell
+                // 4) Stepped: (cell+step):cell
                 self.try_parse_stepped()
             }
             Some(ch) if ch.is_ascii_alphabetic() => {
@@ -371,6 +388,43 @@ impl RuleScanner {
         Ok(SourceRange::BatchColumns { col_start, col_end, row_start, row_end })
     }
 
+    /// 尝试解析批量步进源范围：(N(3:12)+2):BV(3:12)
+    fn try_parse_batch_stepped(&mut self) -> Result<SourceRange, String> {
+        self.expect_char('(')?;
+        let col_start_str = self.parse_col_letters()?;
+        // 关键区分：列字母后是 '('（行范围）→ BatchStepped
+        if self.peek() != Some('(') {
+            return Err("不是批量步进范围".to_string());
+        }
+        self.advance(); // 吃掉 '('
+        let row_start = self.parse_row_digits()?;
+        self.expect_char(':')?;
+        let row_end = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        self.expect_char('+')?;
+        let col_step = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        self.expect_char(':')?;
+        let col_end_str = self.parse_col_letters()?;
+        self.expect_char('(')?;
+        // 验证结束行范围一致
+        let row_start2 = self.parse_row_digits()?;
+        self.expect_char(':')?;
+        let row_end2 = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        if row_start != row_start2 || row_end != row_end2 {
+            return Err(format!("第{}行: 批量步进起止行必须一致", self.line));
+        }
+        if col_step == 0 {
+            return Err(format!("第{}行: 步长不能为 0", self.line));
+        }
+        let col_start = letter_to_col(&col_start_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+        let col_end = letter_to_col(&col_end_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+        Ok(SourceRange::BatchStepped { col_start, row_start, row_end, col_step, col_end })
+    }
+
     /// 解析目标位置
     fn parse_target_start(&mut self) -> Result<TargetPosition, String> {
         self.skip_ws();
@@ -380,6 +434,15 @@ impl RuleScanner {
         // 1) Try Merged target: (cell:cell)
         if self.peek() == Some('(') {
             if let Ok(result) = self.try_parse_merged_target() {
+                return Ok(result);
+            }
+            self.pos = saved_pos;
+            self.line = saved_line;
+        }
+
+        // 1.5) Try Stepped target: (B+2)15
+        if self.peek() == Some('(') {
+            if let Ok(result) = self.try_parse_stepped_target() {
                 return Ok(result);
             }
             self.pos = saved_pos;
@@ -406,6 +469,34 @@ impl RuleScanner {
         // 不消费末尾的 ':' — 该冒号由 parse_one_rule 统一作为规则分隔符处理
 
         Ok(TargetPosition::Merged(range))
+    }
+
+    /// 尝试解析步进目标：(B+2)15
+    fn try_parse_stepped_target(&mut self) -> Result<TargetPosition, String> {
+        let saved_pos = self.pos;
+        let saved_line = self.line;
+
+        self.expect_char('(')?;
+        let col_str = self.parse_col_letters()?;
+        // 区分：列字母后是 '+' → 步进目标；是 ':' 或 ')' → 其他
+        if self.peek() != Some('+') {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            return Err("不是步进目标".to_string());
+        }
+        self.expect_char('+')?;
+        let col_step = self.parse_row_digits()?;
+        self.expect_char(')')?;
+        let row_start = self.parse_row_digits()?;
+
+        if col_step == 0 {
+            return Err(format!("第{}行: 目标步长不能为 0", self.line));
+        }
+
+        let col_start = letter_to_col(&col_str)
+            .map_err(|e| format!("第{}行: {}", self.line, e))?;
+
+        Ok(TargetPosition::SteppedTarget { col_start, col_step, row_start })
     }
 
     /// 尝试解析批量目标，支持两种格式：
@@ -698,6 +789,9 @@ fn resolve_source_items(
         SourceRange::BatchColumns { .. } => {
             Err("批量列规则应在展开阶段处理".to_string())
         }
+        SourceRange::BatchStepped { .. } => {
+            Err("批量步进规则应在展开阶段处理".to_string())
+        }
     }
 }
 
@@ -728,6 +822,9 @@ fn compute_targets(
         }
         TargetPosition::BatchTarget { .. } => {
             (1, 1, 1, 1) // 批量目标应在展开阶段处理，此处为兜底
+        }
+        TargetPosition::SteppedTarget { .. } => {
+            (1, 1, 1, 1) // 步进目标应在展开阶段处理，此处为兜底
         }
     };
 
@@ -979,6 +1076,34 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
                 expanded.push(ParsedRule {
                     source_range: SourceRange::Continuous { start: src_start, end: src_end },
                     target_start: TargetPosition::Merged(tgt_range),
+                    direction: rule.direction,
+                    line: rule.line,
+                });
+            }
+            expanded
+        }
+        (
+            SourceRange::BatchStepped { col_start, row_start, row_end, col_step, col_end },
+            TargetPosition::SteppedTarget { col_start: tgt_col_start, col_step: tgt_col_step, row_start: tgt_row_start },
+        ) => {
+            let (col_start, row_start, row_end, col_step, col_end) =
+                (*col_start, *row_start, *row_end, *col_step, *col_end);
+            let (tgt_col_start, tgt_col_step, tgt_row_start) =
+                (*tgt_col_start, *tgt_col_step, *tgt_row_start);
+            let num_rows = row_end - row_start + 1;
+            let mut expanded = Vec::with_capacity(num_rows as usize);
+
+            for i in 0..num_rows {
+                let src_row = row_start + i;
+                let tgt_col = (tgt_col_start as i32 + i as i32 * tgt_col_step as i32).max(1) as u32;
+
+                expanded.push(ParsedRule {
+                    source_range: SourceRange::Stepped {
+                        start: CellRef::new(col_start, src_row),
+                        step: col_step,
+                        end: CellRef::new(col_end, src_row),
+                    },
+                    target_start: TargetPosition::Simple(CellRef::new(tgt_col, tgt_row_start)),
                     direction: rule.direction,
                     line: rule.line,
                 });
@@ -1437,5 +1562,63 @@ N2:BW2->B14:-~;
         assert_eq!(rules.len(), 6);
         let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
         assert_eq!(expanded.len(), 18);
+    }
+
+    #[test]
+    fn test_parse_batch_stepped_basic() {
+        let text = "(N(3:12)+2):BV(3:12)->(B+2)15:|~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        let r = &rules[0];
+        assert!(matches!(r.source_range, SourceRange::BatchStepped { .. }));
+        assert!(matches!(r.target_start, TargetPosition::SteppedTarget { .. }));
+        assert_eq!(r.direction, Direction::Vertical);
+    }
+
+    #[test]
+    fn test_batch_stepped_expansion() {
+        let text = "(N(3:12)+2):BV(3:12)->(B+2)15:|~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        // 10 行 (3..12) → 10 条逐行规则
+        assert_eq!(expanded.len(), 10);
+
+        // 第一条：行3 → (N3+2):BV3->B15:|~;
+        let first = &expanded[0];
+        if let SourceRange::Stepped { start, step, end } = &first.source_range {
+            assert_eq!(start.col, 14); // N
+            assert_eq!(start.row, 3);
+            assert_eq!(*step, 2);
+            assert_eq!(end.col, 74); // BV
+        } else { panic!("Expected Stepped"); }
+        if let TargetPosition::Simple(cell) = &first.target_start {
+            assert_eq!(cell.col, 2); // B
+            assert_eq!(cell.row, 15);
+        } else { panic!("Expected Simple"); }
+
+        // 最后一条：行12 → (N12+2):BV12->T15:|~;
+        let last = &expanded[9];
+        if let SourceRange::Stepped { start, .. } = &last.source_range {
+            assert_eq!(start.row, 12);
+        } else { panic!("Expected Stepped"); }
+        if let TargetPosition::Simple(cell) = &last.target_start {
+            assert_eq!(cell.col, 20); // T = 20 (B+9*2 = 2+18 = 20)
+            assert_eq!(cell.row, 15);
+        } else { panic!("Expected Simple"); }
+    }
+
+    #[test]
+    fn test_parse_user_rules_with_batch_stepped() {
+        let text = "A2:M2->A1:|~;
+(N1:O1):(BV1:BW1)->A15:|~;
+(A:M)3:(A:M)12->(B(1:13):C(1:13)):-~;
+N2:BW2->B14:-~;
+(N(3:12)+2):BV(3:12)->(B+2)15:|~;
+(O3+2):BW3->C15:|~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 6);
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        // 4 条普通 + 13 (BatchColumns) + 10 (BatchStepped) = 27
+        assert_eq!(expanded.len(), 27);
     }
 }
