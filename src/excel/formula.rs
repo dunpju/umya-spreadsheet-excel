@@ -863,25 +863,34 @@ pub fn adjust_formula_rows(formula: &str, threshold_row: u32, shift: i32) -> Str
     result
 }
 
-// ========== 公式偏移调整（用于单元格复制） ==========
+// ========== 公式映射调整 ==========
 
-/// 调整公式中的单元格引用，按给定的偏移量移动列和行。
+
+/// 根据源→目标映射表调整公式中的单元格引用。
 ///
-/// 与 `adjust_formula_columns`/`adjust_formula_rows` 不同，此函数：
-/// - 无条件偏移所有单元格引用（无阈值）
-/// - **保持绝对引用语义**：`$A$1` 两项均不偏移，`$A1` 仅偏移行，
-///   `A$1` 仅偏移列，`A1` 两项均偏移
-/// - 跳过字符串字面量内的内容
-/// - 跳过前导 `=` 和 `@`
+/// 对公式中每个单元格引用，在映射表中查找其源位置对应的目标位置并替换。
+/// 若引用不在映射表中，则使用 fallback 偏移量调整（保持相对引用语义）。
 ///
 /// # 参数
-/// * `formula` - 公式字符串（可含前导 `=`）
-/// * `col_offset` - 列偏移量（正数右移，负数左移）
-/// * `row_offset` - 行偏移量（正数下移，负数上移）
-pub fn adjust_formula_by_offset(formula: &str, col_offset: i32, row_offset: i32) -> String {
-    if formula.is_empty() || (col_offset == 0 && row_offset == 0) {
+/// * `formula` - 公式字符串
+/// * `mapping` - 源 (col, row) → 目标 (col, row) 映射表
+/// * `fallback_col` - 引用不在映射表时的列偏移量
+/// * `fallback_row` - 引用不在映射表时的行偏移量
+pub fn adjust_formula_by_mapping(
+    formula: &str,
+    mapping: &std::collections::HashMap<(u32, u32), (u32, u32)>,
+    fallback_col: i32,
+    fallback_row: i32,
+) -> String {
+    if formula.is_empty() {
         return formula.to_string();
     }
+
+    // 无映射且无偏移时直接返回
+    if mapping.is_empty() && fallback_col == 0 && fallback_row == 0 {
+        return formula.to_string();
+    }
+
     let chars: Vec<char> = formula.chars().collect();
     let mut result = String::with_capacity(formula.len());
     let mut i = 0;
@@ -923,13 +932,11 @@ pub fn adjust_formula_by_offset(formula: &str, col_offset: i32, row_offset: i32)
             let mut row_abs = false;
             let mut row_digits = String::new();
 
-            // 可选的列绝对前缀 $
             if pos < chars.len() && chars[pos] == '$' {
                 col_abs = true;
                 pos += 1;
             }
 
-            // 列字母
             let col_start = pos;
             while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
                 col_letters.push(chars[pos].to_ascii_uppercase());
@@ -941,78 +948,70 @@ pub fn adjust_formula_by_offset(formula: &str, col_offset: i32, row_offset: i32)
                 continue;
             }
 
-            // 可选的行绝对前缀 $
             if pos < chars.len() && chars[pos] == '$' {
                 row_abs = true;
                 pos += 1;
             }
 
-            // 行号数字
             let row_start = pos;
             while pos < chars.len() && chars[pos].is_ascii_digit() {
                 row_digits.push(chars[pos]);
                 pos += 1;
             }
             if pos == row_start || row_digits.is_empty() {
-                // 没有行号 → 不是单元格引用
-                for c in &chars[start..pos] {
-                    result.push(*c);
-                }
+                for c in &chars[start..pos] { result.push(*c); }
                 i = pos;
                 continue;
             }
 
-            // 解析列号
             let col_num = match letter_to_col(&col_letters) {
                 Ok(c) => c,
                 Err(_) => {
-                    for c in &chars[start..pos] {
-                        result.push(*c);
-                    }
+                    for c in &chars[start..pos] { result.push(*c); }
                     i = pos;
                     continue;
                 }
             };
 
-            // 解析行号
             let row_num: u32 = match row_digits.parse() {
                 Ok(r) => r,
                 Err(_) => {
-                    for c in &chars[start..pos] {
-                        result.push(*c);
-                    }
+                    for c in &chars[start..pos] { result.push(*c); }
                     i = pos;
                     continue;
                 }
             };
 
-            // 计算新坐标（保持绝对引用语义）
-            let new_col = if col_abs {
-                col_num // 绝对列引用保持不变
+            // 在映射表中查找引用位置
+            let (new_col, new_row) = if let Some(&(tgt_col, tgt_row)) = mapping.get(&(col_num, row_num)) {
+                // 在映射表中：使用映射目标，但保持绝对引用语义
+                let c = if col_abs { col_num } else { tgt_col };
+                let r = if row_abs { row_num } else { tgt_row };
+                (c, r)
             } else {
-                (col_num as i32 + col_offset).max(1) as u32
-            };
-            let new_row = if row_abs {
-                row_num // 绝对行引用保持不变
-            } else {
-                (row_num as i32 + row_offset).max(1) as u32
+                // 不在映射表中：使用 fallback 偏移
+                let c = if col_abs {
+                    col_num
+                } else {
+                    (col_num as i32 + fallback_col).max(1) as u32
+                };
+                let r = if row_abs {
+                    row_num
+                } else {
+                    (row_num as i32 + fallback_row).max(1) as u32
+                };
+                (c, r)
             };
 
-            // 重新输出
-            if col_abs {
-                result.push('$');
-            }
+            if col_abs { result.push('$'); }
             result.push_str(&col_to_letter(new_col));
-            if row_abs {
-                result.push('$');
-            }
+            if row_abs { result.push('$'); }
             result.push_str(&new_row.to_string());
 
             i = pos;
             continue;
         }
 
-        // 其他字符原样输出
         result.push(ch);
         i += 1;
     }

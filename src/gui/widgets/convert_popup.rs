@@ -872,6 +872,7 @@ fn deep_copy_cell(
     src_row: u32,
     tgt_col: u32,
     tgt_row: u32,
+    mapping: &std::collections::HashMap<(u32, u32), (u32, u32)>,
     col_offset: i32,
     row_offset: i32,
 ) {
@@ -885,12 +886,18 @@ fn deep_copy_cell(
     let tgt_cell = tgt_ws.cell_mut((tgt_col, tgt_row));
 
     if !cell_data.formula.is_empty() {
-        let adjusted =
-            crate::excel::formula::adjust_formula_by_offset(&cell_data.formula, col_offset, row_offset);
+        let adjusted = crate::excel::formula::adjust_formula_by_mapping(
+            &cell_data.formula,
+            mapping,
+            col_offset,
+            row_offset,
+        );
         tgt_cell.set_formula(adjusted.as_str());
-    }
-
-    if !cell_data.value.is_empty() {
+        // set_formula_result_default 不会清除公式（set_value 会调用 remove_formula）
+        if !cell_data.value.is_empty() {
+            tgt_cell.set_formula_result_default(cell_data.value.as_str());
+        }
+    } else if !cell_data.value.is_empty() {
         tgt_cell.set_value(cell_data.value.as_str());
     }
 
@@ -1185,7 +1192,16 @@ fn execute_convert(
     let out_ws = out_book.sheet_mut(0)
         .map_err(|e| format!("无法获取输出工作表: {}", e))?;
 
-    // 6. 处理每条规则的映射：从项目层 SheetData 读取（RGB 已解析），写入输出 Workbook
+    // 6. 构建源→目标全局映射表（用于公式引用自动调整）
+    let mut cell_mapping: std::collections::HashMap<(u32, u32), (u32, u32)> =
+        std::collections::HashMap::new();
+    for plan in &plans {
+        for (src, tgt) in &plan.mappings {
+            cell_mapping.insert((src.col, src.row), (tgt.cell.col, tgt.cell.row));
+        }
+    }
+
+    // 7. 处理每条规则的映射：从项目层 SheetData 读取（RGB 已解析），写入输出 Workbook
     let mut processed = 0usize;
 
     for plan in &plans {
@@ -1197,6 +1213,7 @@ fn execute_convert(
                 sheet, out_ws,
                 src.col, src.row,
                 tgt.cell.col, tgt.cell.row,
+                &cell_mapping,
                 col_offset, row_offset,
             );
 
@@ -1620,5 +1637,57 @@ N2:BW2->B14:-~;
         let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
         // 4 条普通 + 13 (BatchColumns) + 10 (BatchStepped) = 27
         assert_eq!(expanded.len(), 27);
+    }
+
+    #[test]
+    fn test_formula_mapping_cross_column_reference() {
+        // 模拟: (A:M)3:(A:M)12 -> (B(1:13):C(1:13)):-~;
+        // G3(7,3)→B7(2,7), E3(5,3)→B5(2,5)
+        // G3 公式 =E3-TODAY() 应变成 =B5-TODAY()
+        let mut mapping: std::collections::HashMap<(u32, u32), (u32, u32)> =
+            std::collections::HashMap::new();
+        // G3 → B7
+        mapping.insert((7, 3), (2, 7));
+        // E3 → B5
+        mapping.insert((5, 3), (2, 5));
+
+        let adjusted = crate::excel::formula::adjust_formula_by_mapping(
+            "=E3-TODAY()",
+            &mapping,
+            -5,  // fallback: G3→B7 col offset
+            4,   // fallback: G3→B7 row offset
+        );
+        assert_eq!(adjusted, "=B5-TODAY()");
+    }
+
+    #[test]
+    fn test_formula_mapping_fallback_for_unmapped_ref() {
+        // 引用不在映射表中 → 使用 fallback 偏移
+        let mapping: std::collections::HashMap<(u32, u32), (u32, u32)> =
+            std::collections::HashMap::new();
+        let adjusted = crate::excel::formula::adjust_formula_by_mapping(
+            "=E3*2",
+            &mapping,
+            -5,
+            4,
+        );
+        // E3: col=5+(-5)=0→A(1), row=3+4=7 → A7
+        assert_eq!(adjusted, "=A7*2");
+    }
+
+    #[test]
+    fn test_formula_mapping_absolute_ref_preserved() {
+        // $E$3 在映射表中 → 保持绝对引用不变
+        let mut mapping: std::collections::HashMap<(u32, u32), (u32, u32)> =
+            std::collections::HashMap::new();
+        mapping.insert((5, 3), (2, 5));
+        let adjusted = crate::excel::formula::adjust_formula_by_mapping(
+            "=$E$3",
+            &mapping,
+            0,
+            0,
+        );
+        // $E$3: 两者都绝对，即使有映射也不变
+        assert_eq!(adjusted, "=$E$3");
     }
 }
