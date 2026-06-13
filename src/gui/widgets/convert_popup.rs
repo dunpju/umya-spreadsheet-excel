@@ -1181,8 +1181,9 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
             SourceRange::BatchColumns { col_start, col_end, row_start, row_end },
             TargetPosition::BatchTarget { value_col, merge_col, row_start: tgt_row_start, row_end: _tgt_row_end },
         ) => {
-            let _merge_width = merge_col - value_col + 1;
-            let mut expanded = Vec::new();
+            let merge_width = merge_col - value_col + 1;
+            let num_cols = (*col_end - *col_start + 1) as usize;
+            let mut expanded = Vec::with_capacity(num_cols);
 
             for (i, col) in (*col_start..=*col_end).enumerate() {
                 let src_start = CellRef::new(col, *row_start);
@@ -1193,12 +1194,28 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
                     tgt_row, *merge_col,
                 );
 
+                // 自定义公式按 merge_width 步长向右扩充列引用
+                let col_shift = i as i32 * merge_width as i32;
+                let expanded_formulas: Vec<CustomFormula> = rule
+                    .custom_formulas
+                    .iter()
+                    .map(|cf| {
+                        let shifted = shift_formula_columns(&cf.raw_text, col_shift);
+                        // 目标单元格列也右移
+                        let new_tgt_col = (cf.target_cell.col as i32 + col_shift).max(1) as u32;
+                        CustomFormula {
+                            target_cell: CellRef::new(new_tgt_col, cf.target_cell.row),
+                            raw_text: shifted,
+                        }
+                    })
+                    .collect();
+
                 expanded.push(ParsedRule {
                     source_range: SourceRange::Continuous { start: src_start, end: src_end },
                     target_start: TargetPosition::Merged(tgt_range),
                     direction: rule.direction,
                     line: rule.line,
-                    custom_formulas: if i == 0 { rule.custom_formulas.clone() } else { vec![] },
+                    custom_formulas: expanded_formulas,
                 });
             }
             expanded
@@ -1234,6 +1251,100 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
         }
         _ => vec![rule.clone()],
     }
+}
+
+/// 将公式中所有列引用向右平移 col_shift 列。
+/// 支持 `~` 行占位符（如 `B~`），保持绝对引用 `$` 不变。
+///
+/// 例：`SUM(B15:B~)` + col_shift=2 → `SUM(D15:D~)`
+fn shift_formula_columns(formula: &str, col_shift: i32) -> String {
+    if formula.is_empty() || col_shift == 0 {
+        return formula.to_string();
+    }
+    let chars: Vec<char> = formula.chars().collect();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // 字符串字面量：原样输出
+        if ch == '"' {
+            result.push(ch);
+            i += 1;
+            while i < chars.len() {
+                result.push(chars[i]);
+                if chars[i] == '"' { i += 1; break; }
+                i += 1;
+            }
+            continue;
+        }
+
+        // 尝试匹配单元格/范围引用：[$]?[A-Za-z]+[$]?[~0-9]+
+        if ch == '$' || ch.is_ascii_alphabetic() {
+            let start = i;
+            let mut pos = i;
+            let mut col_abs = false;
+            let mut col_letters = String::new();
+            let mut row_abs = false;
+            let mut row_text = String::new();
+
+            if pos < chars.len() && chars[pos] == '$' {
+                col_abs = true;
+                pos += 1;
+            }
+
+            let col_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
+                col_letters.push(chars[pos].to_ascii_uppercase());
+                pos += 1;
+            }
+            if pos == col_start || col_letters.is_empty() {
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+
+            if pos < chars.len() && chars[pos] == '$' {
+                row_abs = true;
+                pos += 1;
+            }
+
+            // 行部分：数字 或 ~ 占位符
+            let row_start = pos;
+            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '~') {
+                row_text.push(chars[pos]);
+                pos += 1;
+            }
+            if pos == row_start || row_text.is_empty() {
+                for c in &chars[start..pos] { result.push(*c); }
+                i = pos;
+                continue;
+            }
+
+            // 解析列号并偏移
+            let col_num = match letter_to_col(&col_letters) {
+                Ok(c) => c,
+                Err(_) => {
+                    for c in &chars[start..pos] { result.push(*c); }
+                    i = pos;
+                    continue;
+                }
+            };
+            let new_col = (col_num as i32 + col_shift).max(1) as u32;
+
+            if col_abs { result.push('$'); }
+            result.push_str(&col_to_letter(new_col));
+            if row_abs { result.push('$'); }
+            result.push_str(&row_text);
+            i = pos;
+            continue;
+        }
+
+        result.push(ch);
+        i += 1;
+    }
+    result
 }
 
 // ============================================================================
@@ -1858,5 +1969,72 @@ N2:BW2->B14:-~;
         let rules = parse_rules(text).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].custom_formulas[0].raw_text, "SUM(B15:B~)+AVERAGE(D15:D~)");
+    }
+
+    // ---- 公式列偏移测试 ----
+
+    #[test]
+    fn test_shift_formula_columns_basic() {
+        assert_eq!(shift_formula_columns("SUM(B15:B~)", 2), "SUM(D15:D~)");
+        assert_eq!(shift_formula_columns("B12=SUM(B15:B~)", 2), "D12=SUM(D15:D~)");
+    }
+
+    #[test]
+    fn test_shift_formula_columns_absolute() {
+        assert_eq!(
+            shift_formula_columns("SUM($C$15:$C$~)", 2),
+            "SUM($E$15:$E$~)"
+        );
+    }
+
+    #[test]
+    fn test_shift_formula_columns_zero() {
+        assert_eq!(shift_formula_columns("SUM(B15:B~)", 0), "SUM(B15:B~)");
+    }
+
+    #[test]
+    fn test_batch_rule_expands_custom_formulas() {
+        // 批量规则 + 自定义公式 → 每条展开规则获得列偏移后的公式
+        let text = "(A:C)3:(A:C)12->(B(1:3):C(1:3)),formula(B12=SUM(B15:B~),B13=SUM($C$15:$C$~)):-~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        // A,B,C = 3 列 → 3 条展开规则
+        assert_eq!(expanded.len(), 3);
+
+        // 第 1 条 (A, col_shift=0): 原公式不变
+        let r0 = &expanded[0];
+        assert_eq!(r0.custom_formulas.len(), 2);
+        assert_eq!(r0.custom_formulas[0].target_cell.col, 2); // B
+        assert_eq!(r0.custom_formulas[0].raw_text, "SUM(B15:B~)");
+        assert_eq!(r0.custom_formulas[1].raw_text, "SUM($C$15:$C$~)");
+
+        // 第 2 条 (B, col_shift=2): 列向右跳 2 列 (B→D, C→E)
+        let r1 = &expanded[1];
+        assert_eq!(r1.custom_formulas[0].target_cell.col, 4); // D
+        assert_eq!(r1.custom_formulas[0].raw_text, "SUM(D15:D~)");
+        assert_eq!(r1.custom_formulas[1].raw_text, "SUM($E$15:$E$~)");
+
+        // 第 3 条 (C, col_shift=4): 列向右跳 4 列 (B→F, C→G)
+        let r2 = &expanded[2];
+        assert_eq!(r2.custom_formulas[0].target_cell.col, 6); // F
+        assert_eq!(r2.custom_formulas[0].raw_text, "SUM(F15:F~)");
+        assert_eq!(r2.custom_formulas[1].raw_text, "SUM($G$15:$G$~)");
+    }
+
+    #[test]
+    fn test_batch_rule_with_13_cols_formula_expansion() {
+        // 完整 13 列场景
+        let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)),formula(B12=SUM(B15:B~),B13=SUM($C$15:$C$~)):-~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        assert_eq!(expanded.len(), 13);
+
+        // 第 13 条 (M, col_shift=24): B+24=26=Z, C+24=27=AA → 等下，B+24=2+24=26=Z, C+24=27=AA
+        // B(14行公式) → Z, D→AB
+        let last = &expanded[12];
+        assert_eq!(last.custom_formulas[0].target_cell.col, 26); // Z
+        // 公式中的 B→Z
+        assert!(last.custom_formulas[0].raw_text.contains("SUM(Z15:Z~)"),
+            "Expected Z in formula, got: {}", last.custom_formulas[0].raw_text);
     }
 }
