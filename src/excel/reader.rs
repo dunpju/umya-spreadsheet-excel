@@ -1256,13 +1256,13 @@ impl ExcelData {
                                 let style = worksheet.style((col_idx, row_idx));
 
                                 let cache_key: SK = (
-                                    style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
-                                    style.background_color().map(|c| c.argb_str()),
+                                    style.font().map(|f| (f.size().to_bits(), f.color().argb_with_theme(theme).into_owned(), f.font_bold().val())),
+                                    style.background_color().map(|c| c.argb_with_theme(theme).into_owned()),
                                     style.borders().map(|b| (
-                                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
-                                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
-                                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
-                                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
+                                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_with_theme(theme).into_owned()),
                                     )),
                                     style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
                                     style.number_format().map(|n| n.format_code().to_string()),
@@ -1319,13 +1319,13 @@ impl ExcelData {
                     let style = worksheet.style((col_idx, row_idx));
 
                     let cache_key: StyleKey = (
-                        style.font().map(|f| (f.size().to_bits(), f.color().argb_str(), f.font_bold().val())),
-                        style.background_color().map(|c| c.argb_str()),
+                        style.font().map(|f| (f.size().to_bits(), f.color().argb_with_theme(theme).into_owned(), f.font_bold().val())),
+                        style.background_color().map(|c| c.argb_with_theme(theme).into_owned()),
                         style.borders().map(|b| (
-                            b.left().border_style().to_string(), b.left().color().map(|c| c.argb_str()),
-                            b.right().border_style().to_string(), b.right().color().map(|c| c.argb_str()),
-                            b.top().border_style().to_string(), b.top().color().map(|c| c.argb_str()),
-                            b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_str()),
+                            b.left().border_style().to_string(), b.left().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                            b.right().border_style().to_string(), b.right().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                            b.top().border_style().to_string(), b.top().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                            b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_with_theme(theme).into_owned()),
                         )),
                         style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
                         style.number_format().map(|n| n.format_code().to_string()),
@@ -1623,27 +1623,41 @@ impl ExcelData {
     /// # 返回值
     /// 成功返回 RGB 元组 (r, g, b)，失败返回 Err(())
     fn parse_hex_color(hex_str: &str) -> Result<(u8, u8, u8), ()> {
-        // 移除可能的 # 前缀
         let hex_str = hex_str.trim_start_matches('#');
-        
-        match hex_str.len() {
-            // 6位 RGB 格式：RRGGBB
-            6 => {
-                let r = u8::from_str_radix(&hex_str[0..2], 16).map_err(|_| ())?;
-                let g = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
-                let b = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
-                Ok((r, g, b))
+
+        // 将 hex 字符串解析为 u32 数值，再提取 RGB 分量（容错 calc_tint 溢出）
+        let parse_rgb = |s: &str| -> (u8, u8, u8) {
+            // 取有效 hex 字符，截断到 8 位（处理非标准长度）
+            let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            // 取末尾部分（6 位 RRGGBB 或 8 位 AARRGGBB）
+            let val_str = if clean.len() >= 8 {
+                &clean[clean.len() - 8..]
+            } else if clean.len() >= 6 {
+                &clean[clean.len() - 6..]
+            } else {
+                &format!("{:0>6}", clean)
+            };
+
+            let val = u32::from_str_radix(val_str, 16).unwrap_or(0);
+            if val_str.len() >= 8 {
+                // AARRGGBB
+                (
+                    ((val >> 16) & 0xFF).min(255) as u8,
+                    ((val >> 8) & 0xFF).min(255) as u8,
+                    (val & 0xFF).min(255) as u8,
+                )
+            } else {
+                // RRGGBB
+                (
+                    ((val >> 16) & 0xFF).min(255) as u8,
+                    ((val >> 8) & 0xFF).min(255) as u8,
+                    (val & 0xFF).min(255) as u8,
+                )
             }
-            // 8位 ARGB 格式：AARRGGBB，忽略 alpha 通道
-            8 => {
-                let r = u8::from_str_radix(&hex_str[2..4], 16).map_err(|_| ())?;
-                let g = u8::from_str_radix(&hex_str[4..6], 16).map_err(|_| ())?;
-                let b = u8::from_str_radix(&hex_str[6..8], 16).map_err(|_| ())?;
-                Ok((r, g, b))
-            }
-            // 不支持的格式
-            _ => Err(()),
-        }
+        };
+
+        let (r, g, b) = parse_rgb(hex_str);
+        Ok((r, g, b))
     }
 
     /// 检测数字格式代码是否为日期格式
