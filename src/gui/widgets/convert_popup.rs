@@ -123,6 +123,15 @@ enum Direction {
     Horizontal,
 }
 
+/// 自定义公式定义
+#[derive(Debug, Clone)]
+struct CustomFormula {
+    /// 目标单元格（如 B12）
+    target_cell: CellRef,
+    /// 公式文本（~ 为动态行尾占位符，如 SUM(B15:B~)）
+    raw_text: String,
+}
+
 /// 解析后的单条规则
 #[derive(Debug, Clone)]
 struct ParsedRule {
@@ -130,6 +139,8 @@ struct ParsedRule {
     target_start: TargetPosition,
     direction: Direction,
     line: usize,
+    /// 可选的自定义公式列表
+    custom_formulas: Vec<CustomFormula>,
 }
 
 /// 目标位置项（含合并信息）
@@ -615,6 +626,9 @@ impl RuleScanner {
 
         let target_start = self.parse_target_start()?;
 
+        // 可选的 ,formula(cell1=expr1,cell2=expr2,...)
+        let custom_formulas = self.parse_optional_custom_formulas()?;
+
         self.expect_char(':')?;
         let direction = self.parse_direction()?;
 
@@ -626,7 +640,106 @@ impl RuleScanner {
             target_start,
             direction,
             line,
+            custom_formulas,
         })
+    }
+
+    /// 解析可选的 ,formula(T1=f1,T2=f2,...) 部分
+    fn parse_optional_custom_formulas(&mut self) -> Result<Vec<CustomFormula>, String> {
+        self.skip_ws();
+        let saved = (self.pos, self.line);
+
+        // 检测 ",formula(" 前缀
+        if self.peek() != Some(',') {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        self.skip_ws();
+
+        // 尝试匹配 "formula"
+        let mut label = String::new();
+        let _label_saved = (self.pos, self.line);
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphabetic() {
+                label.push(ch.to_ascii_lowercase());
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        if label != "formula" {
+            // 不是 formula，回退整个 ,
+            self.pos = saved.0;
+            self.line = saved.1;
+            return Ok(Vec::new());
+        }
+
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            self.pos = saved.0;
+            self.line = saved.1;
+            return Ok(Vec::new());
+        }
+        self.expect_char('(')?;
+
+        let mut formulas = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek() == Some(')') {
+                self.advance();
+                break;
+            }
+            // 解析 T1=expr1
+            let cell_saved = (self.pos, self.line);
+            let target_cell = match self.parse_cell_ref() {
+                Ok(c) => c,
+                Err(_) => {
+                    self.pos = cell_saved.0;
+                    self.line = cell_saved.1;
+                    return Err(format!("第{}行: formula 中期望目标单元格引用", self.line));
+                }
+            };
+            self.skip_ws();
+            self.expect_char('=')?;
+            // 读取公式直到 ',' 或 ')'
+            let raw_text = self.parse_formula_expression()?;
+            formulas.push(CustomFormula { target_cell, raw_text });
+
+            self.skip_ws();
+            if self.peek() == Some(',') {
+                self.advance();
+            } else if self.peek() != Some(')') {
+                return Err(format!("第{}行: formula 中期望 ',' 或 ')'", self.line));
+            }
+        }
+        Ok(formulas)
+    }
+
+    /// 读取公式表达式（直到 ',' 或 ')'，忽略嵌套括号）
+    fn parse_formula_expression(&mut self) -> Result<String, String> {
+        let mut expr = String::new();
+        let mut depth = 0u32;
+        while let Some(ch) = self.peek() {
+            if ch == '(' {
+                depth += 1;
+                expr.push(ch);
+                self.advance();
+            } else if ch == ')' {
+                if depth == 0 { break; }
+                depth -= 1;
+                expr.push(ch);
+                self.advance();
+            } else if ch == ',' && depth == 0 {
+                break;
+            } else {
+                expr.push(ch);
+                self.advance();
+            }
+        }
+        if expr.is_empty() {
+            return Err(format!("第{}行: formula 表达式为空", self.line));
+        }
+        Ok(expr)
     }
 }
 
@@ -1085,6 +1198,7 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
                     target_start: TargetPosition::Merged(tgt_range),
                     direction: rule.direction,
                     line: rule.line,
+                    custom_formulas: if i == 0 { rule.custom_formulas.clone() } else { vec![] },
                 });
             }
             expanded
@@ -1113,6 +1227,7 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
                     target_start: TargetPosition::Simple(CellRef::new(tgt_col, tgt_row_start)),
                     direction: rule.direction,
                     line: rule.line,
+                    custom_formulas: if i == 0 { rule.custom_formulas.clone() } else { vec![] },
                 });
             }
             expanded
@@ -1136,10 +1251,12 @@ fn execute_convert(
     let rules = parse_rules(&state.text)?;
 
     // 1.5 展开批量规则 → 等价逐列规则
-    let rules: Vec<ParsedRule> = rules
+    let expanded_rules_list: Vec<ParsedRule> = rules
         .iter()
         .flat_map(|r| expand_batch_rule(r))
         .collect();
+
+    // 后续使用 expanded_rules_list
 
     // 2. 获取当前工作表
     let sheet = excel_data
@@ -1154,7 +1271,7 @@ fn execute_convert(
     let mut plans: Vec<RulePlan> = Vec::new();
     let mut total_items = 0usize;
 
-    for rule in &rules {
+    for rule in &expanded_rules_list {
         let src_items = resolve_source_items(&rule.source_range, sheet)?;
         let targets = compute_targets(&src_items, &rule.target_start, rule.direction);
 
@@ -1236,7 +1353,17 @@ fn execute_convert(
         }
     }
 
-    // 8. 写入输出文件
+    // 8. 应用自定义公式：~ 替换为输出表最大行号
+    let max_row = out_ws.highest_row().max(1);
+    for rule in &expanded_rules_list {
+        for cf in &rule.custom_formulas {
+            let formula_text = cf.raw_text.replace('~', &max_row.to_string());
+            let cell = out_ws.cell_mut((cf.target_cell.col, cf.target_cell.row));
+            cell.set_formula(formula_text.as_str());
+        }
+    }
+
+    // 9. 写入输出文件
     umya_spreadsheet::writer::xlsx::write(&out_book, Path::new(&output_path))
         .map_err(|e| format!("写入文件失败: {}", e))?;
 
@@ -1689,5 +1816,47 @@ N2:BW2->B14:-~;
         );
         // $E$3: 两者都绝对，即使有映射也不变
         assert_eq!(adjusted, "=$E$3");
+    }
+
+    // ---- 自定义公式测试 ----
+
+    #[test]
+    fn test_parse_rule_with_custom_formula() {
+        let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)),formula(B12=SUM(B15:B~),B13=SUM($C$15:$C$~)):-~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        let r = &rules[0];
+        assert_eq!(r.custom_formulas.len(), 2);
+        assert_eq!(r.custom_formulas[0].target_cell.col, 2); // B
+        assert_eq!(r.custom_formulas[0].target_cell.row, 12);
+        assert_eq!(r.custom_formulas[0].raw_text, "SUM(B15:B~)");
+        assert_eq!(r.custom_formulas[1].target_cell.col, 2); // B
+        assert_eq!(r.custom_formulas[1].target_cell.row, 13);
+        assert_eq!(r.custom_formulas[1].raw_text, "SUM($C$15:$C$~)");
+    }
+
+    #[test]
+    fn test_parse_rule_without_custom_formula_still_works() {
+        // 不含 formula 的规则应正常解析
+        let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)):-~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].custom_formulas.is_empty());
+    }
+
+    #[test]
+    fn test_parse_simple_rule_with_custom_formula() {
+        let text = "A2:M2->A1:|~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].custom_formulas.is_empty());
+    }
+
+    #[test]
+    fn test_parse_custom_formula_with_nested_parens() {
+        let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)),formula(B12=SUM(B15:B~)+AVERAGE(D15:D~)):-~;";
+        let rules = parse_rules(text).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].custom_formulas[0].raw_text, "SUM(B15:B~)+AVERAGE(D15:D~)");
     }
 }
