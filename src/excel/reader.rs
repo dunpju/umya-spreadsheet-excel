@@ -288,6 +288,27 @@ pub struct SheetData {
     /// 合并单元格索引：映射每个被合并覆盖的单元格到 merged_cells 中的索引
     /// 用于 O(1) 查找替代原来的 O(n) 线性扫描
     pub merge_index: HashMap<(u32, u32), usize>,
+    /// 条件格式规则（来自原表的 conditional formatting → dxf）
+    pub conditional_rules: Vec<CondFormatRule>,
+}
+
+/// 条件格式规则（简化后存储，供加载后求值应用）
+#[derive(Debug, Clone)]
+pub struct CondFormatRule {
+    /// 适用的单元格范围
+    pub ranges: Vec<CellRange>,
+    /// 条件类型（"CellIs" / "Expression" 等）
+    pub rule_type: String,
+    /// 运算符（"greaterThan" / "lessThan" 等）
+    pub operator: String,
+    /// 公式文本（阈值等）
+    pub formula_text: String,
+    /// 应用样式时覆盖的背景色
+    pub bg_color: Option<(u8, u8, u8)>,
+    /// 应用样式时覆盖的字体色
+    pub font_color: Option<(u8, u8, u8)>,
+    /// 应用样式时覆盖的字体加粗
+    pub bold: bool,
 }
 
 impl SheetData {
@@ -308,6 +329,7 @@ impl SheetData {
             frozen_cols: 0,
             data_validations: Vec::new(),
             merge_index: HashMap::new(),
+            conditional_rules: Vec::new(),
         }
     }
 
@@ -1480,6 +1502,54 @@ impl ExcelData {
                 }
             }
 
+            // 读取条件格式规则（CellIs 类型）
+            for cf in worksheet.conditional_formatting_collection() {
+                let mut ranges = Vec::new();
+                for range in cf.sequence_of_references().range_collection() {
+                    let sc = range.coordinate_start_col().map(|c| c.num());
+                    let sr = range.coordinate_start_row().map(|r| r.num());
+                    let ec = range.coordinate_end_col().map(|c| c.num());
+                    let er = range.coordinate_end_row().map(|r| r.num());
+                    if let (Some(sc), Some(sr), Some(ec), Some(er)) = (sc, sr, ec, er) {
+                        ranges.push(CellRange::new(sr, sc, er, ec));
+                    }
+                }
+                for rule in cf.conditional_collection() {
+                    if let Some(style) = rule.style() {
+                        let rule_type = rule.get_type().clone();
+                        let op = rule.operator().clone();
+                        let formula_text = rule.formula()
+                            .map(|f| f.address_str())
+                            .unwrap_or_default();
+                        let mut bg = None;
+                        let mut fc = None;
+                        let mut b = false;
+                        if let Some(bg_color) = style.background_color() {
+                            let resolved = bg_color.argb_with_theme(theme);
+                            if let Ok(rgb) = Self::parse_hex_color(&resolved) {
+                                bg = Some(rgb);
+                            }
+                        }
+                        if let Some(font) = style.font() {
+                            let resolved = font.color().argb_with_theme(theme);
+                            if let Ok(rgb) = Self::parse_hex_color(&resolved) {
+                                fc = Some(rgb);
+                            }
+                            b = font.bold();
+                        }
+                        sheet.conditional_rules.push(CondFormatRule {
+                            ranges: ranges.clone(),
+                            rule_type: format!("{:?}", rule_type),
+                            operator: format!("{:?}", op),
+                            formula_text,
+                            bg_color: bg,
+                            font_color: fc,
+                            bold: b,
+                        });
+                    }
+                }
+            }
+
             // 将工作表添加到列表中
             sheets.push(sheet);
         }
@@ -1493,6 +1563,7 @@ impl ExcelData {
         for sheet in &mut sheets {
             sheet.rebuild_merge_index();
             crate::excel::formula::evaluate_sheet(sheet);
+            Self::apply_conditional_formatting(sheet);
         }
 
         Ok(Self { sheets })
@@ -1658,6 +1729,70 @@ impl ExcelData {
 
         let (r, g, b) = parse_rgb(hex_str);
         Ok((r, g, b))
+    }
+
+    /// 对已加载的 SheetData 应用条件格式规则。
+    /// 目前支持 CellIs 类型，将匹配的 dxf 样式覆盖到对应单元格上。
+    fn apply_conditional_formatting(sheet: &mut SheetData) {
+        for rule in &sheet.conditional_rules {
+            for range in &rule.ranges {
+                for row in range.start_row..=range.end_row {
+                    for col in range.start_col..=range.end_col {
+                        let cell_value = sheet
+                            .get_cell(row, col)
+                            .map(|c| c.value.clone())
+                            .unwrap_or_default();
+
+                        let matches = if rule.operator.contains("GreaterThan") {
+                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
+                            cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold)
+                        } else if rule.operator.contains("GreaterThanOrEqual") {
+                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
+                            cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold)
+                        } else if rule.operator.contains("LessThan") {
+                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
+                            cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold)
+                        } else if rule.operator.contains("LessThanOrEqual") {
+                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
+                            cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold)
+                        } else if rule.operator.contains("Equal") {
+                            let threshold = &rule.formula_text;
+                            cell_value == *threshold
+                        } else if rule.operator.contains("NotEqual") {
+                            let threshold = &rule.formula_text;
+                            cell_value != *threshold
+                        } else if rule.operator.contains("Between") {
+                            // formula 格式: "formula1,formula2"
+                            let parts: Vec<&str> = rule.formula_text.split(',').collect();
+                            if parts.len() >= 2 {
+                                let lo: f64 = parts[0].trim().parse().unwrap_or(f64::MIN);
+                                let hi: f64 = parts[1].trim().parse().unwrap_or(f64::MAX);
+                                cell_value.parse::<f64>().ok().map_or(false, |v| v >= lo && v <= hi)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if matches {
+                            // 将条件格式样式覆盖到单元格
+                            if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                                if let Some(bg) = rule.bg_color {
+                                    cell.background_color = Some(bg);
+                                }
+                                if let Some(fc) = rule.font_color {
+                                    cell.font_color = Some(fc);
+                                }
+                                if rule.bold {
+                                    cell.bold = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 检测数字格式代码是否为日期格式
