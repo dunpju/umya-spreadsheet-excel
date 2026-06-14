@@ -10,6 +10,7 @@ pub mod names_box;
 pub mod search;
 pub mod cond_format_popup;
 pub mod convert_popup;
+pub mod help_popup;
 
 pub use menu_bar::*;
 pub use dialogs::*;
@@ -19,3 +20,4 @@ pub use names_box::*;
 pub use search::*;
 pub use cond_format_popup::*;
 pub use convert_popup::*;
+pub use help_popup::*;

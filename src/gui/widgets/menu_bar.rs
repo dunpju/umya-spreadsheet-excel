@@ -7,6 +7,7 @@ use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 use crate::gui::widgets::search::SearchWindowState;
 use crate::gui::widgets::convert_popup::ConvertPopupState;
 use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
+use crate::gui::widgets::help_popup::HelpPopupState;
 
 /// 绘制菜单栏
 ///
@@ -27,6 +28,7 @@ pub fn draw_menu_bar(
     has_data: bool,
     convert_popup: &mut ConvertPopupState,
     cond_format_popup: &mut CondFormatPopupState,
+    help_popup: &mut HelpPopupState,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
@@ -95,6 +97,11 @@ pub fn draw_menu_bar(
         ui.menu_button("关于", |ui| {
             ui.label("Excel Viewer v0.1.0");
             ui.label("使用 umya-spreadsheet 和 egui 构建");
+            ui.separator();
+            if ui.button("帮助").clicked() {
+                ui.close();
+                help_popup.visible = true;
+            }
         });
     });
 }
