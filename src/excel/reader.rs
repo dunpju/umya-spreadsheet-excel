@@ -1761,6 +1761,26 @@ impl ExcelData {
 
     /// 对已加载的 SheetData 应用条件格式规则。
     /// 目前支持 CellIs 类型，将匹配的 dxf 样式覆盖到对应单元格上。
+    /// 公开入口：每帧重新求值文件自带的条件格式
+    pub fn reapply_conditional_formatting(sheet: &mut SheetData) {
+        // 先清除所有已匹配单元格的条件样式（恢复为 None）
+        for rule in &sheet.conditional_rules {
+            for range in &rule.ranges {
+                for row in range.start_row..=range.end_row {
+                    for col in range.start_col..=range.end_col {
+                        if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                            cell.background_color = None;
+                            cell.font_color = None;
+                            cell.bold = false;
+                        }
+                    }
+                }
+            }
+        }
+        // 重新求值应用
+        Self::apply_conditional_formatting(sheet);
+    }
+
     fn apply_conditional_formatting(sheet: &mut SheetData) {
         for rule in &sheet.conditional_rules {
             for range in &rule.ranges {
