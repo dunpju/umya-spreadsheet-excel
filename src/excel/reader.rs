@@ -96,6 +96,8 @@ pub struct CellData {
     pub alignment: CellAlignment,
     /// 背景颜色（RGB）
     pub background_color: Option<(u8, u8, u8)>,
+    /// 原始背景颜色（条件格式应用前，用于恢复）
+    pub original_bg: Option<(u8, u8, u8)>,
     /// 字体大小（磅）
     pub font_size: Option<f64>,
     /// 字体颜色（RGB）
@@ -117,6 +119,7 @@ impl Default for CellData {
             formula: String::new(),
             alignment: CellAlignment::default(),
             background_color: None,
+            original_bg: None,
             font_size: None,
             font_color: None,
             number_format: None,
@@ -563,6 +566,7 @@ impl SheetData {
                     formula: String::new(),
                     alignment: template.alignment.clone(),
                     background_color: template.background_color,
+                    original_bg: template.original_bg,
                     font_size: template.font_size,
                     font_color: template.font_color,
                     number_format: template.number_format.clone(),
@@ -746,6 +750,7 @@ impl SheetData {
                     formula: String::new(),
                     alignment: template.alignment.clone(),
                     background_color: template.background_color,
+                    original_bg: template.original_bg,
                     font_size: template.font_size,
                     font_color: template.font_color,
                     number_format: template.number_format.clone(),
@@ -1033,6 +1038,11 @@ impl SheetData {
                         } else {
                             None
                         },
+                        original_bg: if options.copy_style {
+                            source_cell.original_bg
+                        } else {
+                            None
+                        },
                         font_size: if options.copy_style {
                             source_cell.font_size
                         } else {
@@ -1089,6 +1099,7 @@ impl SheetData {
                                 formula: String::new(),
                                 alignment: template.alignment.clone(),
                                 background_color: template.background_color,
+                                original_bg: template.original_bg,
                                 font_size: template.font_size,
                                 font_color: template.font_color,
                                 number_format: template.number_format.clone(),
@@ -1327,6 +1338,7 @@ impl ExcelData {
                                     formula: cell.formula().to_string(),
                                     alignment,
                                     background_color,
+                                    original_bg: background_color,
                                     font_size,
                                     font_color,
                                     number_format,
@@ -1390,6 +1402,7 @@ impl ExcelData {
                         formula: cell.formula().to_string(),
                         alignment,
                         background_color,
+                        original_bg: background_color,
                         font_size,
                         font_color,
                         number_format,
@@ -1763,13 +1776,13 @@ impl ExcelData {
     /// 目前支持 CellIs 类型，将匹配的 dxf 样式覆盖到对应单元格上。
     /// 公开入口：每帧重新求值文件自带的条件格式
     pub fn reapply_conditional_formatting(sheet: &mut SheetData) {
-        // 先清除所有已匹配单元格的条件样式（恢复为 None）
+        // 恢复所有曾被条件格式覆盖的单元格的原始背景色
         for rule in &sheet.conditional_rules {
             for range in &rule.ranges {
                 for row in range.start_row..=range.end_row {
                     for col in range.start_col..=range.end_col {
                         if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                            cell.background_color = None;
+                            cell.background_color = cell.original_bg;
                             cell.font_color = None;
                             cell.bold = false;
                         }
