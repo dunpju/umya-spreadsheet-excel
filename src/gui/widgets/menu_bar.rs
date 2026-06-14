@@ -37,7 +37,6 @@ pub fn draw_menu_bar(
                 ui.close();
                 *show_import_dialog = true;
             }
-            ui.add_enabled(false, egui::Button::new("模板"));
         });
 
         // 编辑菜单
@@ -95,7 +94,7 @@ pub fn draw_menu_bar(
 
         // 关于菜单
         ui.menu_button("关于", |ui| {
-            ui.label("Excel Viewer v0.1.0");
+            ui.label("My Excel v0.1.0");
             ui.label("使用 umya-spreadsheet 和 egui 构建");
             ui.separator();
             if ui.button("帮助").clicked() {

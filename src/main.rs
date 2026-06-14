@@ -130,7 +130,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Excel Viewer",
+        "My Excel",
         options,
         Box::new(|_cc| Ok(Box::new(ExcelViewer::new()))),
     )
