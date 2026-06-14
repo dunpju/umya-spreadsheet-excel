@@ -1816,6 +1816,36 @@ impl ExcelData {
         }
     }
 
+    /// 解析动态范围引用：~行号 → 该行最大列，列字母~ → 该列最大行
+    fn resolve_dynamic_range(range_str: &str, sheet: &SheetData) -> String {
+        if !range_str.contains('~') {
+            return range_str.to_string();
+        }
+        let parts: Vec<&str> = range_str.split(':').collect();
+        let resolve_part = |s: &str| -> String {
+            let s = s.trim();
+            if s == "~" {
+                // 纯 ~ → 最右下角
+                format!("{}{}", col_to_letter(sheet.max_col.max(1)), sheet.max_row.max(1))
+            } else if s.starts_with('~') {
+                // ~行号 → 该行最大列
+                let row: u32 = s[1..].parse().unwrap_or(1);
+                format!("{}{}", col_to_letter(sheet.max_col.max(1)), row)
+            } else if s.ends_with('~') {
+                // 列字母~ → 该列最大行
+                let col_letters: String = s.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+                format!("{}{}", col_letters, sheet.max_row.max(1))
+            } else {
+                s.to_string()
+            }
+        };
+        if parts.len() == 2 {
+            format!("{}:{}", resolve_part(parts[0]), resolve_part(parts[1]))
+        } else {
+            resolve_part(range_str)
+        }
+    }
+
     /// 相等比较：优先数值，回退字符串
     fn compare_equal(cell_value: &str, threshold: &str) -> bool {
         if let (Some(cv), Some(tv)) = (cell_value.parse::<f64>().ok(), threshold.parse::<f64>().ok()) {
@@ -1832,7 +1862,10 @@ impl ExcelData {
             let bg = Self::parse_hex_color(rule.color.trim_start_matches('#')).ok();
 
             // 解析范围: =$G$3:$G$154 → G3:G154
+            // 支持动态引用: ~7(行尾列), B~(列尾行)
             let range_str = rule.range.trim_start_matches('=').replace('$', "");
+            let range_str = Self::resolve_dynamic_range(&range_str, sheet);
+
             let parts: Vec<&str> = range_str.split(':').collect();
 
             let (start_col, start_row, end_col, end_row) = if parts.len() == 2 {

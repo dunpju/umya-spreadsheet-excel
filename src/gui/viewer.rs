@@ -743,11 +743,10 @@ impl eframe::App for ExcelViewer {
         // 绘制条件格式弹窗
         draw_cond_format_popup(&ctx, &mut self.cond_format_popup);
 
-        // 条件格式规则变更后重新应用到已加载数据
-        if self.cond_format_popup.needs_reapply {
-            self.cond_format_popup.needs_reapply = false;
-            let user_rules = self.cond_format_popup.rules.clone();
+        // 每帧应用用户条件格式（确保单元格值变更后自动更新填充色）
+        if !self.cond_format_popup.rules.is_empty() {
             if let Some(ref mut excel) = self.excel_data {
+                let user_rules = self.cond_format_popup.rules.clone();
                 for sheet in &mut excel.sheets {
                     ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
                 }
