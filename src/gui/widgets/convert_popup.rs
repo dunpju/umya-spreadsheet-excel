@@ -1474,6 +1474,61 @@ fn execute_convert(
         }
     }
 
+    // 8.5 迁移条件格式规则（映射源 sqref → 目标 sqref）
+    if let Ok(src_book) = umya_spreadsheet::reader::xlsx::read(Path::new(file_path)) {
+        if let Some(src_ws) = src_book.sheet_collection().get(current_sheet) {
+            for cf in src_ws.conditional_formatting_collection() {
+                let mut mapped_seq = umya_spreadsheet::structs::SequenceOfReferences::default();
+                let mut mapped_sqref_parts = Vec::new();
+
+                for range in cf.sequence_of_references().range_collection() {
+                    if let (Some(sc), Some(sr), Some(ec), Some(er)) = (
+                        range.coordinate_start_col().map(|c| c.num()),
+                        range.coordinate_start_row().map(|r| r.num()),
+                        range.coordinate_end_col().map(|c| c.num()),
+                        range.coordinate_end_row().map(|r| r.num()),
+                    ) {
+                        // 找到源范围内所有有映射的单元格的目标位置
+                        let mut tgt_cols: Vec<u32> = Vec::new();
+                        let mut tgt_rows: Vec<u32> = Vec::new();
+                        for r in sr..=er {
+                            for c in sc..=ec {
+                                if let Some(&(tc, tr)) = cell_mapping.get(&(c, r)) {
+                                    tgt_cols.push(tc);
+                                    tgt_rows.push(tr);
+                                }
+                            }
+                        }
+                        if !tgt_cols.is_empty() && !tgt_rows.is_empty() {
+                            tgt_cols.sort();
+                            tgt_rows.sort();
+                            let part = format!(
+                                "{}{}:{}{}",
+                                col_to_letter(tgt_cols[0]),
+                                tgt_rows[0],
+                                col_to_letter(*tgt_cols.last().unwrap()),
+                                *tgt_rows.last().unwrap(),
+                            );
+                            mapped_sqref_parts.push(part);
+                        }
+                    }
+                }
+                if !mapped_sqref_parts.is_empty() {
+                    let new_sqref = mapped_sqref_parts.join(" ");
+                    mapped_seq.set_sqref(&new_sqref);
+
+                    // 创建新的 ConditionalFormatting 并添加到输出
+                    let mut new_cf = umya_spreadsheet::structs::ConditionalFormatting::default();
+                    new_cf.set_sequence_of_references(mapped_seq);
+                    for rule in cf.conditional_collection() {
+                        new_cf.add_conditional_collection(rule.clone());
+                    }
+                    out_ws.add_conditional_formatting_collection(new_cf);
+                }
+            }
+        }
+    }
+
     // 9. 写入输出文件
     umya_spreadsheet::writer::xlsx::write(&out_book, Path::new(&output_path))
         .map_err(|e| format!("写入文件失败: {}", e))?;
