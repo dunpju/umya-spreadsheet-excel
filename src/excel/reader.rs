@@ -292,12 +292,33 @@ pub struct SheetData {
     pub conditional_rules: Vec<CondFormatRule>,
 }
 
+/// 用户自定义的条件格式规则（YAML 持久化）
+#[derive(Debug, Clone)]
+pub struct UserCondFormatRule {
+    pub operator: String,   // ">", "<", "=", ">=", "<=", "!="
+    pub value: String,      // 阈值 "60"
+    pub color: String,      // 填充色 "#FFC7CE"
+    pub range: String,      // "=G3:G154"
+}
+
+impl Default for UserCondFormatRule {
+    fn default() -> Self {
+        Self {
+            operator: "<=".to_string(),
+            value: "60".to_string(),
+            color: "#FFC7CE".to_string(),
+            range: "=G3:G154".to_string(),
+        }
+    }
+}
+
 /// 条件格式规则（简化后存储，供加载后求值应用）
 #[derive(Debug, Clone)]
 pub struct CondFormatRule {
     /// 适用的单元格范围
     pub ranges: Vec<CellRange>,
     /// 条件类型（"CellIs" / "Expression" 等）
+    #[allow(dead_code)]
     pub rule_type: String,
     /// 运算符（"greaterThan" / "lessThan" 等）
     pub operator: String,
@@ -1795,6 +1816,86 @@ impl ExcelData {
         }
     }
 
+    /// 相等比较：优先数值，回退字符串
+    fn compare_equal(cell_value: &str, threshold: &str) -> bool {
+        if let (Some(cv), Some(tv)) = (cell_value.parse::<f64>().ok(), threshold.parse::<f64>().ok()) {
+            (cv - tv).abs() < f64::EPSILON
+        } else {
+            cell_value.trim().to_lowercase() == threshold.trim().to_lowercase()
+        }
+    }
+
+    /// 应用用户自定义的条件格式规则（来自 YAML 配置），到已加载的 SheetData。
+    pub fn apply_user_cond_format_rules(sheet: &mut SheetData, user_rules: &[UserCondFormatRule]) {
+        for rule in user_rules {
+            // 解析 HEX 颜色
+            let bg = Self::parse_hex_color(rule.color.trim_start_matches('#')).ok();
+
+            // 解析范围: =$G$3:$G$154 → G3:G154
+            let range_str = rule.range.trim_start_matches('=').replace('$', "");
+            let parts: Vec<&str> = range_str.split(':').collect();
+
+            let (start_col, start_row, end_col, end_row) = if parts.len() == 2 {
+                let start = Self::parse_cell_ref_str(parts[0]);
+                let end = Self::parse_cell_ref_str(parts[1]);
+                match (start, end) {
+                    (Ok((sc, sr)), Ok((ec, er))) => (sc, sr, ec, er),
+                    _ => continue,
+                }
+            } else if parts.len() == 1 {
+                // 单个单元格
+                match Self::parse_cell_ref_str(parts[0]) {
+                    Ok((c, r)) => (c, r, c, r),
+                    Err(_) => continue,
+                }
+            } else {
+                continue;
+            };
+
+            // 求值并应用
+            for row in start_row..=end_row {
+                for col in start_col..=end_col {
+                    let cell_value = sheet
+                        .get_cell(row, col)
+                        .map(|c| c.value.clone())
+                        .unwrap_or_default();
+                    let threshold_val: f64 = rule.value.parse().unwrap_or(0.0);
+
+                    let matches = match rule.operator.as_str() {
+                        ">" => cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold_val),
+                        "<" => cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold_val),
+                        "=" => Self::compare_equal(&cell_value, &rule.value),
+                        ">=" => cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold_val),
+                        "<=" => cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold_val),
+                        "!=" => !Self::compare_equal(&cell_value, &rule.value),
+                        _ => false,
+                    };
+
+                    if matches {
+                        if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                            if let Some(bg) = bg {
+                                cell.background_color = Some(bg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 解析单元格引用字符串如 "G3" → (col, row)
+    fn parse_cell_ref_str(s: &str) -> Result<(u32, u32), ()> {
+        let s = s.trim().to_uppercase();
+        let col_part: String = s.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let row_part: String = s.chars().skip(col_part.len()).collect();
+        if col_part.is_empty() || row_part.is_empty() {
+            return Err(());
+        }
+        let col = crate::excel::formula::letter_to_col(&col_part).map_err(|_| ())?;
+        let row: u32 = row_part.parse().map_err(|_| ())?;
+        Ok((col, row))
+    }
+
     /// 检测数字格式代码是否为日期格式
     ///
     /// Excel 日期格式包含 y(年)、d(日) 等标记，或包含 m(月) 但不包含 h(时)/s(秒)
@@ -2065,4 +2166,49 @@ pub fn col_to_letter(mut col: u32) -> String {
     }
     chars.reverse();
     chars.into_iter().collect()
+}
+
+#[cfg(test)]
+mod cond_fmt_tests {
+    use super::*;
+
+    fn make_cell(value: &str) -> CellData {
+        let mut c = CellData::default();
+        c.value = value.to_string();
+        c
+    }
+
+    #[test]
+    fn test_two_rules_non_overlapping_ranges() {
+        let mut sheet = SheetData::new("test".into());
+        // B7 和 B8 分别在各自行
+        sheet.cells.insert((7, 2), make_cell("-17"));
+        sheet.cells.insert((8, 2), make_cell("充足"));
+
+        let rules = vec![
+            UserCondFormatRule {
+                operator: "<=".into(),
+                value: "60".into(),
+                color: "#FFC7CE".into(),
+                range: "=B7:AK7".into(),
+            },
+            UserCondFormatRule {
+                operator: "=".into(),
+                value: "充足".into(),
+                color: "#FFC0CB".into(),
+                range: "=B8:AK8".into(),
+            },
+        ];
+
+        ExcelData::apply_user_cond_format_rules(&mut sheet, &rules);
+
+        // 规则1: B7 ≤ 60 → -17 ≤ 60 → true → #FFC7CE (255,199,206)
+        let b7 = sheet.get_cell(7, 2).unwrap();
+        assert_eq!(b7.background_color, Some((255, 199, 206)));
+
+        // 规则2: B8 = 充足 → true → #FFC0CB (255,192,203)
+        let b8 = sheet.get_cell(8, 2).unwrap();
+        assert_eq!(b8.background_color, Some((255, 192, 203)),
+            "B8 should be #FFC0CB, got {:?}", b8.background_color);
+    }
 }

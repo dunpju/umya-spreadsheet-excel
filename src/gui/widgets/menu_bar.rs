@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 use crate::gui::widgets::search::SearchWindowState;
 use crate::gui::widgets::convert_popup::ConvertPopupState;
+use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
 
 /// 绘制菜单栏
 ///
@@ -25,6 +26,7 @@ pub fn draw_menu_bar(
     add_row: &mut bool,
     has_data: bool,
     convert_popup: &mut ConvertPopupState,
+    cond_format_popup: &mut CondFormatPopupState,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
@@ -74,6 +76,10 @@ pub fn draw_menu_bar(
             if ui.button("搜索配置").clicked() {
                 ui.close();
                 settings_panel.show_search_dialog = true;
+            }
+            if ui.button("条件格式").clicked() {
+                ui.close();
+                cond_format_popup.visible = true;
             }
         });
 

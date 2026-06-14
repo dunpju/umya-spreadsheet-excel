@@ -12,7 +12,9 @@ use crate::gui::widgets::{
     draw_table_content,
     draw_empty_state,
     draw_name_box,
+    draw_cond_format_popup,
     draw_convert_popup,
+    CondFormatPopupState,
     ConvertPopupState,
     NameBoxState,
     SearchWindowState,
@@ -425,6 +427,8 @@ pub struct ExcelViewer {
     pub search_window: SearchWindowState,
     /// 转换弹窗状态
     pub convert_popup: ConvertPopupState,
+    /// 条件格式弹窗状态
+    pub cond_format_popup: CondFormatPopupState,
     /// 隐藏的列号集合（1-based），由搜索功能写入，table 渲染时读取
     pub hidden_columns: HashSet<u32>,
     /// 隐藏的行号集合（1-based），由行筛选功能写入，table 渲染时读取
@@ -469,6 +473,7 @@ impl ExcelViewer {
             drag_anchor: None,
             search_window: SearchWindowState::default(),
             convert_popup: ConvertPopupState::default(),
+            cond_format_popup: CondFormatPopupState::load_from_file(),
             hidden_columns: HashSet::new(),
             hidden_rows: HashSet::new(),
         }
@@ -606,6 +611,13 @@ impl ExcelViewer {
                         self.hidden_columns.clear();
                         self.hidden_rows.clear();
                         self.search_window.options_loaded = false;
+                        // 应用用户自定义条件格式
+                        let user_rules = self.cond_format_popup.rules.clone();
+                        if let Some(ref mut excel) = self.excel_data {
+                            for sheet in &mut excel.sheets {
+                                ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
+                            }
+                        }
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
                     Err(e) => {
@@ -720,12 +732,26 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.cond_format_popup);
         });
 
         // 绘制导入对话框
         if let Some(path) = draw_import_dialog(&mut self.show_import_dialog) {
             self.start_async_load(path, ctx.clone());
+        }
+
+        // 绘制条件格式弹窗
+        draw_cond_format_popup(&ctx, &mut self.cond_format_popup);
+
+        // 条件格式规则变更后重新应用到已加载数据
+        if self.cond_format_popup.needs_reapply {
+            self.cond_format_popup.needs_reapply = false;
+            let user_rules = self.cond_format_popup.rules.clone();
+            if let Some(ref mut excel) = self.excel_data {
+                for sheet in &mut excel.sheets {
+                    ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
+                }
+            }
         }
 
         // 绘制转换弹窗
