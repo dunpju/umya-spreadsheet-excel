@@ -317,13 +317,15 @@ impl Default for UserCondFormatRule {
 pub struct CondFormatRule {
     /// 适用的单元格范围
     pub ranges: Vec<CellRange>,
-    /// 条件类型（"CellIs" / "Expression" 等）
+    /// 条件类型（"CellIs" / "ContainsText" / "Expression" 等）
     #[allow(dead_code)]
     pub rule_type: String,
-    /// 运算符（"greaterThan" / "lessThan" 等）
+    /// 运算符（"greaterThan" / "lessThan" / "between" 等）
     pub operator: String,
     /// 公式文本（阈值等）
     pub formula_text: String,
+    /// containsText 的搜索文本
+    pub text: String,
     /// 应用样式时覆盖的背景色
     pub bg_color: Option<(u8, u8, u8)>,
     /// 应用样式时覆盖的字体色
@@ -1545,7 +1547,11 @@ impl ExcelData {
                         let mut bg = None;
                         let mut fc = None;
                         let mut b = false;
-                        if let Some(bg_color) = style.background_color() {
+                        // dxf 填充色可能在 fgColor 或 bgColor 中，两者都检查
+                        let bg_color = style.background_color()
+                            .or_else(|| style.fill()
+                                .and_then(|f| f.pattern_fill()?.background_color()));
+                        if let Some(bg_color) = bg_color {
                             let resolved = bg_color.argb_with_theme(theme);
                             if let Ok(rgb) = Self::parse_hex_color(&resolved) {
                                 bg = Some(rgb);
@@ -1563,6 +1569,7 @@ impl ExcelData {
                             rule_type: format!("{:?}", rule_type),
                             operator: format!("{:?}", op),
                             formula_text,
+                            text: rule.text().to_string(),
                             bg_color: bg,
                             font_color: fc,
                             bold: b,
@@ -1764,7 +1771,15 @@ impl ExcelData {
                             .map(|c| c.value.clone())
                             .unwrap_or_default();
 
-                        let matches = if rule.operator.contains("GreaterThan") {
+                        let matches = if rule.rule_type.contains("ContainsText") {
+                            // 文本包含匹配：umya-spreadsheet 3.0 未解析 text 属性，从公式提取
+                            let search = if rule.text.is_empty() {
+                                Self::extract_contains_text_from_formula(&rule.formula_text)
+                            } else {
+                                rule.text.clone()
+                            };
+                            cell_value.contains(&search)
+                        } else if rule.operator.contains("GreaterThan") {
                             let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
                             cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold)
                         } else if rule.operator.contains("GreaterThanOrEqual") {
@@ -1845,6 +1860,30 @@ impl ExcelData {
             resolve_part(range_str)
         }
     }
+
+/// 从 containsText 公式中提取搜索文本。
+/// 公式格式: NOT(ISERROR(SEARCH("文本",cell_ref)))
+fn extract_contains_text_from_formula(formula: &str) -> String {
+    // 找到 SEARCH(" 的位置，提取引号内的文本
+    if let Some(start) = formula.find("SEARCH(\"") {
+        let after = &formula[start + 8..]; // skip "SEARCH("
+        if let Some(end) = after.find('\"') {
+            return after[..end].to_string();
+        }
+        // 单引号变体 SEARCH('文本'
+        if let Some(end) = after.find('\'') {
+            return after[..end].to_string();
+        }
+    }
+    // 简化版: 提取公式中第一个引号内的文本
+    if let Some(start) = formula.find('"') {
+        let after = &formula[start + 1..];
+        if let Some(end) = after.find('"') {
+            return after[..end].to_string();
+        }
+    }
+    String::new()
+}
 
     /// 相等比较：优先数值，回退字符串
     fn compare_equal(cell_value: &str, threshold: &str) -> bool {
