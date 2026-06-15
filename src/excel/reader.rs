@@ -550,6 +550,28 @@ impl SheetData {
             }
         }
 
+        // 5.1 处理条件格式范围：跨插入点自动扩展 + 源行条件格式延伸至新行
+        for rule in &mut self.conditional_rules {
+            for r in &mut rule.ranges {
+                if r.start_row >= insert_at {
+                    r.start_row += n;
+                    r.end_row += n;
+                } else if r.end_row >= insert_at {
+                    r.end_row += n;
+                }
+                if after {
+                    let src_start = insert_at.saturating_sub(n);
+                    let src_end = insert_at.saturating_sub(1);
+                    if r.end_row >= src_start || r.start_row <= src_end {
+                        let new_end = insert_at + n - 1;
+                        if new_end > r.end_row {
+                            r.end_row = new_end;
+                        }
+                    }
+                }
+            }
+        }
+
         // 6. 新行样式继承：从相邻行（原 insert_at 行，现已移到 insert_at + n）复制样式
         // 收集需要继承样式的列
         let style_cols: Vec<u32> = self.cells.iter()
@@ -1826,6 +1848,15 @@ impl ExcelData {
         Self::apply_conditional_formatting(sheet);
     }
 
+    /// 将单元格值转为数值（空值当作 0，匹配 WPS/Excel 行为）
+    fn parse_cell_number(cell_value: &str) -> Option<f64> {
+        if cell_value.trim().is_empty() {
+            Some(0.0)
+        } else {
+            cell_value.parse::<f64>().ok()
+        }
+    }
+
     fn evaluate_rule(rule: &CondFormatRule, cell_value: &str) -> bool {
         if rule.rule_type.contains("ContainsText") {
             let search = if rule.text.is_empty() {
@@ -1836,16 +1867,16 @@ impl ExcelData {
             cell_value.contains(&search)
         } else if rule.operator.contains("GreaterThan") {
             let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
-            cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold)
+            Self::parse_cell_number(&cell_value).map_or(false, |v| v > threshold)
         } else if rule.operator.contains("GreaterThanOrEqual") {
             let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
-            cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold)
+            Self::parse_cell_number(&cell_value).map_or(false, |v| v >= threshold)
         } else if rule.operator.contains("LessThan") {
             let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
-            cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold)
+            Self::parse_cell_number(&cell_value).map_or(false, |v| v < threshold)
         } else if rule.operator.contains("LessThanOrEqual") {
             let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
-            cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold)
+            Self::parse_cell_number(&cell_value).map_or(false, |v| v <= threshold)
         } else if rule.operator.contains("Equal") {
             let threshold = &rule.formula_text;
             cell_value == *threshold
@@ -1857,7 +1888,7 @@ impl ExcelData {
             if parts.len() >= 2 {
                 let lo: f64 = parts[0].trim().parse().unwrap_or(f64::MIN);
                 let hi: f64 = parts[1].trim().parse().unwrap_or(f64::MAX);
-                cell_value.parse::<f64>().ok().map_or(false, |v| v >= lo && v <= hi)
+                Self::parse_cell_number(&cell_value).map_or(false, |v| v >= lo && v <= hi)
             } else {
                 false
             }
@@ -1951,7 +1982,7 @@ fn extract_contains_text_from_formula(formula: &str) -> String {
 
     /// 相等比较：优先数值，回退字符串
     fn compare_equal(cell_value: &str, threshold: &str) -> bool {
-        if let (Some(cv), Some(tv)) = (cell_value.parse::<f64>().ok(), threshold.parse::<f64>().ok()) {
+        if let (Some(cv), Some(tv)) = (Self::parse_cell_number(&cell_value), threshold.parse::<f64>().ok()) {
             (cv - tv).abs() < f64::EPSILON
         } else {
             cell_value.trim().to_lowercase() == threshold.trim().to_lowercase()
@@ -1998,11 +2029,11 @@ fn extract_contains_text_from_formula(formula: &str) -> String {
                     let threshold_val: f64 = rule.value.parse().unwrap_or(0.0);
 
                     let matches = match rule.operator.as_str() {
-                        ">" => cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold_val),
-                        "<" => cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold_val),
+                        ">" => Self::parse_cell_number(&cell_value).map_or(false, |v| v > threshold_val),
+                        "<" => Self::parse_cell_number(&cell_value).map_or(false, |v| v < threshold_val),
                         "=" => Self::compare_equal(&cell_value, &rule.value),
-                        ">=" => cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold_val),
-                        "<=" => cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold_val),
+                        ">=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v >= threshold_val),
+                        "<=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v <= threshold_val),
                         "!=" => !Self::compare_equal(&cell_value, &rule.value),
                         _ => false,
                     };
