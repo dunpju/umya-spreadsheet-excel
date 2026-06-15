@@ -941,12 +941,12 @@ impl SheetData {
                     // 范围跨越插入点 → 扩展
                     r.end_col += m;
                 }
-                // 复制操作：若源列被条件格式覆盖，新列也纳入范围
+                // 复制操作：只有范围右侧边缘恰好接触源列时才水平扩展（防止纵向范围被横向串扰）
                 if after {
                     let src_start = insert_at.saturating_sub(m);
                     let src_end = insert_at.saturating_sub(1);
-                    if r.end_col >= src_start || r.start_col <= src_end {
-                        // 源列范围与新列相邻：扩展 end_col 至新列末尾
+                    // 范围的列区间 [r.start_col, r.end_col] 必须与源区间 [src_start, src_end] 有交集
+                    if r.start_col <= src_end && r.end_col >= src_start {
                         let new_end = insert_at + m - 1;
                         if new_end > r.end_col {
                             r.end_col = new_end;
