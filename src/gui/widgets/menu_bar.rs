@@ -27,7 +27,7 @@ pub fn draw_menu_bar(
     add_row: &mut bool,
     has_data: bool,
     convert_popup: &mut ConvertPopupState,
-    cond_format_popup: &mut CondFormatPopupState,
+    _cond_format_popup: &mut CondFormatPopupState,
     help_popup: &mut HelpPopupState,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
@@ -78,10 +78,11 @@ pub fn draw_menu_bar(
                 ui.close();
                 settings_panel.show_search_dialog = true;
             }
-            if ui.button("条件格式").clicked() {
-                ui.close();
-                cond_format_popup.visible = true;
-            }
+            // 使用原Excel表格条件格式功能，所以隐藏菜单功能
+            // if ui.button("条件格式").clicked() {
+            //     ui.close();
+            //     _cond_format_popup.visible = true;
+            // }
         });
 
         // 转换菜单
