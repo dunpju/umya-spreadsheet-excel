@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::gui::viewer::{SettingsPanelState, SettingsPage};
 use crate::gui::widgets::search::SearchWindowState;
 use crate::gui::widgets::convert_popup::ConvertPopupState;
+use crate::gui::widgets::alert_popup::AlertPopupState;
 use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
 use crate::gui::widgets::help_popup::HelpPopupState;
 
@@ -27,6 +28,7 @@ pub fn draw_menu_bar(
     add_row: &mut bool,
     has_data: bool,
     convert_popup: &mut ConvertPopupState,
+    alert_popup: &mut AlertPopupState,
     _cond_format_popup: &mut CondFormatPopupState,
     help_popup: &mut HelpPopupState,
 ) {
@@ -77,6 +79,10 @@ pub fn draw_menu_bar(
             if ui.button("搜索配置").clicked() {
                 ui.close();
                 settings_panel.show_search_dialog = true;
+            }
+            if ui.button("预警消息").clicked() {
+                ui.close();
+                alert_popup.visible = true;
             }
             // 使用原Excel表格条件格式功能，所以隐藏菜单功能
             // if ui.button("条件格式").clicked() {

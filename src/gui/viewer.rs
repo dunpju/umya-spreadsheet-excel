@@ -12,9 +12,11 @@ use crate::gui::widgets::{
     draw_table_content,
     draw_empty_state,
     draw_name_box,
+    draw_alert_popup,
     draw_cond_format_popup,
     draw_convert_popup,
     draw_help_popup,
+    AlertPopupState,
     CondFormatPopupState,
     ConvertPopupState,
     HelpPopupState,
@@ -429,6 +431,8 @@ pub struct ExcelViewer {
     pub search_window: SearchWindowState,
     /// 转换弹窗状态
     pub convert_popup: ConvertPopupState,
+    /// 预警消息弹窗状态
+    pub alert_popup: AlertPopupState,
     /// 条件格式弹窗状态
     pub cond_format_popup: CondFormatPopupState,
     /// 帮助弹窗状态
@@ -477,6 +481,7 @@ impl ExcelViewer {
             drag_anchor: None,
             search_window: SearchWindowState::default(),
             convert_popup: ConvertPopupState::default(),
+            alert_popup: AlertPopupState::load_from_file(),
             cond_format_popup: CondFormatPopupState::load_from_file(),
             help_popup: HelpPopupState::default(),
             hidden_columns: HashSet::new(),
@@ -737,7 +742,7 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.cond_format_popup, &mut self.help_popup);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup);
         });
 
         // 绘制导入对话框
@@ -747,6 +752,9 @@ impl eframe::App for ExcelViewer {
 
         // 绘制帮助弹窗
         draw_help_popup(&ctx, &mut self.help_popup);
+
+        // 绘制预警消息弹窗
+        draw_alert_popup(&ctx, &mut self.alert_popup);
 
         // 绘制条件格式弹窗
         draw_cond_format_popup(&ctx, &mut self.cond_format_popup);
