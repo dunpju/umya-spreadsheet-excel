@@ -189,7 +189,8 @@ pub struct DataValidationInfo {
     pub formula1: String,
     /// 公式2（如最大值、结束值）
     pub formula2: String,
-    /// 适用的单元格范围
+    /// 适用的单元格范围（提取时记录，转换工具迁移用）
+    #[allow(dead_code)]
     pub ranges: Vec<CellRange>,
 }
 
@@ -318,7 +319,8 @@ impl Default for UserCondFormatRule {
 /// 条件格式规则（简化后存储，供加载后求值应用）
 #[derive(Debug, Clone)]
 pub struct CondFormatRule {
-    /// 适用的单元格范围
+    /// 适用的单元格范围（提取时记录，转换工具迁移用）
+    #[allow(dead_code)]
     pub ranges: Vec<CellRange>,
     /// 条件类型（"CellIs" / "ContainsText" / "Expression" 等）
     #[allow(dead_code)]
@@ -565,7 +567,7 @@ impl SheetData {
                     raw_number: None,
                     formula: String::new(),
                     alignment: template.alignment.clone(),
-                    background_color: template.background_color,
+                    background_color: template.original_bg,
                     original_bg: template.original_bg,
                     font_size: template.font_size,
                     font_color: template.font_color,
@@ -749,7 +751,7 @@ impl SheetData {
                     raw_number: None,
                     formula: String::new(),
                     alignment: template.alignment.clone(),
-                    background_color: template.background_color,
+                    background_color: template.original_bg,
                     original_bg: template.original_bg,
                     font_size: template.font_size,
                     font_color: template.font_color,
@@ -897,6 +899,32 @@ impl SheetData {
             }
         }
 
+        // 5.1 处理条件格式范围：跨插入点自动扩展 + 源列条件格式延伸至新列
+        for rule in &mut self.conditional_rules {
+            for r in &mut rule.ranges {
+                if r.start_col >= insert_at {
+                    // 整个范围在插入点右侧 → 整体右移
+                    r.start_col += m;
+                    r.end_col += m;
+                } else if r.end_col >= insert_at {
+                    // 范围跨越插入点 → 扩展
+                    r.end_col += m;
+                }
+                // 复制操作：若源列被条件格式覆盖，新列也纳入范围
+                if after {
+                    let src_start = insert_at.saturating_sub(m);
+                    let src_end = insert_at.saturating_sub(1);
+                    if r.end_col >= src_start || r.start_col <= src_end {
+                        // 源列范围与新列相邻：扩展 end_col 至新列末尾
+                        let new_end = insert_at + m - 1;
+                        if new_end > r.end_col {
+                            r.end_col = new_end;
+                        }
+                    }
+                }
+            }
+        }
+
         // 5.5 修正已有公式引用：所有现有单元格和数据有效性中的公式，
         //     相对列引用 >= insert_at 的右移 m 列
         //     单元格公式数量较多时使用多线程并行处理以提升性能
@@ -1033,8 +1061,9 @@ impl SheetData {
                         } else {
                             CellAlignment::default()
                         },
+                        // 复制原始背景色（非条件格式计算后的颜色），新列由 per-frame 求值独立决定
                         background_color: if options.copy_style {
-                            source_cell.background_color
+                            source_cell.original_bg
                         } else {
                             None
                         },
@@ -1774,9 +1803,12 @@ impl ExcelData {
 
     /// 对已加载的 SheetData 应用条件格式规则。
     /// 目前支持 CellIs 类型，将匹配的 dxf 样式覆盖到对应单元格上。
-    /// 公开入口：每帧重新求值文件自带的条件格式
+    /// 公开入口：每帧重新求值文件自带的条件格式（仅覆盖规则声明的 sqref 范围）
     pub fn reapply_conditional_formatting(sheet: &mut SheetData) {
-        // 恢复所有曾被条件格式覆盖的单元格的原始背景色
+        if sheet.conditional_rules.is_empty() {
+            return;
+        }
+        // 先恢复规则范围内的单元格原始样式
         for rule in &sheet.conditional_rules {
             for range in &rule.ranges {
                 for row in range.start_row..=range.end_row {
@@ -1794,8 +1826,49 @@ impl ExcelData {
         Self::apply_conditional_formatting(sheet);
     }
 
+    fn evaluate_rule(rule: &CondFormatRule, cell_value: &str) -> bool {
+        if rule.rule_type.contains("ContainsText") {
+            let search = if rule.text.is_empty() {
+                Self::extract_contains_text_from_formula(&rule.formula_text)
+            } else {
+                rule.text.clone()
+            };
+            cell_value.contains(&search)
+        } else if rule.operator.contains("GreaterThan") {
+            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
+            cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold)
+        } else if rule.operator.contains("GreaterThanOrEqual") {
+            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
+            cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold)
+        } else if rule.operator.contains("LessThan") {
+            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
+            cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold)
+        } else if rule.operator.contains("LessThanOrEqual") {
+            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
+            cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold)
+        } else if rule.operator.contains("Equal") {
+            let threshold = &rule.formula_text;
+            cell_value == *threshold
+        } else if rule.operator.contains("NotEqual") {
+            let threshold = &rule.formula_text;
+            cell_value != *threshold
+        } else if rule.operator.contains("Between") {
+            let parts: Vec<&str> = rule.formula_text.split(',').collect();
+            if parts.len() >= 2 {
+                let lo: f64 = parts[0].trim().parse().unwrap_or(f64::MIN);
+                let hi: f64 = parts[1].trim().parse().unwrap_or(f64::MAX);
+                cell_value.parse::<f64>().ok().map_or(false, |v| v >= lo && v <= hi)
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
     fn apply_conditional_formatting(sheet: &mut SheetData) {
-        for rule in &sheet.conditional_rules {
+        let rules: Vec<CondFormatRule> = sheet.conditional_rules.clone();
+        for rule in &rules {
             for range in &rule.ranges {
                 for row in range.start_row..=range.end_row {
                     for col in range.start_col..=range.end_col {
@@ -1803,49 +1876,7 @@ impl ExcelData {
                             .get_cell(row, col)
                             .map(|c| c.value.clone())
                             .unwrap_or_default();
-
-                        let matches = if rule.rule_type.contains("ContainsText") {
-                            // 文本包含匹配：umya-spreadsheet 3.0 未解析 text 属性，从公式提取
-                            let search = if rule.text.is_empty() {
-                                Self::extract_contains_text_from_formula(&rule.formula_text)
-                            } else {
-                                rule.text.clone()
-                            };
-                            cell_value.contains(&search)
-                        } else if rule.operator.contains("GreaterThan") {
-                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
-                            cell_value.parse::<f64>().ok().map_or(false, |v| v > threshold)
-                        } else if rule.operator.contains("GreaterThanOrEqual") {
-                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MAX);
-                            cell_value.parse::<f64>().ok().map_or(false, |v| v >= threshold)
-                        } else if rule.operator.contains("LessThan") {
-                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
-                            cell_value.parse::<f64>().ok().map_or(false, |v| v < threshold)
-                        } else if rule.operator.contains("LessThanOrEqual") {
-                            let threshold: f64 = rule.formula_text.parse().unwrap_or(f64::MIN);
-                            cell_value.parse::<f64>().ok().map_or(false, |v| v <= threshold)
-                        } else if rule.operator.contains("Equal") {
-                            let threshold = &rule.formula_text;
-                            cell_value == *threshold
-                        } else if rule.operator.contains("NotEqual") {
-                            let threshold = &rule.formula_text;
-                            cell_value != *threshold
-                        } else if rule.operator.contains("Between") {
-                            // formula 格式: "formula1,formula2"
-                            let parts: Vec<&str> = rule.formula_text.split(',').collect();
-                            if parts.len() >= 2 {
-                                let lo: f64 = parts[0].trim().parse().unwrap_or(f64::MIN);
-                                let hi: f64 = parts[1].trim().parse().unwrap_or(f64::MAX);
-                                cell_value.parse::<f64>().ok().map_or(false, |v| v >= lo && v <= hi)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                        if matches {
-                            // 将条件格式样式覆盖到单元格
+                        if Self::evaluate_rule(rule, &cell_value) {
                             if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
                                 if let Some(bg) = rule.bg_color {
                                     cell.background_color = Some(bg);
