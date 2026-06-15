@@ -562,7 +562,7 @@ impl SheetData {
                 if after {
                     let src_start = insert_at.saturating_sub(n);
                     let src_end = insert_at.saturating_sub(1);
-                    if r.end_row >= src_start || r.start_row <= src_end {
+                    if r.start_row <= src_end && r.end_row >= src_start {
                         let new_end = insert_at + n - 1;
                         if new_end > r.end_row {
                             r.end_row = new_end;
@@ -782,6 +782,15 @@ impl SheetData {
                     borders: template.borders.clone(),
                 };
                 self.cells.insert((old_max_row + 1, col), styled);
+            }
+        }
+
+        // 2.5 扩展条件格式范围：原最后一行被规则覆盖时，新行也纳入
+        for rule in &mut self.conditional_rules {
+            for r in &mut rule.ranges {
+                if r.end_row == old_max_row {
+                    r.end_row = self.max_row;
+                }
             }
         }
 
