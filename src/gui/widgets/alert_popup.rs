@@ -22,6 +22,8 @@ pub struct AlertRule {
 pub struct AlertPopupState {
     pub visible: bool,
     pub rules: Vec<AlertRule>,
+    /// 保存成功提示计时器（秒），> 0 时显示绿色提示
+    pub save_success_timer: f32,
 }
 
 impl Default for AlertPopupState {
@@ -29,6 +31,7 @@ impl Default for AlertPopupState {
         Self {
             visible: false,
             rules: Vec::new(),
+            save_success_timer: 0.0,
         }
     }
 }
@@ -37,7 +40,7 @@ impl AlertPopupState {
     /// 从 YAML Value 加载规则列表
     pub fn load_from_yaml(doc: &serde_yaml::Value) -> Self {
         let rules = doc
-            .get("alertMessages")
+            .get("alert")
             .and_then(|am| am.as_sequence())
             .map(|seq| {
                 seq.iter()
@@ -54,6 +57,7 @@ impl AlertPopupState {
         Self {
             visible: false,
             rules,
+            save_success_timer: 0.0,
         }
     }
 
@@ -73,7 +77,7 @@ impl AlertPopupState {
             .collect();
         let am_val = serde_yaml::Value::Sequence(seq);
         if let Some(mapping) = doc.as_mapping_mut() {
-            mapping.insert("alertMessages".into(), am_val);
+            mapping.insert("alert".into(), am_val);
         }
     }
 }
@@ -121,6 +125,14 @@ pub fn draw_alert_popup(ctx: &egui::Context, state: &mut AlertPopupState) {
                         }
                         if ui.button("保存").clicked() {
                             state.save_to_file();
+                        }
+                        if state.save_success_timer > 0.0 {
+                            ui.label(
+                                egui::RichText::new("保存成功")
+                                    .size(11.0)
+                                    .color(egui::Color32::GREEN),
+                            );
+                            state.save_success_timer -= ui.input(|i| i.stable_dt);
                         }
                     },
                 );
@@ -282,6 +294,7 @@ impl AlertPopupState {
         if let Ok(yaml_str) = serde_yaml::to_string(&doc) {
             let _ = std::fs::write(&path, yaml_str);
         }
+        self.save_success_timer = 2.0;
     }
 
     /// 从 YAML 文件加载规则
