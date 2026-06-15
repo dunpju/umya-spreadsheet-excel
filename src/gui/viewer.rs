@@ -1646,9 +1646,10 @@ impl eframe::App for ExcelViewer {
                                 }
                             }
                             self.context_menu.visible = false;
-                            self.context_menu.confirm_visible = false;
-                            self.context_menu.confirm_established = false;
-                            self.context_menu.confirm_action = None;
+                            if !self.context_menu.confirm_visible {
+                                self.context_menu.confirm_established = false;
+                                self.context_menu.confirm_action = None;
+                            }
                             self.context_menu.select_down_count = 0;
                             self.context_menu.select_up_count = 0;
                             self.context_menu.select_left_count = 0;
@@ -1665,9 +1666,11 @@ impl eframe::App for ExcelViewer {
                                 if let Some(hover) = ui.input(|i| i.pointer.hover_pos()) {
                                     if !menu_rect.contains(hover) {
                                         self.context_menu.visible = false;
-                                        self.context_menu.confirm_visible = false;
-                                        self.context_menu.confirm_established = false;
-                                        self.context_menu.confirm_action = None;
+                                        // 如果有确认弹窗正在等待，不在此处关闭它
+                                        if !self.context_menu.confirm_visible {
+                                            self.context_menu.confirm_established = false;
+                                            self.context_menu.confirm_action = None;
+                                        }
                                         self.context_menu.select_down_count = 0;
                             self.context_menu.select_up_count = 0;
                             self.context_menu.select_left_count = 0;
@@ -1679,9 +1682,10 @@ impl eframe::App for ExcelViewer {
                         // Escape 关闭
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             self.context_menu.visible = false;
-                            self.context_menu.confirm_visible = false;
-                            self.context_menu.confirm_established = false;
-                            self.context_menu.confirm_action = None;
+                            if !self.context_menu.confirm_visible {
+                                self.context_menu.confirm_established = false;
+                                self.context_menu.confirm_action = None;
+                            }
                             self.context_menu.select_down_count = 0;
                             self.context_menu.select_up_count = 0;
                             self.context_menu.select_left_count = 0;
