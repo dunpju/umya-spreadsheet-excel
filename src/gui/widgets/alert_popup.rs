@@ -15,6 +15,10 @@ pub struct AlertRule {
     pub message: String,
     /// 应用范围
     pub range: String,
+    /// 固定范围的列扩展偏移量（插入列时累加）
+    pub range_expand_col: u32,
+    /// 固定范围的行扩展偏移量（插入行时累加）
+    pub range_expand_row: u32,
 }
 
 /// 预警消息弹窗状态
@@ -49,7 +53,11 @@ impl AlertPopupState {
                         let value = item.get("value")?.as_str()?.to_string();
                         let message = item.get("message")?.as_str()?.to_string();
                         let range = item.get("range")?.as_str()?.to_string();
-                        Some(AlertRule { operator, value, message, range })
+                        let range_expand_col = item.get("range_expand_col")
+                            .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let range_expand_row = item.get("range_expand_row")
+                            .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        Some(AlertRule { operator, value, message, range, range_expand_col, range_expand_row })
                     })
                     .collect::<Vec<_>>()
             })
@@ -72,6 +80,12 @@ impl AlertPopupState {
                 m.insert("value".into(), r.value.clone().into());
                 m.insert("message".into(), r.message.clone().into());
                 m.insert("range".into(), r.range.clone().into());
+                if r.range_expand_col > 0 {
+                    m.insert("range_expand_col".into(), r.range_expand_col.into());
+                }
+                if r.range_expand_row > 0 {
+                    m.insert("range_expand_row".into(), r.range_expand_row.into());
+                }
                 serde_yaml::Value::Mapping(m)
             })
             .collect();
@@ -243,6 +257,8 @@ pub fn draw_alert_popup(ctx: &egui::Context, state: &mut AlertPopupState) {
                             value: last.value.clone(),
                             message: last.message.clone(),
                             range: String::new(),
+                            range_expand_col: 0,
+                            range_expand_row: 0,
                         })
                         .unwrap_or_default();
                     state.rules.push(new_rule);

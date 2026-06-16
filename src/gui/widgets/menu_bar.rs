@@ -9,6 +9,8 @@ use crate::gui::widgets::convert_popup::ConvertPopupState;
 use crate::gui::widgets::alert_popup::AlertPopupState;
 use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
 use crate::gui::widgets::help_popup::HelpPopupState;
+use crate::gui::widgets::alert_notify::AlertNotifyState;
+use crate::gui::widgets::draw_alert_icon;
 
 /// 绘制菜单栏
 ///
@@ -31,7 +33,10 @@ pub fn draw_menu_bar(
     alert_popup: &mut AlertPopupState,
     _cond_format_popup: &mut CondFormatPopupState,
     help_popup: &mut HelpPopupState,
+    alert_notify_state: &mut AlertNotifyState,
 ) {
+    let dt = ui.input(|i| i.stable_dt);
+
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
         ui.menu_button("文件", |ui| {
@@ -110,4 +115,7 @@ pub fn draw_menu_bar(
             }
         });
     });
+
+    // 菜单栏最右侧：预警通知图标
+    draw_alert_icon(ui, alert_notify_state, dt);
 }

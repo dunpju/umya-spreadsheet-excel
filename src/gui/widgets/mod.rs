@@ -12,6 +12,7 @@ pub mod alert_popup;
 pub mod cond_format_popup;
 pub mod convert_popup;
 pub mod help_popup;
+pub mod alert_notify;
 
 pub use menu_bar::*;
 pub use dialogs::*;
@@ -23,3 +24,4 @@ pub use alert_popup::*;
 pub use cond_format_popup::*;
 pub use convert_popup::*;
 pub use help_popup::*;
+pub use alert_notify::*;

@@ -16,12 +16,17 @@ use crate::gui::widgets::{
     draw_cond_format_popup,
     draw_convert_popup,
     draw_help_popup,
+    draw_alert_notify_popup,
+    check_alert_rules,
+    update_alert_range_expansions_for_col,
+    update_alert_range_expansions_for_row,
     AlertPopupState,
     CondFormatPopupState,
     ConvertPopupState,
     HelpPopupState,
     NameBoxState,
     SearchWindowState,
+    AlertNotifyState,
     draw_search_window,
 };
 use std::collections::HashSet;
@@ -441,6 +446,8 @@ pub struct ExcelViewer {
     pub hidden_columns: HashSet<u32>,
     /// 隐藏的行号集合（1-based），由行筛选功能写入，table 渲染时读取
     pub hidden_rows: HashSet<u32>,
+    /// 预警通知状态（图标 + 弹窗）
+    pub alert_notify_state: AlertNotifyState,
 }
 
 impl ExcelViewer {
@@ -486,6 +493,7 @@ impl ExcelViewer {
             help_popup: HelpPopupState::default(),
             hidden_columns: HashSet::new(),
             hidden_rows: HashSet::new(),
+            alert_notify_state: AlertNotifyState::default(),
         }
     }
 
@@ -742,7 +750,7 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup, &mut self.alert_notify_state);
         });
 
         // 绘制导入对话框
@@ -755,6 +763,24 @@ impl eframe::App for ExcelViewer {
 
         // 绘制预警消息弹窗
         draw_alert_popup(&ctx, &mut self.alert_popup);
+
+        // 检查预警规则是否被触发（每帧检测，数据变化后自动更新）
+        if let Some(ref excel_data) = self.excel_data {
+            if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                let triggered = check_alert_rules(&self.alert_popup.rules, sheet);
+                self.alert_notify_state.has_triggered = !triggered.is_empty();
+                self.alert_notify_state.triggered_rules = triggered;
+            }
+        }
+
+        // 绘制预警通知弹窗
+        draw_alert_notify_popup(
+            &ctx,
+            &mut self.alert_notify_state,
+            &mut self.hidden_columns,
+            &mut self.hidden_rows,
+            self.excel_data.as_ref().and_then(|ed| ed.get_sheet(self.current_sheet)),
+        );
 
         // 绘制条件格式弹窗
         draw_cond_format_popup(&ctx, &mut self.cond_format_popup);
@@ -809,6 +835,9 @@ impl eframe::App for ExcelViewer {
                     // 在末尾追加一行，公式引用范围自动扩展
                     sheet.append_row();
                     self.dirty = true;
+                    // 更新预警规则固定范围的行扩展偏移量
+                    let new_row = sheet.max_row;
+                    update_alert_range_expansions_for_row(&mut self.alert_popup.rules, new_row, 1, sheet);
                 }
                 crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                 self.scroll_to_last_row = true;
@@ -1100,6 +1129,11 @@ impl eframe::App for ExcelViewer {
                                 self.hidden_columns.clear();
                                 self.hidden_rows.clear();
                                 self.search_window.options_loaded = false;
+                                // 切换工作表时重置预警通知过滤状态
+                                self.alert_notify_state.is_filtering = false;
+                                self.alert_notify_state.visible = false;
+                                self.alert_notify_state.triggered_rules.clear();
+                                self.alert_notify_state.has_triggered = false;
                             }
                         }
                     });
@@ -1630,18 +1664,24 @@ impl eframe::App for ExcelViewer {
                                                 ContextAction::InsertRowAbove => {
                                                     sheet.insert_rows(anchor_row, n, false);
                                                     self.dirty = true;
+                                                    update_alert_range_expansions_for_row(&mut self.alert_popup.rules, anchor_row, n, sheet);
                                                 }
                                                 ContextAction::InsertRowBelow => {
                                                     sheet.insert_rows(anchor_row, n, true);
                                                     self.dirty = true;
+                                                    // InsertRowBelow: 实际插入位置为 anchor_row + 1
+                                                    update_alert_range_expansions_for_row(&mut self.alert_popup.rules, anchor_row + 1, n, sheet);
                                                 }
                                                 ContextAction::InsertColumnLeft => {
                                                     sheet.insert_columns(anchor_col, m, false, default_options);
                                                     self.dirty = true;
+                                                    update_alert_range_expansions_for_col(&mut self.alert_popup.rules, anchor_col, m, sheet);
                                                 }
                                                 ContextAction::InsertColumnRight => {
                                                     sheet.insert_columns(anchor_col, m, true, default_options);
                                                     self.dirty = true;
+                                                    // InsertColumnRight: 实际插入位置为 anchor_col + 1
+                                                    update_alert_range_expansions_for_col(&mut self.alert_popup.rules, anchor_col + 1, m, sheet);
                                                 }
                                                 ContextAction::ClearCell => {
                                                     // 清空走确认弹窗路径，这里不应到达
@@ -1909,10 +1949,12 @@ impl eframe::App for ExcelViewer {
                                                     ContextAction::InsertColumnLeft => {
                                                         sheet.insert_columns(anchor_col, m, false, copy_options);
                                                         self.dirty = true;
+                                                        update_alert_range_expansions_for_col(&mut self.alert_popup.rules, anchor_col, m, sheet);
                                                     }
                                                     ContextAction::InsertColumnRight => {
                                                         sheet.insert_columns(anchor_col, m, true, copy_options);
                                                         self.dirty = true;
+                                                        update_alert_range_expansions_for_col(&mut self.alert_popup.rules, anchor_col + 1, m, sheet);
                                                     }
                                                     _ => {}
                                                 }
