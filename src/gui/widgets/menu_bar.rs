@@ -35,8 +35,6 @@ pub fn draw_menu_bar(
     help_popup: &mut HelpPopupState,
     alert_notify_state: &mut AlertNotifyState,
 ) {
-    let dt = ui.input(|i| i.stable_dt);
-
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
         ui.menu_button("文件", |ui| {
@@ -114,8 +112,10 @@ pub fn draw_menu_bar(
                 help_popup.visible = true;
             }
         });
-    });
 
-    // 菜单栏最右侧：预警通知图标
-    draw_alert_icon(ui, alert_notify_state, dt);
+        // 菜单栏最右侧：预警通知图标（使用右对齐布局推至菜单栏右边缘）
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            draw_alert_icon(ui, alert_notify_state);
+        });
+    });
 }

@@ -1,6 +1,6 @@
 //! 预警消息通知组件
 //!
-//! 在菜单栏右侧显示黄色闪烁警示图标，点击后弹出预警消息弹窗，
+//! 在菜单栏右侧显示黄色实心警示图标，点击后弹出预警消息弹窗，
 //! 列出所有已触发的预警规则，支持点击过滤和重置功能。
 
 use eframe::egui;
@@ -19,13 +19,6 @@ fn compare_equal(cell_value: &str, threshold: &str) -> bool {
         cell_value.trim().to_lowercase() == threshold.trim().to_lowercase()
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-// 常量
-// ═══════════════════════════════════════════════════════════════
-
-/// 闪烁频率：每秒 2 次，即每 500ms 切换一次
-const BLINK_INTERVAL_SECS: f32 = 0.5;
 
 // ═══════════════════════════════════════════════════════════════
 // 数据结构
@@ -55,8 +48,6 @@ pub struct AlertNotifyState {
     pub visible: bool,
     /// 当前已触发的规则列表
     pub triggered_rules: Vec<TriggeredRule>,
-    /// 闪烁计时器（累计秒数）
-    blink_timer: f32,
     /// 是否有任意规则被触发（用于控制图标显隐）
     pub has_triggered: bool,
     /// 当前是否处于过滤状态（有来自预警通知的过滤）
@@ -68,7 +59,6 @@ impl Default for AlertNotifyState {
         Self {
             visible: false,
             triggered_rules: Vec::new(),
-            blink_timer: 0.0,
             has_triggered: false,
             is_filtering: false,
         }
@@ -470,36 +460,40 @@ pub fn filter_by_triggered_rule(
 // 绘制函数
 // ═══════════════════════════════════════════════════════════════
 
-/// 绘制预警通知图标（黄色小灯泡，闪烁）
+/// 绘制预警通知图标（黄色实心小灯泡）
 ///
 /// 在菜单栏最右侧显示。有任何规则被触发时显示，否则隐藏。
-/// 显示时以 500ms 频率闪烁（交替可见/不可见）。
-pub fn draw_alert_icon(ui: &mut egui::Ui, state: &mut AlertNotifyState, dt: f32) {
+/// 固定 18×18 像素，不闪烁（避免因布局尺寸变化导致下方表格震动）。
+pub fn draw_alert_icon(ui: &mut egui::Ui, state: &mut AlertNotifyState) {
     if !state.has_triggered {
         return;
     }
 
-    // 更新闪烁计时器
-    state.blink_timer += dt;
-    if state.blink_timer >= BLINK_INTERVAL_SECS {
-        state.blink_timer -= BLINK_INTERVAL_SECS;
-    }
+    // 固定 18×18 的实心灯泡图标，每帧尺寸恒定，避免布局抖动
+    let desired_size = egui::vec2(18.0, 18.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let painter = ui.painter_at(rect);
 
-    // 每 500ms 切换一次可见状态：前半段可见，后半段不可见
-    let visible = state.blink_timer < (BLINK_INTERVAL_SECS / 2.0);
+    let bulb_color = egui::Color32::from_rgb(255, 200, 0); // 实心黄色灯泡
+    let base_color = egui::Color32::from_rgb(140, 100, 0); // 底座（深黄）
+    let cx = rect.center().x;
 
-    if !visible {
-        // 仍然占用空间以保持布局稳定
-        ui.add_space(20.0);
-        return;
-    }
+    // 灯泡头部：实心圆
+    painter.circle_filled(egui::pos2(cx, rect.top() + 5.5), 5.5, bulb_color);
 
-    // 黄色闪烁警示图标（小灯泡）
-    let response = ui.button(
-        egui::RichText::new("💡")
-            .size(16.0)
-            .color(egui::Color32::from_rgb(255, 200, 0)),
+    // 颈部连接
+    let neck = egui::Rect::from_center_size(
+        egui::pos2(cx, rect.top() + 11.5),
+        egui::vec2(3.0, 2.5),
     );
+    painter.rect_filled(neck, 0.5, base_color);
+
+    // 底座（螺纹）
+    let base = egui::Rect::from_center_size(
+        egui::pos2(cx, rect.top() + 14.5),
+        egui::vec2(6.0, 3.5),
+    );
+    painter.rect_filled(base, 1.0, base_color);
 
     if response.clicked() {
         state.visible = !state.visible;
@@ -510,6 +504,19 @@ pub fn draw_alert_icon(ui: &mut egui::Ui, state: &mut AlertNotifyState, dt: f32)
         "{} 条预警规则已触发，点击查看详情",
         state.triggered_rules.len()
     ));
+}
+
+/// 恢复被预警规则过滤的表格显示：清空隐藏的列/行，并取消过滤状态。
+///
+/// 「关闭」与「重置」按钮共用此逻辑，确保关闭弹窗后表格数据回到原始完整显示。
+fn reset_filter(
+    hidden_columns: &mut HashSet<u32>,
+    hidden_rows: &mut HashSet<u32>,
+    state: &mut AlertNotifyState,
+) {
+    hidden_columns.clear();
+    hidden_rows.clear();
+    state.is_filtering = false;
 }
 
 /// 绘制预警消息弹窗
@@ -529,13 +536,20 @@ pub fn draw_alert_notify_popup(
 
     let mut keep_open = true;
 
+    // 固定尺寸：弹窗高度恒定，不随规则数量变化，超出部分滚动。
+    // 注意：不能使用 ui.available_height() —— Window 本质是 Area（悬浮于屏幕之上、无有界父级），
+    // available_height() 会返回到屏幕底部的剩余高度，反馈到 ScrollArea::max_height 后会把弹窗撑满整个可视区域。
+    let popup_width = 300.0;
+    let popup_height = 250.0;
+    let list_max_height = 180.0;
+
     egui::Window::new("alert_notify_popup")
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
         .open(&mut keep_open)
         .default_pos(ctx.content_rect().right_center() - egui::vec2(320.0, 0.0))
-        .default_size(egui::vec2(300.0, 250.0))
+        .fixed_size(egui::vec2(popup_width, popup_height))
         .show(ctx, |ui| {
             ui.set_min_width(280.0);
 
@@ -548,14 +562,14 @@ pub fn draw_alert_notify_popup(
                         .color(egui::Color32::from_rgb(200, 150, 0)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 重置按钮
-                    if ui.button("🔄 重置").clicked() {
-                        hidden_columns.clear();
-                        hidden_rows.clear();
-                        state.is_filtering = false;
-                    }
+                    // 关闭按钮：关闭弹窗，并恢复被过滤/修改的单元格数据
                     if ui.button("✖").clicked() {
+                        reset_filter(hidden_columns, hidden_rows, state);
                         state.visible = false;
+                    }
+                    // 重置按钮：恢复原始显示
+                    if ui.button("🔄 重置").clicked() {
+                        reset_filter(hidden_columns, hidden_rows, state);
                     }
                 });
             });
@@ -563,10 +577,8 @@ pub fn draw_alert_notify_popup(
             ui.separator();
 
             // ══════ 规则列表 ══════
-            let available_height = ui.available_height() - 10.0;
-
             egui::ScrollArea::vertical()
-                .max_height(available_height.max(100.0))
+                .max_height(list_max_height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if state.triggered_rules.is_empty() {
