@@ -557,9 +557,8 @@ pub fn draw_alert_notify_popup(
     // 弹窗宽度固定；高度随内容（含动画进度）变化，不再用 fixed_size，
     // 也避免使用 ui.available_height()（会撑满整个屏幕）。
     let popup_width = 300.0;
-    // 展开后完整内容高度（分隔线 + 列表 + 提示）。整体放在同一个 ScrollArea 内随进度连续伸缩，
-    // 高度从 0 平滑增长到完整高度，消除展开/收起起始处的布局跳变（抖动）。
-    const EXPAND_HEIGHT: f32 = 205.0;
+    // 列表区（分隔线 + 规则列表）的最大高度；底部提示行放在滚动区之外，列表滚动时始终可见。
+    const LIST_HEIGHT: f32 = 180.0;
 
     egui::Window::new("alert_notify_popup")
         .title_bar(false)
@@ -599,10 +598,11 @@ pub fn draw_alert_notify_popup(
                 });
             });
 
-            // ══════ 展开内容（分隔线+列表+提示同处一个 ScrollArea，高度随进度连续伸缩）══════
+            // ══════ 展开内容 ══════
             if p > 0.001 {
+                // 滚动列表区（分隔线 + 规则列表）
                 egui::ScrollArea::vertical()
-                    .max_height(eased * EXPAND_HEIGHT)
+                    .max_height(eased * LIST_HEIGHT)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.separator();
@@ -652,15 +652,15 @@ pub fn draw_alert_notify_popup(
                                 ));
                             }
                         }
-
-                        // 底部提示（透明度随动画进度淡入）
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new("💡 点击预警消息过滤表格，点击「重置」恢复")
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(140, 140, 140).linear_multiply(eased)),
-                        );
                     });
+
+                // ══════ 底部固定提示行（位于滚动区之外，列表滚动时始终可见）══════
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("💡 点击预警消息过滤表格，点击「重置」恢复")
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(140, 140, 140).linear_multiply(eased)),
+                );
             }
         });
 
