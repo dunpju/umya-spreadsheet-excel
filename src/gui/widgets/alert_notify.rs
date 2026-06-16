@@ -52,6 +52,8 @@ pub struct AlertNotifyState {
     pub has_triggered: bool,
     /// 当前是否处于过滤状态（有来自预警通知的过滤）
     pub is_filtering: bool,
+    /// 是否折叠（折叠时仅显示标题栏，点击标题栏展开）。默认展开。
+    pub collapsed: bool,
 }
 
 impl Default for AlertNotifyState {
@@ -61,6 +63,7 @@ impl Default for AlertNotifyState {
             triggered_rules: Vec::new(),
             has_triggered: false,
             is_filtering: false,
+            collapsed: false,
         }
     }
 }
@@ -536,12 +539,23 @@ pub fn draw_alert_notify_popup(
 
     let mut keep_open = true;
 
-    // 固定尺寸：弹窗高度恒定，不随规则数量变化，超出部分滚动。
-    // 注意：不能使用 ui.available_height() —— Window 本质是 Area（悬浮于屏幕之上、无有界父级），
-    // available_height() 会返回到屏幕底部的剩余高度，反馈到 ScrollArea::max_height 后会把弹窗撑满整个可视区域。
+    // ── 展开/折叠动画 ──
+    // 使用 egui 内置动画器 animate_value_with_time：它在动画进行期间会自动 request_repaint，
+    // 与 egui 的刷新机制协调一致，从而避免「手动逐帧驱动 + egui 休眠」造成的卡顿。
+    const ANIM_TIME: f32 = 0.2;
+    let target = if state.collapsed { 0.0 } else { 1.0 };
+    let p = ctx
+        .animate_value_with_time(egui::Id::new("alert_notify_expand"), target, ANIM_TIME)
+        .clamp(0.0, 1.0);
+    // 对进度施加 ease-in-out（smoothstep），使高度伸缩更柔和，消除线性插值的生硬感
+    let eased = p * p * (3.0 - 2.0 * p);
+
+    // 弹窗宽度固定；高度随内容（含动画进度）变化，不再用 fixed_size，
+    // 也避免使用 ui.available_height()（会撑满整个屏幕）。
     let popup_width = 300.0;
-    let popup_height = 250.0;
-    let list_max_height = 180.0;
+    // 展开后完整内容高度（分隔线 + 列表 + 提示）。整体放在同一个 ScrollArea 内随进度连续伸缩，
+    // 高度从 0 平滑增长到完整高度，消除展开/收起起始处的布局跳变（抖动）。
+    const EXPAND_HEIGHT: f32 = 205.0;
 
     egui::Window::new("alert_notify_popup")
         .title_bar(false)
@@ -549,18 +563,25 @@ pub fn draw_alert_notify_popup(
         .collapsible(false)
         .open(&mut keep_open)
         .default_pos(ctx.content_rect().right_center() - egui::vec2(320.0, 0.0))
-        .fixed_size(egui::vec2(popup_width, popup_height))
         .show(ctx, |ui| {
-            ui.set_min_width(280.0);
+            ui.set_min_width(popup_width);
 
-            // ══════ 自定义标题栏 ══════
+            // ══════ 自定义标题栏（可点击展开/折叠）══════
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("⚠ 预警消息")
-                        .size(13.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(200, 150, 0)),
-                );
+                // 展开/折叠箭头：▶ 折叠 / ▼ 展开
+                let arrow = if state.collapsed { "▶" } else { "▼" };
+                let title_text = egui::RichText::new(format!("{}  ⚠ 预警消息", arrow))
+                    .size(13.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(200, 150, 0));
+                let title_resp = ui.add(egui::Button::new(title_text).frame(false));
+                if title_resp.clicked() {
+                    state.collapsed = !state.collapsed;
+                }
+                title_resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(if state.collapsed { "点击展开" } else { "点击折叠" });
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 关闭按钮：关闭弹窗，并恢复被过滤/修改的单元格数据
                     if ui.button("✖").clicked() {
@@ -574,66 +595,69 @@ pub fn draw_alert_notify_popup(
                 });
             });
 
-            ui.separator();
+            // ══════ 展开内容（分隔线+列表+提示同处一个 ScrollArea，高度随进度连续伸缩）══════
+            if p > 0.001 {
+                egui::ScrollArea::vertical()
+                    .max_height(eased * EXPAND_HEIGHT)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.separator();
 
-            // ══════ 规则列表 ══════
-            egui::ScrollArea::vertical()
-                .max_height(list_max_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if state.triggered_rules.is_empty() {
-                        ui.label(
-                            egui::RichText::new("暂无触发的预警规则")
-                                .size(12.0)
-                                .color(egui::Color32::GRAY),
-                        );
-                    } else {
-                        for (idx, rule) in state.triggered_rules.iter().enumerate() {
-                            // 规则消息（红色文字），可点击过滤
-                            let msg_text = if rule.message.is_empty() {
-                                format!(
-                                    "规则{}: {} {} {} (范围: {})",
-                                    idx + 1, rule.operator, rule.value, "", rule.range
-                                )
-                            } else {
-                                rule.message.clone()
-                            };
+                        // ══════ 规则列表 ══════
+                        if state.triggered_rules.is_empty() {
+                            ui.label(
+                                egui::RichText::new("暂无触发的预警规则")
+                                    .size(12.0)
+                                    .color(egui::Color32::GRAY),
+                            );
+                        } else {
+                            for (idx, rule) in state.triggered_rules.iter().enumerate() {
+                                // 规则消息（红色文字），可点击过滤
+                                let msg_text = if rule.message.is_empty() {
+                                    format!(
+                                        "规则{}: {} {} {} (范围: {})",
+                                        idx + 1, rule.operator, rule.value, "", rule.range
+                                    )
+                                } else {
+                                    rule.message.clone()
+                                };
 
-                            let label = egui::RichText::new(msg_text)
-                                .size(12.0)
-                                .color(egui::Color32::RED);
+                                let label = egui::RichText::new(msg_text)
+                                    .size(12.0)
+                                    .color(egui::Color32::RED);
 
-                            let response = ui.selectable_label(false, label);
+                                let response = ui.selectable_label(false, label);
 
-                            if response.clicked() {
-                                // 点击过滤
-                                if let Some(sheet) = sheet {
-                                    filter_by_triggered_rule(
-                                        rule,
-                                        sheet,
-                                        hidden_columns,
-                                        hidden_rows,
-                                    );
-                                    state.is_filtering = true;
+                                if response.clicked() {
+                                    // 点击过滤
+                                    if let Some(sheet) = sheet {
+                                        filter_by_triggered_rule(
+                                            rule,
+                                            sheet,
+                                            hidden_columns,
+                                            hidden_rows,
+                                        );
+                                        state.is_filtering = true;
+                                    }
                                 }
+
+                                // 悬停提示
+                                response.on_hover_text(format!(
+                                    "点击过滤 | {} {} {} | 范围: {}",
+                                    rule.operator, rule.value, if rule.is_horizontal { "横向" } else { "纵向" }, rule.range
+                                ));
                             }
-
-                            // 悬停提示
-                            response.on_hover_text(format!(
-                                "点击过滤 | {} {} {} | 范围: {}",
-                                rule.operator, rule.value, if rule.is_horizontal { "横向" } else { "纵向" }, rule.range
-                            ));
                         }
-                    }
-                });
 
-            // 底部提示
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("💡 点击预警消息过滤表格，点击「重置」恢复")
-                    .size(10.0)
-                    .color(egui::Color32::from_rgb(140, 140, 140)),
-            );
+                        // 底部提示（透明度随动画进度淡入）
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new("💡 点击预警消息过滤表格，点击「重置」恢复")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140).linear_multiply(eased)),
+                        );
+                    });
+            }
         });
 
     if !keep_open {
