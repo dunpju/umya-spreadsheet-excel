@@ -500,6 +500,10 @@ pub fn draw_alert_icon(ui: &mut egui::Ui, state: &mut AlertNotifyState) {
 
     if response.clicked() {
         state.visible = !state.visible;
+        // 每次打开面板都强制为展开状态，不沿用用户此前可能设置的折叠状态
+        if state.visible {
+            state.collapsed = false;
+        }
     }
 
     // 鼠标悬停提示
