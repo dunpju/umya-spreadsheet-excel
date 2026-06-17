@@ -64,9 +64,9 @@ pub struct RowFilterState {
 }
 
 impl RowFilterState {
-    /// 该筛选项是否激活（用户输入了关键字）
+    /// 该筛选项是否激活（用户输入了非空白关键字）
     pub fn is_active(&self) -> bool {
-        !self.keyword.is_empty()
+        !self.keyword.trim().is_empty()
     }
 }
 
@@ -1077,6 +1077,7 @@ fn expand_hidden_rows_for_merged_cells(
 ///
 /// 不匹配的行加入 `hidden_rows`。注意：本函数不清空 `hidden_rows`，
 /// 调用者需在调用前根据需要清空。
+#[allow(dead_code)]
 pub fn execute_column_filter(
     state: &SearchWindowState,
     sheet: &SheetData,
@@ -1228,13 +1229,10 @@ pub fn draw_search_window(
                                     } else {
                                         hidden_columns.clear();
                                     }
-                                    // 第二步：行过滤（清空后依次叠加行筛选 + 列过滤）
-                                    hidden_rows.clear();
+                                    // 第二步：行筛选（独立于列搜索，仅在行筛选有输入时触发）
                                     if has_row_input {
+                                        hidden_rows.clear();
                                         execute_row_search(state, sheet, hidden_rows);
-                                    }
-                                    if has_col_filter {
-                                        execute_column_filter(state, sheet, hidden_rows);
                                     }
                                 }
                             }
@@ -1351,13 +1349,10 @@ pub fn draw_search_window(
                                     } else {
                                         hidden_columns.clear();
                                     }
-                                    // 行过滤
-                                    hidden_rows.clear();
+                                    // 行筛选（独立于列搜索，仅在行筛选有输入时触发）
                                     if has_rf {
+                                        hidden_rows.clear();
                                         execute_row_search(state, sheet, hidden_rows);
-                                    }
-                                    if has_cf {
-                                        execute_column_filter(state, sheet, hidden_rows);
                                     }
                                     if has_cf || has_rf {
                                         response.surrender_focus();
@@ -1423,18 +1418,18 @@ pub fn draw_search_window(
                         if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
                             if let Some(data) = excel_data {
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
-                                    let has_col = state.selected_index < state.column_options.len()
-                                        && !state.search_keyword.is_empty();
+                                    let has_col = state.column_filters.iter().any(|f| f.is_active());
                                     let has_row = state.row_filters.iter().any(|f| f.is_active());
-                                    if has_col {
+                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
+                                        state.selected_index = first.column_index;
+                                        state.search_keyword = first.filter_value.clone();
                                         execute_search(state, sheet, hidden_columns);
                                     } else {
                                         hidden_columns.clear();
                                     }
                                     if has_row {
-                                        execute_row_search(state, sheet, hidden_rows);
-                                    } else {
                                         hidden_rows.clear();
+                                        execute_row_search(state, sheet, hidden_rows);
                                     }
                                     if has_col || has_row {
                                         response.surrender_focus();
