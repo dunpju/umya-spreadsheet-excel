@@ -341,6 +341,7 @@ pub fn load_column_options(
 /// 对于跨列合并：左上角单元格的值代表整个合并区域。
 /// - 左上角匹配（不在隐藏集）→ 整个合并范围的所有列都设为可见
 /// - 左上角不匹配（在隐藏集中）→ 整个合并范围的所有列都隐藏
+#[allow(dead_code)]
 fn expand_hidden_for_merged_cells(
     sheet: &SheetData,
     hidden_columns: &mut HashSet<u32>,
@@ -372,6 +373,7 @@ fn expand_hidden_for_merged_cells(
 }
 
 /// 在已排序的列值中搜索匹配区间（二分查找 + 双向线性确认）
+#[allow(dead_code)]
 fn search_sorted(
     col_values: &[(u32, String)],
     keyword: &str,
@@ -444,10 +446,249 @@ fn search_sorted(
     }
 }
 
+/// 在已排序列值中二分查找匹配列（返回匹配的列号集合）
+///
+/// 与 `search_sorted` 算法同构，区别在于返回匹配列而非隐藏列，
+/// 用于多条件组合搜索时独立计算每条条件的匹配结果。
+fn find_sorted_column_matches(
+    col_values: &[(u32, String)],
+    keyword: &str,
+) -> HashSet<u32> {
+    let n = col_values.len();
+    if n == 0 {
+        return HashSet::new();
+    }
+
+    // 二分定位第一个 ≥ keyword 的元素
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if col_values[mid].1.as_str() < keyword {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let mut matched_indices = HashSet::new();
+
+    // 向右扩展
+    let mut i = lo;
+    while i < n {
+        let val = &col_values[i].1;
+        if val.contains(keyword) {
+            matched_indices.insert(i);
+        } else if val.as_str() > keyword {
+            let prefix_len = keyword.len().min(val.len());
+            if !val[..prefix_len].starts_with(&keyword[..prefix_len]) {
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    // 向左扩展
+    if lo > 0 {
+        let mut i = lo.saturating_sub(1);
+        loop {
+            let val = &col_values[i].1;
+            if val.contains(keyword) {
+                matched_indices.insert(i);
+            } else {
+                let prefix_len = keyword.len().min(val.len());
+                if val.as_str() < keyword
+                    && !keyword[..prefix_len].starts_with(&val[..prefix_len])
+                {
+                    break;
+                }
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
+
+    matched_indices.into_iter().map(|idx| col_values[idx].0).collect()
+}
+
+/// 计算单条列筛选条件匹配的列集合
+///
+/// 在指定行的目标列右侧搜索，返回匹配关键字的列号集合。
+/// 与 `execute_search` 核心逻辑一致，但不修改任何状态，
+/// 用于多条件组合搜索时独立计算每条条件的匹配结果。
+///
+/// 返回：(匹配列集合, 搜索的列总数, 是否使用二分查找)
+fn compute_column_matches(
+    sheet: &SheetData,
+    target_col: u32,
+    target_row: u32,
+    keyword: &str,
+) -> (HashSet<u32>, usize, bool) {
+    let keyword = keyword.to_lowercase();
+    let max_col = sheet.max_col;
+
+    let mut col_values: Vec<(u32, String)> = Vec::new();
+    for col in (target_col + 1)..=max_col {
+        let value = sheet
+            .get_cell(target_row, col)
+            .map(|c| cell_search_value(c).to_lowercase())
+            .unwrap_or_default();
+        col_values.push((col, value));
+    }
+
+    let total = col_values.len();
+    if total == 0 {
+        return (HashSet::new(), 0, false);
+    }
+
+    let is_sorted = col_values.windows(2).all(|w| w[0].1 <= w[1].1);
+
+    let mut visible: HashSet<u32> = if is_sorted {
+        find_sorted_column_matches(&col_values, &keyword)
+    } else {
+        col_values
+            .iter()
+            .filter(|(_, v)| v.contains(&keyword))
+            .map(|(col, _)| *col)
+            .collect()
+    };
+
+    // 合并单元格跨列对齐（与 expand_hidden_for_merged_cells 对称，作用于可见列集合）
+    for mr in &sheet.merged_cells {
+        if mr.start_col == mr.end_col {
+            continue;
+        }
+        if target_row < mr.start_row || target_row > mr.end_row {
+            continue;
+        }
+        let top_left_visible = visible.contains(&mr.start_col);
+        if top_left_visible {
+            for c in mr.start_col..=mr.end_col {
+                visible.insert(c);
+            }
+        } else {
+            for c in mr.start_col..=mr.end_col {
+                visible.remove(&c);
+            }
+        }
+    }
+
+    (visible, total, is_sorted)
+}
+
+/// 执行多条件列搜索（支持 AND/OR 组合）
+///
+/// 遍历所有激活的列筛选条件，对每条条件独立计算匹配列集合，
+/// 然后按各条件的 logic 字段顺序组合:
+/// - **And**: 取交集（缩小范围）
+/// - **Or**: 取并集（扩大范围）
+///
+/// 第一条条件的列选项和关键字同步写入 `selected_index` / `search_keyword`
+/// 以保持向后兼容。
+pub fn execute_multi_column_search(
+    state: &mut SearchWindowState,
+    sheet: &SheetData,
+    hidden_columns: &mut HashSet<u32>,
+) {
+    let active: Vec<&ColumnFilter> = state
+        .column_filters
+        .iter()
+        .filter(|f| f.is_active())
+        .collect();
+
+    if active.is_empty() {
+        return;
+    }
+
+    // 同步第一条条件到 selected_index / search_keyword（向后兼容）
+    state.selected_index = active[0].column_index;
+    state.search_keyword = active[0].filter_value.clone();
+
+    let first_opt = match state.column_options.get(active[0].column_index) {
+        Some(o) => o,
+        None => return,
+    };
+
+    // 第一条条件：计算初始匹配列
+    let (mut visible, total, is_sorted) = compute_column_matches(
+        sheet,
+        first_opt.col,
+        first_opt.row,
+        &active[0].filter_value,
+    );
+    let mut max_total = total;
+    let mut any_binary = is_sorted;
+
+    // 使用第一条激活条件的 logic 作为全局组合逻辑
+    let global_logic = active[0].logic;
+
+    // 后续条件：按全局 AND/OR 组合
+    for f in &active[1..] {
+        if f.column_index >= state.column_options.len() {
+            continue;
+        }
+        let opt = &state.column_options[f.column_index];
+        let (filter_visible, ft, fis) =
+            compute_column_matches(sheet, opt.col, opt.row, &f.filter_value);
+        max_total = max_total.max(ft);
+        any_binary = any_binary || fis;
+
+        match global_logic {
+            FilterLogic::And => {
+                // 交集：仅保留同时匹配的列
+                visible = visible
+                    .intersection(&filter_visible)
+                    .copied()
+                    .collect();
+            }
+            FilterLogic::Or => {
+                // 并集：匹配任一条件即可见
+                visible.extend(filter_visible);
+            }
+        }
+    }
+
+    // 应用结果到 hidden_columns
+    hidden_columns.clear();
+    for col in 1..=sheet.max_col {
+        if !visible.contains(&col) {
+            hidden_columns.insert(col);
+        }
+    }
+
+    // 确保所有激活条件的目标列自身不被隐藏
+    for f in &active {
+        if f.column_index < state.column_options.len() {
+            hidden_columns.remove(&state.column_options[f.column_index].col);
+        }
+    }
+
+    // 更新状态
+    state.total_searched = max_total;
+    state.matched_count = visible.len();
+    state.use_binary_search = any_binary;
+    state.is_searching = true;
+
+    // 诊断信息
+    let first_ref = &state.column_options[active[0].column_index];
+    let col_letter = crate::excel::reader::col_to_letter(first_ref.col);
+    state.debug_info = format!(
+        "选中{}{} | 共{}列 | 匹配{}列 隐藏{}列",
+        col_letter,
+        first_ref.row,
+        max_total,
+        visible.len(),
+        hidden_columns.len()
+    );
+}
+
 /// 执行搜索操作
 ///
 /// 在选中列所在行的右侧所有列中进行模糊匹配，
 /// 不匹配的列将被加入 hidden_columns 集合。
+#[allow(dead_code)]
 pub fn execute_search(
     state: &mut SearchWindowState,
     sheet: &SheetData,
@@ -1221,11 +1462,9 @@ pub fn draw_search_window(
                         {
                             if let Some(data) = excel_data {
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
-                                    // 第一步：列搜索（由第一个激活的列筛选条件驱动，隐藏列）
-                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
-                                        state.selected_index = first.column_index;
-                                        state.search_keyword = first.filter_value.clone();
-                                        execute_search(state, sheet, hidden_columns);
+                                    // 第一步：列搜索（多条件 AND/OR 组合，隐藏列）
+                                    if has_col_filter {
+                                        execute_multi_column_search(state, sheet, hidden_columns);
                                     } else {
                                         hidden_columns.clear();
                                     }
@@ -1341,11 +1580,9 @@ pub fn draw_search_window(
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
                                     let has_cf = state.column_filters.iter().any(|f| f.is_active());
                                     let has_rf = state.row_filters.iter().any(|f| f.is_active());
-                                    // 列搜索（由第一个激活条件驱动）
-                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
-                                        state.selected_index = first.column_index;
-                                        state.search_keyword = first.filter_value.clone();
-                                        execute_search(state, sheet, hidden_columns);
+                                    // 列搜索（多条件 AND/OR 组合，隐藏列）
+                                    if has_cf {
+                                        execute_multi_column_search(state, sheet, hidden_columns);
                                     } else {
                                         hidden_columns.clear();
                                     }
@@ -1361,8 +1598,14 @@ pub fn draw_search_window(
                             }
                         }
 
-                        // AND/OR 选择下拉框（每条条件独立）
+                        // AND/OR 选择下拉框（仅第一条可交互，后续条件跟随第一条逻辑）
                         let filter_logic = state.column_filters[idx].logic;
+                        let first_active_idx = state
+                            .column_filters
+                            .iter()
+                            .position(|f| f.is_active())
+                            .unwrap_or(0);
+                        let is_first_active = idx == first_active_idx;
                         egui::ComboBox::from_id_salt(format!("filter_logic_{}", idx))
                             .selected_text(match filter_logic {
                                 FilterLogic::And => "AND",
@@ -1370,12 +1613,14 @@ pub fn draw_search_window(
                             })
                             .width(50.0)
                             .show_ui(ui, |ui| {
-                                if ui.selectable_label(filter_logic == FilterLogic::And, "AND").clicked() {
-                                    state.column_filters[idx].logic = FilterLogic::And;
-                                }
-                                if ui.selectable_label(filter_logic == FilterLogic::Or, "OR").clicked() {
-                                    state.column_filters[idx].logic = FilterLogic::Or;
-                                }
+                                ui.add_enabled_ui(is_first_active, |ui| {
+                                    if ui.selectable_label(filter_logic == FilterLogic::And, "AND").clicked() {
+                                        state.column_filters[idx].logic = FilterLogic::And;
+                                    }
+                                    if ui.selectable_label(filter_logic == FilterLogic::Or, "OR").clicked() {
+                                        state.column_filters[idx].logic = FilterLogic::Or;
+                                    }
+                                });
                             });
 
                         // 删除按钮（至少保留一条）
@@ -1429,10 +1674,9 @@ pub fn draw_search_window(
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
                                     let has_col = state.column_filters.iter().any(|f| f.is_active());
                                     let has_row = state.row_filters.iter().any(|f| f.is_active());
-                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
-                                        state.selected_index = first.column_index;
-                                        state.search_keyword = first.filter_value.clone();
-                                        execute_search(state, sheet, hidden_columns);
+                                    // 列搜索（多条件 AND/OR 组合，隐藏列）
+                                    if has_col {
+                                        execute_multi_column_search(state, sheet, hidden_columns);
                                     } else {
                                         hidden_columns.clear();
                                     }
