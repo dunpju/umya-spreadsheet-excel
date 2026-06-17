@@ -1458,27 +1458,6 @@ pub fn draw_search_window(
                 // 标题
                 ui.label(egui::RichText::new("搜索").size(13.0).strong());
 
-                // 统计信息（搜索后显示）
-                if state.is_searching {
-                    ui.add_space(16.0);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "匹配 {}/{} 列",
-                            state.matched_count,
-                            state.total_searched
-                        ))
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(0, 130, 0)),
-                    );
-                    if state.use_binary_search {
-                        ui.label(
-                            egui::RichText::new("(二分)")
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(100, 100, 100)),
-                        );
-                    }
-                }
-
                 // 右侧按钮（从右到左排列）
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
@@ -1561,6 +1540,26 @@ pub fn draw_search_window(
             // ══════ 列筛选行（支持多条件动态增删） ══════
             ui.horizontal(|ui| {
                 ui.label("列筛选:");
+                // 统计信息（搜索后显示）
+                if state.is_searching {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "匹配 {}/{} 列",
+                            state.matched_count,
+                            state.total_searched
+                        ))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0, 130, 0)),
+                    );
+                    if state.use_binary_search {
+                        ui.label(
+                            egui::RichText::new("(二分)")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
+                }
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
@@ -1603,7 +1602,7 @@ pub fn draw_search_window(
                                 }
                             });
 
-                        ui.add_space(2.0);
+                        ui.add_space(0.0);
 
                         // 筛选值输入框（desired_width=180）
                         let input = egui::TextEdit::singleline(&mut state.column_filters[idx].filter_value)
