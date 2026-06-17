@@ -70,6 +70,37 @@ impl RowFilterState {
     }
 }
 
+/// 列筛选条件（支持多条动态增删）
+///
+/// 每个条件包含一个目标列选择（通过 column_options 索引）、
+/// 一个筛选值和一个独立的逻辑组合方式（And/Or），
+/// 用于按列值过滤数据行。
+#[derive(Debug, Clone)]
+pub struct ColumnFilter {
+    /// 选中的列选项索引（0-based，对应 column_options）
+    pub column_index: usize,
+    /// 筛选值（关键字）
+    pub filter_value: String,
+    /// 该条件与前面条件的组合逻辑（And 取交集，Or 取并集）
+    pub logic: FilterLogic,
+}
+
+impl ColumnFilter {
+    /// 该筛选条件是否激活（用户输入了筛选值）
+    pub fn is_active(&self) -> bool {
+        !self.filter_value.is_empty()
+    }
+}
+
+/// 多条件列筛选的逻辑组合
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterLogic {
+    /// 所有条件均需匹配
+    And,
+    /// 任一条件匹配即可
+    Or,
+}
+
 /// 搜索窗口状态
 #[derive(Debug)]
 pub struct SearchWindowState {
@@ -112,6 +143,13 @@ pub struct SearchWindowState {
     pub row_total_searched: usize,
     /// 行筛选诊断信息
     pub row_debug_info: String,
+
+    // ========== 多条件列筛选（扩展行过滤） ==========
+    /// 动态列筛选条件列表
+    pub column_filters: Vec<ColumnFilter>,
+    /// 列筛选逻辑（And / Or，保留兼容，实际使用 ColumnFilter.logic）
+    #[allow(dead_code)]
+    pub filter_logic: FilterLogic,
 }
 
 impl Default for SearchWindowState {
@@ -132,6 +170,12 @@ impl Default for SearchWindowState {
             row_matched_count: 0,
             row_total_searched: 0,
             row_debug_info: String::new(),
+            column_filters: vec![ColumnFilter {
+                column_index: 0,
+                filter_value: String::new(),
+                logic: FilterLogic::And,
+            }],
+            filter_logic: FilterLogic::And, // 保留兼容，新逻辑使用 ColumnFilter.logic
         }
     }
 }
@@ -1024,6 +1068,85 @@ fn expand_hidden_rows_for_merged_cells(
     }
 }
 
+/// 执行多条件列筛选（按列值过滤数据行）
+///
+/// 根据 `column_filters` 中的条件，对每行数据检查指定列的值是否匹配。
+/// 使用 `filter_logic` 决定多条件间的组合方式：
+/// - **And**: 所有激活条件均匹配时，该行才可见
+/// - **Or**: 任一激活条件匹配时，该行即可见
+///
+/// 不匹配的行加入 `hidden_rows`。注意：本函数不清空 `hidden_rows`，
+/// 调用者需在调用前根据需要清空。
+pub fn execute_column_filter(
+    state: &SearchWindowState,
+    sheet: &SheetData,
+    hidden_rows: &mut HashSet<u32>,
+) {
+    // 收集激活的筛选条件
+    let active: Vec<&ColumnFilter> = state
+        .column_filters
+        .iter()
+        .filter(|f| f.is_active())
+        .collect();
+
+    if active.is_empty() {
+        return;
+    }
+
+    let max_row = sheet.max_row;
+    let config_rows: HashSet<u32> = state
+        .column_options
+        .iter()
+        .map(|opt| opt.row)
+        .collect();
+
+    // 逐条顺序组合：第一条收集匹配行，后续 AND 取交集、OR 取并集
+    let mut matched_rows: HashSet<u32> = HashSet::new();
+
+    for (i, f) in active.iter().enumerate() {
+        // 计算当前条件匹配的行集合
+        let mut filter_matches: HashSet<u32> = HashSet::new();
+        if f.column_index < state.column_options.len() {
+            let col = state.column_options[f.column_index].col;
+            let keyword = f.filter_value.to_lowercase();
+            for row in 1..=max_row {
+                if config_rows.contains(&row) {
+                    continue;
+                }
+                let value = sheet
+                    .get_cell(row, col)
+                    .map(|c| cell_search_value(c).to_lowercase())
+                    .unwrap_or_default();
+                if value.contains(&keyword) {
+                    filter_matches.insert(row);
+                }
+            }
+        }
+
+        // 与已累积结果组合
+        if i == 0 {
+            // 第一条：直接作为初始集合
+            matched_rows = filter_matches;
+        } else if f.logic == FilterLogic::And {
+            // AND：取交集（缩小范围）
+            matched_rows = matched_rows
+                .intersection(&filter_matches)
+                .copied()
+                .collect();
+        } else {
+            // OR：取并集（扩大范围）
+            matched_rows.extend(filter_matches);
+        }
+    }
+
+    // 未匹配的行加入 hidden_rows
+    for row in 1..=max_row {
+        if !config_rows.contains(&row) && !matched_rows.contains(&row) {
+            hidden_rows.insert(row);
+        }
+    }
+}
+
 /// * `state` - 搜索窗口状态（可变引用）
 /// * `excel_data` - Excel 数据（只读引用）
 /// * `current_sheet` - 当前工作表索引
@@ -1049,6 +1172,7 @@ pub fn draw_search_window(
         .default_pos(ctx.content_rect().center() - egui::vec2(210.0, 70.0))
         .show(ctx, |ui| {
             ui.set_min_width(440.0);
+            ui.set_max_width(440.0);
 
             // ══════ 自定义标题栏 ══════
             ui.horizontal(|ui| {
@@ -1085,35 +1209,38 @@ pub fn draw_search_window(
                             state.visible = false;
                         }
 
-                        // 搜索按钮（统一执行列筛选 + 行筛选）
-                        let has_col_input = excel_data.is_some()
-                            && state.selected_index < state.column_options.len()
-                            && !state.search_keyword.is_empty();
+                        // 搜索按钮（统一执行列搜索 + 列过滤 + 行筛选）
+                        let has_col_filter = excel_data.is_some()
+                            && state.column_filters.iter().any(|f| f.is_active());
                         let has_row_input = excel_data.is_some()
                             && state.row_filters.iter().any(|f| f.is_active());
                         if ui
-                            .add_enabled(has_col_input || has_row_input, egui::Button::new("🔍 搜索"))
+                            .add_enabled(has_col_filter || has_row_input, egui::Button::new("🔍 搜索"))
                             .clicked()
                         {
                             if let Some(data) = excel_data {
                                 if let Some(sheet) = data.get_sheet(current_sheet) {
-                                    // 第一步：列筛选（有输入则执行，否则清空旧结果）
-                                    if has_col_input {
+                                    // 第一步：列搜索（由第一个激活的列筛选条件驱动，隐藏列）
+                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
+                                        state.selected_index = first.column_index;
+                                        state.search_keyword = first.filter_value.clone();
                                         execute_search(state, sheet, hidden_columns);
                                     } else {
                                         hidden_columns.clear();
                                     }
-                                    // 第二步：行筛选（在列筛选结果上）
+                                    // 第二步：行过滤（清空后依次叠加行筛选 + 列过滤）
+                                    hidden_rows.clear();
                                     if has_row_input {
                                         execute_row_search(state, sheet, hidden_rows);
-                                    } else {
-                                        hidden_rows.clear();
+                                    }
+                                    if has_col_filter {
+                                        execute_column_filter(state, sheet, hidden_rows);
                                     }
                                 }
                             }
                         }
 
-                        // 重置按钮（统一清空列筛选 + 行筛选）
+                        // 重置按钮（统一清空列搜索 + 列过滤 + 行筛选）
                         if ui.button("🔄 重置").clicked() {
                             hidden_columns.clear();
                             hidden_rows.clear();
@@ -1128,6 +1255,13 @@ pub fn draw_search_window(
                                 f.keyword.clear();
                             }
                             state.row_debug_info.clear();
+                            // 清空列筛选条件（保留一条空条件）
+                            state.column_filters.clear();
+                            state.column_filters.push(ColumnFilter {
+                                column_index: 0,
+                                filter_value: String::new(),
+                                logic: FilterLogic::And,
+                            });
                         }
                     },
                 );
@@ -1150,72 +1284,123 @@ pub fn draw_search_window(
                 }
             }
 
-            // 列筛选下拉框 + 搜索关键字输入框（同行）
+            // ══════ 列筛选行（支持多条件动态增删） ══════
             ui.horizontal(|ui| {
                 ui.label("列筛选:");
-                let selected_text = state
-                    .column_options
-                    .get(state.selected_index)
-                    .map(|o| format!("{} ({})", o.title, o.cell_ref))
-                    .unwrap_or_else(|| "请选择列...".to_string());
-                egui::ComboBox::from_id_salt("search_column_select")
-                    .selected_text(&selected_text)
-                    .width(166.0)
-                    .show_ui(ui, |ui| {
-                        for (i, opt) in state.column_options.iter().enumerate() {
-                            let label = format!("{} ({})", opt.title, opt.cell_ref);
-                            if ui
-                                .selectable_label(i == state.selected_index, &label)
-                                .clicked()
-                            {
-                                if i != state.selected_index {
-                                    state.selected_index = i;
-                                    // 切换列筛选 → 自动重置搜索结果，恢复表格
-                                    hidden_columns.clear();
-                                    hidden_rows.clear();
-                                    state.search_keyword.clear();
-                                    for f in &mut state.row_filters {
-                                        f.keyword.clear();
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui.button("添加筛选条件").clicked() {
+                            state.column_filters.push(ColumnFilter {
+                                column_index: 0,
+                                filter_value: String::new(),
+                                logic: FilterLogic::And,
+                            });
+                        }
+                    },
+                );
+            });
+
+            // 渲染每条列筛选条件
+            {
+                let filter_count = state.column_filters.len();
+                let mut delete_idx = None;
+
+                for idx in 0..filter_count {
+                    ui.horizontal(|ui| {
+                        // 列选择下拉框（width=166）
+                        let col_sel = state.column_filters[idx].column_index;
+                        let selected_text = state.column_options
+                            .get(col_sel)
+                            .map(|o| format!("{} ({})", o.title, o.cell_ref))
+                            .unwrap_or_else(|| "请选择列...".to_string());
+                        egui::ComboBox::from_id_salt(format!("col_filter_select_{}", idx))
+                            .selected_text(&selected_text)
+                            .width(166.0)
+                            .show_ui(ui, |ui| {
+                                for (i, opt) in state.column_options.iter().enumerate() {
+                                    let label = format!("{} ({})", opt.title, opt.cell_ref);
+                                    if ui
+                                        .selectable_label(col_sel == i, &label)
+                                        .clicked()
+                                    {
+                                        state.column_filters[idx].column_index = i;
                                     }
-                                    state.is_searching = false;
-                                    state.matched_count = 0;
-                                    state.total_searched = 0;
+                                }
+                            });
+
+                        ui.add_space(2.0);
+
+                        // 筛选值输入框（desired_width=180）
+                        let input = egui::TextEdit::singleline(&mut state.column_filters[idx].filter_value)
+                            .desired_width(180.0)
+                            .hint_text("输入搜索关键字...");
+                        let response = ui.add(input);
+
+                        // Enter 键触发统一搜索（列搜索 + 列过滤 + 行筛选）
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
+                            if let Some(data) = excel_data {
+                                if let Some(sheet) = data.get_sheet(current_sheet) {
+                                    let has_cf = state.column_filters.iter().any(|f| f.is_active());
+                                    let has_rf = state.row_filters.iter().any(|f| f.is_active());
+                                    // 列搜索（由第一个激活条件驱动）
+                                    if let Some(first) = state.column_filters.iter().find(|f| f.is_active()) {
+                                        state.selected_index = first.column_index;
+                                        state.search_keyword = first.filter_value.clone();
+                                        execute_search(state, sheet, hidden_columns);
+                                    } else {
+                                        hidden_columns.clear();
+                                    }
+                                    // 行过滤
+                                    hidden_rows.clear();
+                                    if has_rf {
+                                        execute_row_search(state, sheet, hidden_rows);
+                                    }
+                                    if has_cf {
+                                        execute_column_filter(state, sheet, hidden_rows);
+                                    }
+                                    if has_cf || has_rf {
+                                        response.surrender_focus();
+                                    }
                                 }
                             }
                         }
+
+                        // AND/OR 选择下拉框（每条条件独立）
+                        let filter_logic = state.column_filters[idx].logic;
+                        egui::ComboBox::from_id_salt(format!("filter_logic_{}", idx))
+                            .selected_text(match filter_logic {
+                                FilterLogic::And => "AND",
+                                FilterLogic::Or => "OR",
+                            })
+                            .width(50.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(filter_logic == FilterLogic::And, "AND").clicked() {
+                                    state.column_filters[idx].logic = FilterLogic::And;
+                                }
+                                if ui.selectable_label(filter_logic == FilterLogic::Or, "OR").clicked() {
+                                    state.column_filters[idx].logic = FilterLogic::Or;
+                                }
+                            });
+
+                        // 删除按钮（至少保留一条）
+                        let can_delete = filter_count > 1;
+                        if ui.add_enabled(can_delete, egui::Button::new("X")).clicked() && can_delete {
+                            delete_idx = Some(idx);
+                        }
                     });
 
-                ui.add_space(6.0);
-
-                let input = egui::TextEdit::singleline(&mut state.search_keyword)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("输入搜索关键字...");
-                let response = ui.add(input);
-
-                // Enter 键触发统一搜索（列筛选 + 行筛选）
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
-                    if let Some(data) = excel_data {
-                        if let Some(sheet) = data.get_sheet(current_sheet) {
-                            let has_col = state.selected_index < state.column_options.len()
-                                && !state.search_keyword.is_empty();
-                            let has_row = state.row_filters.iter().any(|f| f.is_active());
-                            if has_col {
-                                execute_search(state, sheet, hidden_columns);
-                            } else {
-                                hidden_columns.clear();
-                            }
-                            if has_row {
-                                execute_row_search(state, sheet, hidden_rows);
-                            } else {
-                                hidden_rows.clear();
-                            }
-                            if has_col || has_row {
-                                response.surrender_focus();
-                            }
-                        }
+                    // 条件行间添加小间距
+                    if idx + 1 < filter_count {
+                        ui.add_space(2.0);
                     }
                 }
-            });
+
+                // 延迟执行删除（避免迭代中修改集合导致越界）
+                if let Some(idx) = delete_idx {
+                    state.column_filters.remove(idx);
+                }
+            }
 
             // ══════ 行筛选（列筛选下方，支持多列） ══════
             if !state.row_filters.is_empty() {
