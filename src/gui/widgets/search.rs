@@ -81,7 +81,8 @@ pub struct ColumnFilter {
     pub column_index: usize,
     /// 筛选值（关键字）
     pub filter_value: String,
-    /// 该条件与前面条件的组合逻辑（And 取交集，Or 取并集）
+    /// 该条件与下一条条件的组合逻辑（And 取交集，Or 取并集）
+    /// 最后一条条件的 logic 无实际效果（无下一条可组合）。
     pub logic: FilterLogic,
 }
 
@@ -578,12 +579,14 @@ fn compute_column_matches(
     (visible, total, is_sorted)
 }
 
-/// 执行多条件列搜索（支持 AND/OR 组合）
+/// 执行多条件列搜索（支持 AND/OR 组合，AND 优先级高于 OR）
 ///
 /// 遍历所有激活的列筛选条件，对每条条件独立计算匹配列集合，
-/// 然后按各条件的 logic 字段顺序组合:
-/// - **And**: 取交集（缩小范围）
-/// - **Or**: 取并集（扩大范围）
+/// 然后遵循 MySQL 一致的运算符优先级规则进行组合：
+/// - **AND** 优先级高于 **OR**
+/// - 将条件按 OR 边界分组，每组内用 AND 取交集，组间取并集
+///
+/// 例如 `条件1 OR 条件2 AND 条件3` 被解析为 `条件1 OR (条件2 AND 条件3)`。
 ///
 /// 第一条条件的列选项和关键字同步写入 `selected_index` / `search_keyword`
 /// 以保持向后兼容。
@@ -606,26 +609,16 @@ pub fn execute_multi_column_search(
     state.selected_index = active[0].column_index;
     state.search_keyword = active[0].filter_value.clone();
 
-    let first_opt = match state.column_options.get(active[0].column_index) {
-        Some(o) => o,
-        None => return,
-    };
+    // ═══ AND 优先级高于 OR：按 OR 分组，组内 AND 取交集，组间取并集 ═══
+    // 例如: C1 OR C2 AND C3 AND C4 OR C5
+    //   → 分组: [C1], [C2 AND C3 AND C4], [C5]
+    //   → 结果: C1 ∪ (C2∩C3∩C4) ∪ C5
+    let mut or_groups: Vec<HashSet<u32>> = Vec::new();
+    let mut current_and_group: Option<HashSet<u32>> = None;
+    let mut max_total = 0usize;
+    let mut any_binary = false;
 
-    // 第一条条件：计算初始匹配列
-    let (mut visible, total, is_sorted) = compute_column_matches(
-        sheet,
-        first_opt.col,
-        first_opt.row,
-        &active[0].filter_value,
-    );
-    let mut max_total = total;
-    let mut any_binary = is_sorted;
-
-    // 使用第一条激活条件的 logic 作为全局组合逻辑
-    let global_logic = active[0].logic;
-
-    // 后续条件：按全局 AND/OR 组合
-    for f in &active[1..] {
+    for (i, f) in active.iter().enumerate() {
         if f.column_index >= state.column_options.len() {
             continue;
         }
@@ -635,19 +628,41 @@ pub fn execute_multi_column_search(
         max_total = max_total.max(ft);
         any_binary = any_binary || fis;
 
-        match global_logic {
-            FilterLogic::And => {
-                // 交集：仅保留同时匹配的列
-                visible = visible
-                    .intersection(&filter_visible)
-                    .copied()
-                    .collect();
+        // 使用前一条条件的 logic 决定当前条件与前一条的组合方式
+        // 条件 N 的 logic 表示"该条件与下一条条件的组合逻辑"
+        // 因此条件 i 的前驱运算符 = active[i-1].logic
+        let prev_logic = if i == 0 {
+            FilterLogic::And // 第一条无前驱，作为 AND 组起始
+        } else {
+            active[i - 1].logic
+        };
+
+        if prev_logic == FilterLogic::And {
+            // 第一条条件或 AND 连接：合并到当前 AND 组
+            if let Some(ref mut group) = current_and_group {
+                // AND：取交集（缩小范围）
+                *group = group.intersection(&filter_visible).copied().collect();
+            } else {
+                current_and_group = Some(filter_visible);
             }
-            FilterLogic::Or => {
-                // 并集：匹配任一条件即可见
-                visible.extend(filter_visible);
+        } else {
+            // OR：结束当前 AND 组，开始新的 AND 组
+            if let Some(group) = current_and_group.take() {
+                or_groups.push(group);
             }
+            current_and_group = Some(filter_visible);
         }
+    }
+
+    // 将最后一个 AND 组加入 OR 组列表
+    if let Some(group) = current_and_group.take() {
+        or_groups.push(group);
+    }
+
+    // 合并所有 OR 组（并集）
+    let mut visible: HashSet<u32> = HashSet::new();
+    for group in or_groups {
+        visible.extend(group);
     }
 
     // 应用结果到 hidden_columns
@@ -1309,12 +1324,14 @@ fn expand_hidden_rows_for_merged_cells(
     }
 }
 
-/// 执行多条件列筛选（按列值过滤数据行）
+/// 执行多条件列筛选（按列值过滤数据行，AND 优先级高于 OR）
 ///
 /// 根据 `column_filters` 中的条件，对每行数据检查指定列的值是否匹配。
-/// 使用 `filter_logic` 决定多条件间的组合方式：
-/// - **And**: 所有激活条件均匹配时，该行才可见
-/// - **Or**: 任一激活条件匹配时，该行即可见
+/// 遵循 MySQL 一致的运算符优先级规则：
+/// - **AND** 优先级高于 **OR**
+/// - 将条件按 OR 边界分组，每组内用 AND 取交集，组间取并集
+///
+/// 例如 `条件1 OR 条件2 AND 条件3` 被解析为 `条件1 OR (条件2 AND 条件3)`。
 ///
 /// 不匹配的行加入 `hidden_rows`。注意：本函数不清空 `hidden_rows`，
 /// 调用者需在调用前根据需要清空。
@@ -1342,8 +1359,9 @@ pub fn execute_column_filter(
         .map(|opt| opt.row)
         .collect();
 
-    // 逐条顺序组合：第一条收集匹配行，后续 AND 取交集、OR 取并集
-    let mut matched_rows: HashSet<u32> = HashSet::new();
+    // ═══ AND 优先级高于 OR：按 OR 分组，组内 AND 取交集，组间取并集 ═══
+    let mut or_groups: Vec<HashSet<u32>> = Vec::new();
+    let mut current_and_group: Option<HashSet<u32>> = None;
 
     for (i, f) in active.iter().enumerate() {
         // 计算当前条件匹配的行集合
@@ -1365,20 +1383,39 @@ pub fn execute_column_filter(
             }
         }
 
-        // 与已累积结果组合
-        if i == 0 {
-            // 第一条：直接作为初始集合
-            matched_rows = filter_matches;
-        } else if f.logic == FilterLogic::And {
-            // AND：取交集（缩小范围）
-            matched_rows = matched_rows
-                .intersection(&filter_matches)
-                .copied()
-                .collect();
+        // 使用前一条条件的 logic 决定当前条件与前一条的组合方式
+        let prev_logic = if i == 0 {
+            FilterLogic::And
         } else {
-            // OR：取并集（扩大范围）
-            matched_rows.extend(filter_matches);
+            active[i - 1].logic
+        };
+
+        if prev_logic == FilterLogic::And {
+            // 第一条条件或 AND 连接：合并到当前 AND 组
+            if let Some(ref mut group) = current_and_group {
+                // AND：取交集（缩小范围）
+                *group = group.intersection(&filter_matches).copied().collect();
+            } else {
+                current_and_group = Some(filter_matches);
+            }
+        } else {
+            // OR：结束当前 AND 组，开始新的 AND 组
+            if let Some(group) = current_and_group.take() {
+                or_groups.push(group);
+            }
+            current_and_group = Some(filter_matches);
         }
+    }
+
+    // 将最后一个 AND 组加入 OR 组列表
+    if let Some(group) = current_and_group.take() {
+        or_groups.push(group);
+    }
+
+    // 合并所有 OR 组（并集）
+    let mut matched_rows: HashSet<u32> = HashSet::new();
+    for group in or_groups {
+        matched_rows.extend(group);
     }
 
     // 未匹配的行加入 hidden_rows
@@ -1598,14 +1635,8 @@ pub fn draw_search_window(
                             }
                         }
 
-                        // AND/OR 选择下拉框（仅第一条可交互，后续条件跟随第一条逻辑）
+                        // AND/OR 选择下拉框（每条条件独立设置，支持混合 AND/OR 表达式）
                         let filter_logic = state.column_filters[idx].logic;
-                        let first_active_idx = state
-                            .column_filters
-                            .iter()
-                            .position(|f| f.is_active())
-                            .unwrap_or(0);
-                        let is_first_active = idx == first_active_idx;
                         egui::ComboBox::from_id_salt(format!("filter_logic_{}", idx))
                             .selected_text(match filter_logic {
                                 FilterLogic::And => "AND",
@@ -1613,14 +1644,12 @@ pub fn draw_search_window(
                             })
                             .width(50.0)
                             .show_ui(ui, |ui| {
-                                ui.add_enabled_ui(is_first_active, |ui| {
-                                    if ui.selectable_label(filter_logic == FilterLogic::And, "AND").clicked() {
-                                        state.column_filters[idx].logic = FilterLogic::And;
-                                    }
-                                    if ui.selectable_label(filter_logic == FilterLogic::Or, "OR").clicked() {
-                                        state.column_filters[idx].logic = FilterLogic::Or;
-                                    }
-                                });
+                                if ui.selectable_label(filter_logic == FilterLogic::And, "AND").clicked() {
+                                    state.column_filters[idx].logic = FilterLogic::And;
+                                }
+                                if ui.selectable_label(filter_logic == FilterLogic::Or, "OR").clicked() {
+                                    state.column_filters[idx].logic = FilterLogic::Or;
+                                }
                             });
 
                         // 删除按钮（至少保留一条）
