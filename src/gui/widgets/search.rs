@@ -1675,6 +1675,11 @@ pub fn draw_search_window(
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
+                
+                // ══════ 行筛选 ══════
+                ui.horizontal(|ui| {
+                    ui.label("行筛选:");
+                });
 
                 // 为每个行筛选项渲染一个输入行
                 let filter_count = state.row_filters.len();
