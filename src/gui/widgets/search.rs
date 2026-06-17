@@ -1803,6 +1803,11 @@ pub fn draw_search_window(
                                 .desired_width(250.0)
                                 .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
                             let response = ui.add(input);
+                
+                // ══════ 行筛选 ══════
+                ui.horizontal(|ui| {
+                    ui.label("行筛选:");
+                });
 
                             // 输入被清空时自动还原行筛选结果（恢复显示所有行）
                             if response.changed() && state.row_filters[idx].keyword.trim().is_empty() && state.is_row_searching {
