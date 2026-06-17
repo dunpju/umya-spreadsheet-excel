@@ -1414,6 +1414,15 @@ pub fn draw_search_window(
                             .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
                         let response = ui.add(input);
 
+                        // 输入被清空时自动还原行筛选结果（恢复显示所有行）
+                        if response.changed() && state.row_filters[idx].keyword.trim().is_empty() && state.is_row_searching {
+                            hidden_rows.clear();
+                            state.is_row_searching = false;
+                            state.row_matched_count = 0;
+                            state.row_total_searched = 0;
+                            state.row_debug_info.clear();
+                        }
+
                         // Enter 键触发统一搜索（列筛选 + 行筛选）
                         if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
                             if let Some(data) = excel_data {
