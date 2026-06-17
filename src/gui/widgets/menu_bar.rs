@@ -61,6 +61,8 @@ pub fn draw_menu_bar(
             if ui.add_enabled(has_data, egui::Button::new("搜索")).clicked() {
                 ui.close();
                 search_window.visible = true;
+                // 每次打开都强制为展开状态，不沿用用户此前可能设置的折叠状态
+                search_window.collapsed = false;
                 search_window.options_loaded = false; // 触发重新加载下拉选项
             }
         });
