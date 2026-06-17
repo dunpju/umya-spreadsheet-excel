@@ -1791,6 +1791,19 @@ pub fn draw_search_window(
                     // ══════ 行筛选 ══════
                     ui.horizontal(|ui| {
                         ui.label("行筛选:");
+                        // 统计信息（搜索后显示）
+                        if state.row_total_searched > 0 {
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "匹配 {}/{} 行",
+                                    state.row_matched_count,
+                                    state.row_total_searched
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0, 130, 0)),
+                            );
+                        }
                     });
 
                     // 为每个行筛选项渲染一个输入行
