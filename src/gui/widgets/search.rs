@@ -61,6 +61,9 @@ pub struct RowFilterState {
     pub row: u32,
     /// 用户输入的关键字
     pub keyword: String,
+    /// 该筛选项与下一条筛选项的组合逻辑（And 取交集，Or 取并集）
+    /// 最后一条的 logic 无实际效果（无下一条可组合）。
+    pub logic: FilterLogic,
 }
 
 impl RowFilterState {
@@ -878,6 +881,7 @@ pub fn load_row_filter_configs(
                 col,
                 row,
                 keyword: String::new(),
+                logic: FilterLogic::And,
             }
         })
         .collect()
@@ -969,6 +973,45 @@ fn match_filter_value(value: &str, keywords: &[String], is_range: bool) -> bool 
             .iter()
             .any(|kw| row_fuzzy_match(value, kw))
     }
+}
+
+/// 评估单行在多条件 AND/OR 表达式下是否匹配（AND 优先级高于 OR）
+///
+/// 与列搜索（`execute_multi_column_search`）的分组规则一致：
+/// 按 OR 边界将条件切分为若干 AND 组，组内全部为真（取交集），
+/// 组间任一为真即可（取并集）。
+///
+/// - `matches[i]`：第 i 个激活筛选条件在该行是否匹配；
+/// - `logic_seq[i]`：第 i 个筛选条件与下一条的组合逻辑（最后一条无意义），
+///   因此条件 i 与条件 i-1 之间的运算符为 `logic_seq[i - 1]`。
+fn row_matches_expr(matches: &[bool], logic_seq: &[FilterLogic]) -> bool {
+    if matches.is_empty() {
+        return true;
+    }
+    let mut group_ok = true; // 当前 AND 组是否全部为真
+    let mut group_active = false; // 是否已开始第一个 AND 组
+    for (i, &m) in matches.iter().enumerate() {
+        // 条件 i 的前驱运算符 = logic_seq[i - 1]（首条件无前驱，按 AND 组起始）
+        let prev_logic = if i == 0 {
+            FilterLogic::And
+        } else {
+            // 数组越界保护：logic_seq 与 matches 等长
+            logic_seq.get(i - 1).copied().unwrap_or(FilterLogic::And)
+        };
+        if i == 0 || prev_logic == FilterLogic::Or {
+            // 开始新 AND 组：若上一组全部为真，OR 整体即匹配（短路）
+            if group_active && group_ok {
+                return true;
+            }
+            group_ok = m;
+            group_active = true;
+        } else {
+            // AND：组内取交集
+            group_ok = group_ok && m;
+        }
+    }
+    // 最后一组的 AND 结果
+    group_ok
 }
 
 /// P0: 在已排序行值中二分查找匹配行
@@ -1140,6 +1183,15 @@ pub fn execute_row_search(
         })
         .collect();
 
+    // ═══ AND/OR 运算符序列（与列搜索一致） ═══
+    // active[i].logic 表示条件 i 与下一条的组合逻辑；最后一条无下一条，
+    // 其 logic 不参与运算。存在 OR 时整体不再是纯 AND。
+    let logic_seq: Vec<FilterLogic> = active_filters.iter().map(|f| f.logic).collect();
+    let has_or = logic_seq
+        .iter()
+        .take(logic_seq.len().saturating_sub(1))
+        .any(|&l| l == FilterLogic::Or);
+
     // 用于诊断信息的搜索模式标签
     let search_mode: &str;
 
@@ -1151,8 +1203,8 @@ pub fn execute_row_search(
         .windows(2)
         .all(|w| w[0].1 <= w[1].1);
 
-    if is_sorted {
-        // ══════════ P0: 二分查找路径 ══════════
+    if !has_or && is_sorted {
+        // ══════════ P0: 二分查找路径（仅纯 AND 时可用：首列必须匹配） ══════════
         search_mode = "二分";
 
         // 在第一列中二分查找匹配行
@@ -1217,16 +1269,32 @@ pub fn execute_row_search(
                 // 显式捕获引用（move 闭包中引用是 Copy，可安全传递到线程）
                 let all_col_data_ref = &all_col_data;
                 let parsed_ref = &parsed;
+                let logic_seq_ref = &logic_seq;
+                let use_or = has_or;
 
                 handles.push(s.spawn(move || {
                     let mut local_hidden = HashSet::new();
                     for idx in start_idx..end_idx {
                         let row = all_col_data_ref[0][idx].0;
-                        let all_matched = parsed_ref.iter().enumerate().all(|(fi, pf)| {
-                            let value = &all_col_data_ref[fi][idx].1;
-                            match_filter_value(value, &pf.keywords, pf.is_range)
-                        });
-                        if !all_matched {
+                        let hide = if use_or {
+                            // 多条件 AND/OR 组合：逐条件求值后按运算符求整体
+                            let matches: Vec<bool> = parsed_ref
+                                .iter()
+                                .enumerate()
+                                .map(|(fi, pf)| {
+                                    let value = &all_col_data_ref[fi][idx].1;
+                                    match_filter_value(value, &pf.keywords, pf.is_range)
+                                })
+                                .collect();
+                            !row_matches_expr(&matches, logic_seq_ref)
+                        } else {
+                            // 纯 AND：全部匹配才可见
+                            !parsed_ref.iter().enumerate().all(|(fi, pf)| {
+                                let value = &all_col_data_ref[fi][idx].1;
+                                match_filter_value(value, &pf.keywords, pf.is_range)
+                            })
+                        };
+                        if hide {
                             local_hidden.insert(row);
                         }
                     }
@@ -1250,14 +1318,33 @@ pub fn execute_row_search(
             .map(|pf| collect_column_values(sheet, pf.col, start_row, max_row))
             .collect();
 
-        for idx in 0..row_count {
-            let row = all_col_data[0][idx].0;
-            let all_matched = parsed.iter().enumerate().all(|(fi, pf)| {
-                let value = &all_col_data[fi][idx].1;
-                match_filter_value(value, &pf.keywords, pf.is_range)
-            });
-            if !all_matched {
-                hidden_rows.insert(row);
+        if has_or {
+            // 多条件 AND/OR 组合：逐条件求值后按运算符求整体
+            for idx in 0..row_count {
+                let row = all_col_data[0][idx].0;
+                let matches: Vec<bool> = parsed
+                    .iter()
+                    .enumerate()
+                    .map(|(fi, pf)| {
+                        let value = &all_col_data[fi][idx].1;
+                        match_filter_value(value, &pf.keywords, pf.is_range)
+                    })
+                    .collect();
+                if !row_matches_expr(&matches, &logic_seq) {
+                    hidden_rows.insert(row);
+                }
+            }
+        } else {
+            // 纯 AND：全部匹配才可见
+            for idx in 0..row_count {
+                let row = all_col_data[0][idx].0;
+                let all_matched = parsed.iter().enumerate().all(|(fi, pf)| {
+                    let value = &all_col_data[fi][idx].1;
+                    match_filter_value(value, &pf.keywords, pf.is_range)
+                });
+                if !all_matched {
+                    hidden_rows.insert(row);
+                }
             }
         }
     }
@@ -1675,6 +1762,11 @@ pub fn draw_search_window(
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
+                
+                // ══════ 行筛选 ══════
+                ui.horizontal(|ui| {
+                    ui.label("行筛选:");
+                });
 
                 // 为每个行筛选项渲染一个输入行
                 let filter_count = state.row_filters.len();
@@ -1683,7 +1775,7 @@ pub fn draw_search_window(
                     ui.horizontal(|ui| {
                         ui.label(format!("{} ({}):", title, state.row_filters[idx].cell_ref));
                         let input = egui::TextEdit::singleline(&mut state.row_filters[idx].keyword)
-                            .desired_width(f32::INFINITY)
+                            .desired_width(250.0)
                             .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
                         let response = ui.add(input);
 
@@ -1718,6 +1810,29 @@ pub fn draw_search_window(
                                 }
                             }
                         }
+
+                        // AND/OR 选择下拉框（每条条件独立设置，支持混合 AND/OR 表达式）
+                        let filter_logic = state.row_filters[idx].logic;
+                        egui::ComboBox::from_id_salt(format!("row_filter_logic_{}", idx))
+                            .selected_text(match filter_logic {
+                                FilterLogic::And => "AND",
+                                FilterLogic::Or => "OR",
+                            })
+                            .width(50.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(filter_logic == FilterLogic::And, "AND")
+                                    .clicked()
+                                {
+                                    state.row_filters[idx].logic = FilterLogic::And;
+                                }
+                                if ui
+                                    .selectable_label(filter_logic == FilterLogic::Or, "OR")
+                                    .clicked()
+                                {
+                                    state.row_filters[idx].logic = FilterLogic::Or;
+                                }
+                            });
                     });
 
                     // 行间添加小间距
