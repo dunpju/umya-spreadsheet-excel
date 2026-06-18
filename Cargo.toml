@@ -3,6 +3,10 @@ name = "umya-spreadsheet-excel"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "my-excel"     # 你想要的可执行文件名
+path = "src/main.rs" # 入口文件路径
+
 [dependencies]
 umya-spreadsheet = "3.0"
 eframe = "0.34.3"
