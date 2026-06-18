@@ -10,6 +10,7 @@ use crate::gui::widgets::alert_popup::AlertPopupState;
 use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
 use crate::gui::widgets::help_popup::HelpPopupState;
 use crate::gui::widgets::alert_notify::AlertNotifyState;
+use crate::license::LicenseStatus;
 use crate::gui::widgets::draw_alert_icon;
 
 /// 绘制菜单栏
@@ -34,6 +35,7 @@ pub fn draw_menu_bar(
     _cond_format_popup: &mut CondFormatPopupState,
     help_popup: &mut HelpPopupState,
     alert_notify_state: &mut AlertNotifyState,
+    lic_status: &LicenseStatus,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
         // 文件菜单
@@ -107,7 +109,21 @@ pub fn draw_menu_bar(
         // 关于菜单
         ui.menu_button("关于", |ui| {
             ui.label("My Excel v0.1.0");
-            ui.label("使用 umya-spreadsheet 和 egui 构建");
+            let label = match lic_status {
+                LicenseStatus::Trial { days_left } => {
+                    format!("剩余 {} 天", (*days_left).max(0))
+                }
+                LicenseStatus::Licensed { days_left } => {
+                    match days_left {
+                        None => "已授权（永久）".to_string(),
+                        Some(d) => format!("已授权（剩余 {} 天）", (*d).max(0)),
+                    }
+                }
+                LicenseStatus::TrialExpired => "试用期已结束".to_string(),
+                LicenseStatus::LicensedExpired => "授权已到期".to_string(),
+                LicenseStatus::Tampered => "授权异常".to_string(),
+            };
+            ui.label(label);
             ui.separator();
             if ui.button("帮助").clicked() {
                 ui.close();

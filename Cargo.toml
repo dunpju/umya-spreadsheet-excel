@@ -11,3 +11,22 @@ rfd = "0.17.2"
 serde_yaml = "0.9"
 dirs = "6"
 
+# —— 离线授权 ——
+ed25519-dalek = { version = "2", default-features = false }   # 授权码验签
+sha2 = "0.10"                                                  # 指纹/摘要
+hmac = "0.12"                                                  # 试用状态校验
+base64 = "0.22"                                               # 授权码/指纹编码
+image = { version = "0.25", default-features = false, features = ["png"] }  # 解码付款二维码 PNG
+winreg = "0.52"                                               # Windows 注册表（机器指纹 + 冗余存储）
+
+# release 构建配置：strip 去符号（主要防逆向手段）。
+# 注意：lto=true + codegen-units=1 会导致 wgpu/naga 依赖栈在 Windows 上
+# 触发 STATUS_STACK_BUFFER_OVERRUN 编译崩溃，故不启用。
+[profile.release]
+strip = true
+
+# 单独降低 `windows` crate（eframe/wgpu 的间接依赖）的优化级别，
+# 规避 opt-level=3 下 rustc/LLVM 触发的 STATUS_STACK_BUFFER_OVERRUN 编译崩溃。
+[profile.release.package.windows]
+opt-level = 1
+

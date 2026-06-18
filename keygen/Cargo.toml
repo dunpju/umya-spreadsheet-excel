@@ -1,0 +1,13 @@
+[package]
+name = "keygen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立 workspace，避免被主 crate 一起编译/分发
+[workspace]
+
+[dependencies]
+ed25519-dalek = "2"
+rand = "0.8"
+base64 = "0.22"

@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::excel::reader::ExcelData;
 use crate::gui::state::LoadState;
 use crate::gui::fonts::setup_fonts;
+use crate::license::{time as lic_time, LicenseManager, LicenseStatus};
 use crate::gui::widgets::{
     draw_menu_bar,
     draw_import_dialog,
@@ -17,6 +18,7 @@ use crate::gui::widgets::{
     draw_convert_popup,
     draw_help_popup,
     draw_alert_notify_popup,
+    draw_license_popup,
     check_alert_rules,
     update_alert_range_expansions_for_col,
     update_alert_range_expansions_for_row,
@@ -27,6 +29,7 @@ use crate::gui::widgets::{
     NameBoxState,
     SearchWindowState,
     AlertNotifyState,
+    LicensePopupState,
     draw_search_window,
 };
 use std::collections::HashSet;
@@ -448,11 +451,18 @@ pub struct ExcelViewer {
     pub hidden_rows: HashSet<u32>,
     /// 预警通知状态（图标 + 弹窗）
     pub alert_notify_state: AlertNotifyState,
+    /// 授权管理器（试用/激活状态）
+    pub license: LicenseManager,
+    /// 授权 / 付款弹窗状态
+    pub license_popup: LicensePopupState,
 }
 
 impl ExcelViewer {
     /// 创建新的 Excel 查看器实例，初始化所有状态
     pub fn new() -> Self {
+        let license = LicenseManager::load();
+        let blocking = license.status(lic_time::today_epoch_day()).is_blocking();
+        let machine_code = license.machine_code().to_string();
         Self {
             excel_data: None,
             current_sheet: 0,
@@ -494,6 +504,12 @@ impl ExcelViewer {
             hidden_columns: HashSet::new(),
             hidden_rows: HashSet::new(),
             alert_notify_state: AlertNotifyState::default(),
+            license,
+            license_popup: LicensePopupState {
+                visible: blocking,
+                machine_code,
+                ..Default::default()
+            },
         }
     }
 
@@ -684,6 +700,11 @@ impl ExcelViewer {
 
     /// 启动异步保存 Excel 文件
     fn start_async_save(&mut self, ctx: egui::Context) {
+        // 授权拦截：试用到期/未激活时禁止保存（校验点分散到核心功能）
+        if self.license.status(lic_time::today_epoch_day()).is_blocking() {
+            self.license_popup.visible = true;
+            return;
+        }
         let output_path = match self.generate_save_path() {
             Some(p) => p,
             None => return,
@@ -747,10 +768,33 @@ impl eframe::App for ExcelViewer {
         // 设置中文字体
         setup_fonts(&ctx);
 
+        // 授权状态（每帧计算一次，供状态栏徽标与帧末拦截复用）
+        let lic_today = lic_time::today_epoch_day();
+        let lic_status = self.license.status(lic_today);
+        if lic_status.is_blocking() {
+            self.license_popup.visible = true;
+            // 真模态：全屏遮罩屏蔽所有主界面交互，仅允许激活弹窗操作
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                ui.painter().rect_filled(
+                    ui.max_rect(),
+                    0.0,
+                    egui::Color32::from_black_alpha(200),
+                );
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(
+                        egui::RichText::new("请激活后继续使用")
+                            .size(18.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                });
+            });
+        } else {
+
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup, &mut self.alert_notify_state);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup, &mut self.alert_notify_state, &lic_status);
         });
 
         // 绘制导入对话框
@@ -2054,8 +2098,33 @@ impl eframe::App for ExcelViewer {
         // 处理延迟的保存请求（在 excel_data 借用释放后执行）
         if self.save_requested {
             self.save_requested = false;
-            self.start_async_save(ctx);
+            self.start_async_save(ctx.clone());
+        }
+        } // end of !is_blocking
+
+        // —— 授权状态检查（每帧）——
+        let status_text = license_status_text(&lic_status);
+        // 闭包只捕获 self.license，与 &mut self.license_popup 是不相交字段借用（edition 2021）
+        let mut activate_cb = |code: &str| match self.license.activate(code, lic_today) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.message()),
+        };
+        draw_license_popup(&ctx, &mut self.license_popup, &status_text, &mut activate_cb);
+        // 正常（非拦截）运行时推进高水位，防时钟回拨
+        if !lic_status.is_blocking() {
+            self.license.checkpoint(lic_today);
         }
     }
 }
+
+/// 授权弹窗顶部标题文案（仅在 blocking 状态下调用）
+fn license_status_text(status: &LicenseStatus) -> String {
+    match status {
+        LicenseStatus::TrialExpired => "试用期已结束".to_string(),
+        LicenseStatus::LicensedExpired => "授权已到期".to_string(),
+        LicenseStatus::Tampered => "检测到异常（时钟回拨或文件被改动）".to_string(),
+        _ => "需要激活".to_string(),
+    }
+}
+
 

@@ -5,8 +5,11 @@ use std::path::PathBuf;
 
 mod excel;
 mod gui;
+mod util;
+mod license;
 
 use gui::viewer::ExcelViewer;
+use util::date::days_to_ymd;
 
 /// 将崩溃信息（panic 信息 + 调用栈）写入日志文件，并弹窗提示用户
 fn handle_panic(info: &std::panic::PanicHookInfo) {
@@ -88,35 +91,12 @@ fn chrono_free_timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
 }
 
-/// 将 Unix 天数转换为年月日
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year { break; }
-        days -= days_in_year;
-        year += 1;
-    }
-    let leap = is_leap(year);
-    let month_days: [u64; 12] = if leap {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 1u64;
-    for &md in &month_days {
-        if days < md { break; }
-        days -= md;
-        month += 1;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
 fn main() -> eframe::Result<()> {
+    // CLI: --uuid 打印本机注册表路径 UUID 后退出
+    if std::env::args().any(|a| a == "--uuid") {
+        println!("{}", license::fingerprint::registry_uuid());
+        return Ok(());
+    }
     // 注册崩溃处理：捕获 panic 并记录调用栈到 crash.log
     std::panic::set_hook(Box::new(handle_panic));
 
