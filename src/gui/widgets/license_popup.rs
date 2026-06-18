@@ -122,11 +122,38 @@ pub fn draw_license_popup(
                     ui.label("扫码付款(9.9/月)后，联系开发者获取授权码");
                     ui.add_space(8.0);
 
-                    // 机器码 + "复制"按钮：作为一个整体水平居中
+                    // 机器码 + "复制"按钮：作为一个整体水平居中。
+                    // egui 水平布局没有内置"整组居中"（ui.horizontal 会声明满宽且左对齐），
+                    // 故先测量内容整体宽度，再在行内留左 padding 实现居中。
                     ui.label("本机机器码（请发送给开发者）：");
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        let code = state.machine_code.clone();
+                    let code = state.machine_code.clone();
+
+                    // 1) 测量机器码文本宽度（monospace 14px）
+                    let code_w = ui
+                        .painter()
+                        .layout_no_wrap(
+                            code.clone(),
+                            egui::FontId::new(14.0, egui::FontFamily::Monospace),
+                            egui::Color32::BLACK,
+                        )
+                        .size()
+                        .x;
+                    // 2) 测量"复制"按钮宽度（按钮文本 + 两侧 padding，且不小于最小交互宽度）
+                    let btn_galley = ui.painter().layout_no_wrap(
+                        "复制".to_string(),
+                        egui::FontId::proportional(ui.text_style_height(&egui::TextStyle::Button)),
+                        egui::Color32::BLACK,
+                    );
+                    let bp = ui.spacing().button_padding;
+                    let btn_w = (btn_galley.size().x + bp.x * 2.0).max(ui.spacing().interact_size.x);
+
+                    let gap = 6.0;
+                    let total_w = code_w + gap + btn_w;
+                    let left_pad = ((ui.available_width() - total_w) * 0.5).max(0.0);
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        ui.allocate_space(egui::vec2(left_pad, 0.0));
                         ui.monospace(
                             egui::RichText::new(&code)
                                 .size(14.0)
