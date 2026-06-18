@@ -60,7 +60,7 @@ license_popup ──► viewer ──► LicenseManager(mod.rs)
 **密钥拓扑**：
 
 - 开发者离线生成一对 Ed25519 密钥，**私钥永不分发**（最好放离线机 / 加密 U 盘）。
-- **32 字节公钥**作为常量编进 `crypto.rs`。
+- **32 字节公钥**以二进制格式写入 `keygen/public_key.bin`，由 `crypto.rs` 通过 `include_bytes!` 在编译时嵌入。
 - 胡椒（`HMAC_PEPPER`）混淆编进二进制（非真正机密，仅抬高门槛）。
 
 **授权码格式**（JWT 风格，可读、可调试）：
@@ -413,8 +413,9 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// ⚠️ 替换为你的真实公钥（keygen 生成的 verifying_key().to_bytes()）
-pub const DEVELOPER_PUBLIC_KEY: [u8; 32] = [0u8; 32];
+/// ⚠️ 内嵌的开发者公钥（32 字节）。由 keygen `gen-keys` 生成，私钥离线保管。
+/// 从 keygen/public_key.bin 二进制文件在编译时嵌入。
+const DEVELOPER_PUBLIC_KEY: [u8; 32] = *include_bytes!("../../keygen/public_key.bin");
 
 /// 内置胡椒（混淆），用于派生 HMAC 密钥，抬高本地篡改门槛。
 const HMAC_PEPPER: &[u8] = b"umya-excel-v1-s3cr3t-pepper-CHANGE-ME";
@@ -814,8 +815,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use base64::Engine;
 
 fn main() {
-    let priv_bytes: [u8; 32] = [/* 从加密文件读出 */];
-    let signing = SigningKey::from_bytes(&priv_bytes);
+    let seed_bytes = std::fs::read("private_key.bin").expect("read private key failed");
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_bytes);
+    let signing = SigningKey::from_bytes(&seed);
 
     let machine  = std::env::args().nth(1).expect("machine code");
     let days     = std::env::args().nth(2).and_then(|d| d.parse::<u64>().ok()).unwrap_or(0); // 0=永久
@@ -836,11 +839,13 @@ fn main() {
 
 ```rust
 use rand::rngs::OsRng;
-let mut rng = OsRng;
-let sk = SigningKey::generate(&mut rng);
-let pk = sk.verifying_key();
-// sk.to_bytes() → 私钥文件(32B)，妥善离线保管；
-// pk.to_bytes() → 填入 crypto.rs::DEVELOPER_PUBLIC_KEY
+use rand::RngCore;
+let mut seed = [0u8; 32];
+OsRng.fill_bytes(&mut seed);
+let signing = SigningKey::from_bytes(&seed);
+let pk = signing.verifying_key();
+// seed → 写入 private_key.bin（32B），妥善离线保管，勿提交 git；
+// pk.to_bytes() → 写入 public_key.bin（32B 二进制），供 crypto.rs 通过 include_bytes! 引用
 ```
 
 **典型使用**：
@@ -871,7 +876,7 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 1. 抽离 `src/util/date.rs`，把 `main.rs` 的日期函数迁移过去并 `pub`。
 2. 新建 `src/license/` 各子模块，先实现 `crypto` / `fingerprint` / `payload` / `time`（可单元测试）。
-3. 写 keygen 工具生成密钥对，把公钥填入 `crypto.rs`。
+3. 写 keygen 工具生成密钥对（私钥写入 `private_key.bin`，公钥写入 `keygen/public_key.bin`），`crypto.rs` 通过 `include_bytes!` 自动引用公钥。
 4. 实现 `store`（AES-256-GCM 加密 + 文件 + 注册表）与 `LicenseManager::load / status / checkpoint`。
 5. 实现 `license_popup` 并接入 `viewer.rs`。
 6. `Cargo.toml` 加入依赖（含 `aes-gcm`、`getrandom`），`--release` 编译验证。

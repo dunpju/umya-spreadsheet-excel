@@ -59,7 +59,10 @@ fn gen_keys() {
 
     fs::write(PRIV_FILE, seed).expect("write private key");
 
-    // 打印可直接粘贴进 src/license/crypto.rs 的公钥数组
+    // 将公钥以二进制格式写入 public_key.bin（供 crypto.rs 通过 include_bytes! 引用）
+    fs::write("public_key.bin", &pk).expect("write public key");
+
+    // 打印可直接粘贴进 src/license/crypto.rs 的公钥数组（备用）
     let mut s = String::from("pub const DEVELOPER_PUBLIC_KEY: [u8; 32] = [\n    ");
     for (i, byte) in pk.iter().enumerate() {
         s.push_str(&format!("0x{:02x}, ", byte));
@@ -70,7 +73,8 @@ fn gen_keys() {
     s.push_str("\n];");
 
     println!("✅ 私钥已写入 {}（务必保密、勿提交 git）", PRIV_FILE);
-    println!("\n👇 把下面这段粘贴到 src/license/crypto.rs：\n\n{}\n", s);
+    println!("✅ 公钥已写入 public_key.bin（二进制格式，已自动引用到 crypto.rs）");
+    println!("\n👇 公钥数组（备用，手动粘贴用）：\n\n{}\n", s);
 }
 
 fn sign(args: &[String]) {

@@ -7,4 +7,5 @@
 # keygen 工具（开发者私有，绝不分发）
 /keygen/target
 /keygen/private_key.bin
+/keygen/public_key_key.bin
 /keygen/Cargo.lock
