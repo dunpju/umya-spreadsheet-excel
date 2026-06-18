@@ -7,7 +7,7 @@
 pub const PRODUCT_ID: &str = "umya-excel";
 
 /// 试用期天数
-pub const TRIAL_DAYS: u64 = 0;
+pub const TRIAL_DAYS: u64 = 90;
 
 /// 0 表示永久授权
 pub const EXPIRES_NEVER: u64 = 0;
