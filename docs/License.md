@@ -53,7 +53,8 @@ license_popup ──► viewer ──► LicenseManager(mod.rs)
 | 用途 | 算法 | 为什么 |
 |---|---|---|
 | **授权码防伪造**（核心强保证） | **Ed25519** 非对称签名 | 私钥只在开发者手里，公钥编译进 exe；程序能验真伪但**无法伪造**。签名 64B、公钥 32B、验证极快。 |
-| **试用状态防篡改** | **HMAC-SHA256** | 对称、快；密钥由“机器指纹 + 内置胡椒”派生，换机器 / 改文件都校验失败。 |
+| **本地存储加密** | **AES-256-GCM**（AEAD） | 文件 + 注册表均加密存储；密钥由机器指纹派生，换机器无法解密；GCM 认证标签保证任何篡改都会导致解密失败。 |
+| **试用状态防篡改** | **HMAC-SHA256** | 对称、快；密钥由”机器指纹 + 内置胡椒”派生，换机器 / 改文件都校验失败。 |
 | **机器指纹** | **SHA-256** 聚合多个稳定标识 | 绑定到具体机器。 |
 
 **密钥拓扑**：
@@ -268,12 +269,15 @@ impl LicenseManager {
 
 ## 六、数据存储方案
 
-### 6.1 存储位置（冗余 + 交叉校验，防删文件绕过）
+### 6.1 存储位置（AES-256-GCM 加密 + 冗余 + 交叉校验，防删文件绕过）
 
-| 位置 | 内容 | 作用 |
-|---|---|---|
-| `~/.MyExcel/license.dat`（主） | 试用状态 + 授权码 | 主存储 |
-| 注册表 `HKCU\Software\{uuid}`（Win 备份） | 同上的副本 | 路径由硬件派生 UUID 混淆，破解者无法直接搜索到；与文件交叉比对 |
+| 位置 | 值名 | 内容 | 作用 |
+|---|---|---|---|
+| `~/.MyExcel/license.dat`（主） | 文件整体 | AES-256-GCM 加密的试用状态 + 授权码 | 主存储，密文单行 base64 |
+| 注册表 `HKCU\Software\{uuid}` | `Data` | 同上的加密副本 | 冗余备份，路径由硬件派生 UUID 混淆 |
+| 注册表 `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示） | 技术支持用 |
+
+> **所有存储位置均为 AES-256-GCM 加密**，密钥由机器指纹派生（绑机），加载时先尝试解密，解密失败视为篡改。升级前的明文格式仍可读取（向后兼容）。
 
 **加载时的冲突仲裁（取“更严格”的那份）**：
 
@@ -299,8 +303,9 @@ impl LicenseManager {
 |---|---|
 | 伪造授权码 | Ed25519 非对称签名，无私钥无法伪造 ✅（强保证） |
 | 改系统时间延长试用 | 高水位 `last_run_day` + 回拨检测 + 多位置冗余 |
-| 删除 `license.dat` 重置 | 注册表冗余副本，取 `max(last_run_day)` |
-| 手改试用状态文件 | HMAC(机器指纹 + 胡椒) 校验，改任一字节都失败 |
+| 删除 `license.dat` 重置 | 注册表冗余副本（同为加密），取 `max(last_run_day)` |
+| 手改试用状态文件 | AES-256-GCM 加密存储 + HMAC 双重校验，改密文或改明文均失败 |
+| 直接读取授权数据 | AES-256-GCM 加密，无机器密钥无法解密 |
 | 一份授权码多机用 | 机器码绑定，`activate` 校验 `machine == 本地` |
 | patch 二进制跳过 verify | 校验点**分散到核心功能**（见下），非仅启动时一处 |
 | 提取公钥 / 胡椒伪造 | 公钥本就公开无妨；胡椒被提取只能伪造试用状态、不能伪造授权码 |
@@ -337,6 +342,8 @@ ed25519-dalek = { version = "2", default-features = false }   # 授权码验签
 sha2 = "0.10"                                                  # 指纹/摘要
 hmac = "0.12"                                                  # 试用状态校验
 base64 = "0.22"                                               # 授权码/指纹编码
+aes-gcm = "0.10"                                               # 本地存储加密（AEAD）
+getrandom = "0.2"                                              # AES-GCM 随机 nonce 生成
 image = { version = "0.25", default-features = false, features = ["png"] }  # 解码二维码 PNG
 winreg = "0.52"                                               # Win 注册表（机器指纹 + 冗余存储）
 
@@ -469,6 +476,53 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
+
+/// 导出用加密密钥上下文标签（与 HMAC_PEPPER 不同，避免密钥复用）
+const EXPORT_LABEL: &[u8] = b"umya-excel-license-export-v1";
+
+/// 从机器指纹派生 AES-256 加密密钥（32 字节）
+fn derive_export_key(machine_fingerprint: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(EXPORT_LABEL);
+    hasher.update(HMAC_PEPPER);
+    hasher.update(machine_fingerprint);
+    let out = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out);
+    key
+}
+
+/// AES-256-GCM 加密。返回 `base64(nonce[12] || ciphertext || tag[16])`。
+pub fn aes256gcm_encrypt(plaintext: &[u8], machine_fingerprint: &[u8]) -> Option<String> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let key = derive_export_key(machine_fingerprint);
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let mut nonce_bytes = [0u8; 12];
+    if getrandom::getrandom(&mut nonce_bytes).is_err() { return None; }
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext).ok()?;
+
+    let mut out = Vec::with_capacity(12 + ciphertext.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Some(base64::engine::general_purpose::STANDARD.encode(&out))
+}
+
+/// AES-256-GCM 解密。接受 `base64(nonce || ciphertext || tag)` 格式。
+pub fn aes256gcm_decrypt(encoded: &str, machine_fingerprint: &[u8]) -> Option<Vec<u8>> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let data = b64_decode(encoded)?;
+    if data.len() < 12 + 16 { return None; }
+
+    let key = derive_export_key(machine_fingerprint);
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let nonce = Nonce::from_slice(&data[..12]);
+    cipher.decrypt(nonce, &data[12..]).ok()
+}
 ```
 
 ### 9.4 `license/fingerprint.rs`
@@ -546,10 +600,14 @@ pub fn registry_uuid() -> String {
 
 > 💡 **指纹稳定性分级**：主板序列号/型号/CPU 三项硬件标识为**最稳定层**（重装系统、改计算机名均不变）；MachineGuid 为**半稳定层**（重装系统会变）；COMPUTERNAME 为**不稳定层**（用户可改）。硬件标识确保授权不会因 OS 级变更而误锁。
 
-### 9.5 `license/store.rs` —— 持久化（文件 + 注册表冗余）
+### 9.5 `license/store.rs` —— 持久化（AES-256-GCM 加密 + 文件 + 注册表冗余）
 
 ```rust
-//! 本地存储：试用状态 + 授权码，带 HMAC 校验与多位置冗余（文件 + 注册表）。
+//! 本地存储：试用状态 + 授权码，AES-256-GCM 加密存储 + HMAC 校验 + 多位置冗余。
+//!
+//! 文件 license.dat 存储加密后的 base64 单行密文（解密后为两行：试用状态 + 授权码）。
+//! 注册表 HKCU\Software\{uuid} 存储加密副本（Data 值）及导出格式（LicenseBlob 值）。
+//! 加载时先尝试 AES-256-GCM 解密，失败则按明文解析（向后兼容升级前数据）。
 
 use std::path::PathBuf;
 
@@ -559,28 +617,24 @@ fn reg_path() -> String {
     format!("Software\\{}", crate::license::fingerprint::registry_uuid())
 }
 
-fn primary_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".MyExcel").join(TRIAL_FILENAME)
+/// 尝试对存储内容做 AES-256-GCM 解密。
+/// 成功返回解密后明文；失败（非加密格式 / 被篡改 / 错误机器）返回 None。
+fn try_decrypt(content: &str, machine_fp: &[u8]) -> Option<String> {
+    let bytes = super::crypto::aes256gcm_decrypt(content.trim(), machine_fp)?;
+    std::str::from_utf8(&bytes).ok().map(String::from)
 }
 
-/// 文件内容布局：
-/// [trial]
-/// f=...|l=...|r=...
-/// mac=<hex>
-/// [license]
-/// <授权码或空>
-pub fn save(trial: &TrialState, license_str: &Option<String>, machine_fp: &[u8]) -> bool {
-    // 1) 写主文件 ~/.MyExcel/license.dat
-    // 2) [cfg(windows)] 同步写注册表 HKCU\Software\{uuid}（硬件派生，防直接搜索）
-    true
+pub fn save(trial: &TrialState, license_raw: &Option<String>, machine_fp: &[u8]) {
+    // 1) 构建明文：trial_line + lic_line（两行）
+    // 2) AES-256-GCM 加密 → base64 密文
+    // 3) 写入 ~/.MyExcel/license.dat（加密单行）
+    // 4) [cfg(windows)] 写注册表 Data 值（加密副本）+ LicenseBlob 值（导出格式）
 }
 
-pub fn load(machine_fp: &[u8]) -> (Option<TrialState>, Option<String>) {
-    // 读文件 + 注册表，各自验签；
-    // trial 取所有有效副本中 max(last_run_day)；
-    // license 任一有效（验签 + 机器码匹配）即可。
-    (None, None)
+pub fn load(machine_fp: &[u8]) -> LoadResult {
+    // 读文件 → try_decrypt → 解密成功则用明文，失败按明文格式解析（兼容旧版）
+    // 读注册表 Data 值 → 同上
+    // 合并：trial 取 max(last_run_day)；license 任一有效即可
 }
 ```
 
@@ -802,7 +856,7 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 ## 十一、现实局限与进阶建议
 
-**本方案能挡住**：授权码伪造（Ed25519）、改时间（高水位）、删文件（注册表冗余）、改试用状态（HMAC）、一码多机（机器码绑定）。
+**本方案能挡住**：授权码伪造（Ed25519）、改时间（高水位）、删文件（注册表冗余）、改试用状态（HMAC + AES-256-GCM）、直接读取授权数据（AES-256-GCM 加密存储）、一码多机（机器码绑定）。
 
 **本方案挡不住**：专业逆向直接 patch `ed25519_verify` 返回 `true`。进阶对策（按预算）：
 
@@ -818,8 +872,81 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 1. 抽离 `src/util/date.rs`，把 `main.rs` 的日期函数迁移过去并 `pub`。
 2. 新建 `src/license/` 各子模块，先实现 `crypto` / `fingerprint` / `payload` / `time`（可单元测试）。
 3. 写 keygen 工具生成密钥对，把公钥填入 `crypto.rs`。
-4. 实现 `store`（文件 + 注册表）与 `LicenseManager::load / status / checkpoint`。
+4. 实现 `store`（AES-256-GCM 加密 + 文件 + 注册表）与 `LicenseManager::load / status / checkpoint`。
 5. 实现 `license_popup` 并接入 `viewer.rs`。
-6. `Cargo.toml` 加入依赖，`--release` 编译验证。
+6. `Cargo.toml` 加入依赖（含 `aes-gcm`、`getrandom`），`--release` 编译验证。
 7. 测试：试用倒计时、到期拦截、激活、回拨检测、删文件后注册表兜底。
 8. 查看本机注册表路径：`umya-spreadsheet-excel.exe --uuid`。
+9. 导出授权状态：`umya-spreadsheet-excel.exe --license "<LicenseBlob值>"`。
+
+---
+
+## 十三、`--license` 加密导出
+
+### 13.1 用途
+
+用于技术支持场景：用户运行程序后，可从注册表获取加密字符串提供给开发者验证授权状态。
+加密字符串由程序在每次调用 `store::save()`（激活、每日 checkpoint）时**自动生成**，无需用户手动操作。
+
+### 13.2 自动生成
+
+程序在每次调用 `store::save()`（激活、每日 checkpoint）时，自动对所有存储内容进行 AES-256-GCM 加密：
+
+| 位置 | 值名 | 说明 |
+|---|---|---|
+| `~/.MyExcel/license.dat` | 文件整体 | AES-256-GCM 加密的试用状态 + 授权码（密文单行 base64） |
+| `HKCU\Software\{uuid}` | `Data` | 同上的加密副本（注册表冗余） |
+| `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示） |
+
+获取导出字符串的方式（PowerShell）：
+
+```powershell
+# 查看本机注册表路径
+.\umya-spreadsheet-excel.exe --uuid
+
+# 读取 LicenseBlob 值（将 {uuid} 替换为上一步输出的值）
+Get-ItemProperty "HKCU:\Software\{uuid}" | Select-Object -ExpandProperty LicenseBlob
+```
+
+### 13.3 解密查看
+
+```cmd
+.\umya-spreadsheet-excel.exe --license "加密字符串"
+```
+
+输出格式：
+
+```
+f=20622|l=20622|r=0|mac=abc123def456...
+```
+
+字段说明：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `f` | epoch 天数 | `first_run_day`：首次启动日（试用/激活起点） |
+| `l` | epoch 天数 | `last_run_day`：高水位（已观测到的最大天数，防时钟回拨） |
+| `r` | 天数 | 剩余天数：`0` = 永久授权；正整数 = 距离到期的剩余天数 |
+| `mac` | hex 字符串 | 本机机器指纹的 SHA-256 摘要（用于验证绑机身份） |
+
+### 13.4 加密方案
+
+| 项目 | 说明 |
+|---|---|
+| **算法** | AES-256-GCM（AEAD，同时提供加密和完整性校验） |
+| **密钥派生** | `SHA-256("umya-excel-license-export-v1" + 内置胡椒 + 机器指纹)` → 32 字节 AES 密钥 |
+| **Wire 格式** | `base64( nonce[12字节] \|\| 密文 \|\| GCM_tag[16字节] )` |
+| **Nonce** | 每次生成使用 OS 随机源，同一明文产出不同密文 |
+| **防篡改** | 16 字节 GCM 认证标签保证任何字节篡改都会导致解密失败 |
+| **绑机** | 密钥由机器指纹派生，换机器无法解密 |
+| **密钥隔离** | 与 HMAC 密钥使用不同上下文标签（`EXPORT_LABEL` vs `HMAC_PEPPER`），避免密钥复用风险 |
+
+### 13.5 错误信息
+
+| 输出 | 原因 |
+|---|---|
+| `f=...\|l=...\|r=...\|mac=...` | 解密成功，授权状态信息 |
+| `Error: invalid or tampered license string, or wrong machine` | 字符串被篡改、格式错误、或非本机生成的加密串 |
+| `Error: decrypted data is not valid UTF-8` | 数据损坏 |
+| `Error: --license requires an argument` | 缺少加密字符串参数 |
+

@@ -99,6 +99,36 @@ fn main() -> eframe::Result<()> {
         std::io::stdout().flush().ok();
         std::process::exit(0);
     }
+    // CLI: --license 'encrypted_string' 解密并输出授权状态信息后退出
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--license") {
+            if pos + 1 < args.len() {
+                let encrypted = &args[pos + 1];
+                let machine_fp = license::fingerprint::fingerprint_bytes();
+                match license::crypto::aes256gcm_decrypt(encrypted, &machine_fp) {
+                    Some(plaintext) => match std::str::from_utf8(&plaintext) {
+                        Ok(text) => {
+                            println!("{}", text);
+                            std::io::stdout().flush().ok();
+                            std::process::exit(0);
+                        }
+                        Err(_) => {
+                            eprintln!("Error: decrypted data is not valid UTF-8");
+                            std::process::exit(1);
+                        }
+                    },
+                    None => {
+                        eprintln!("Error: invalid or tampered license string, or wrong machine");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("Error: --license requires an argument");
+                std::process::exit(1);
+            }
+        }
+    }
     // 注册崩溃处理：捕获 panic 并记录调用栈到 crash.log
     std::panic::set_hook(Box::new(handle_panic));
 
