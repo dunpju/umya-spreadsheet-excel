@@ -1,3 +1,8 @@
+// 使用 Windows GUI 子系统：双击运行时不再弹出黑色控制台窗口（仅 Windows 生效）。
+// 副作用：程序默认没有控制台，println!/eprintln! 无输出；命令行场景
+// （--uuid / --license）改用 console_print 附加到父进程控制台。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use eframe::NativeOptions;
 use std::backtrace::Backtrace;
 use std::io::Write;
@@ -91,12 +96,35 @@ fn chrono_free_timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
 }
 
+/// 输出一段文本到控制台。
+///
+/// GUI 子系统下程序默认没有控制台，println! 不会显示。这里先尝试附加到
+/// 父进程的控制台（从终端运行 --uuid / --license 时有效），再写入 CONOUT$。
+/// 附加失败（如双击运行）则静默忽略。输出均为 ASCII，无控制台编码问题。
+#[cfg(windows)]
+fn console_print(msg: &str) {
+    use std::io::Write;
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0 {
+        if let Ok(mut out) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+            let _ = out.write_all(msg.as_bytes());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn console_print(msg: &str) {
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(msg.as_bytes());
+}
+
 fn main() -> eframe::Result<()> {
     // CLI: --uuid 打印本机注册表路径 UUID 后退出
     if std::env::args().any(|a| a == "--uuid") {
-        println!("{}", license::fingerprint::registry_uuid());
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+        console_print(&format!("{}\n", license::fingerprint::registry_uuid()));
         std::process::exit(0);
     }
     // CLI: --license 'encrypted_string' 解密并输出授权状态信息后退出
@@ -109,22 +137,21 @@ fn main() -> eframe::Result<()> {
                 match license::crypto::aes256gcm_decrypt(encrypted, &machine_fp) {
                     Some(plaintext) => match std::str::from_utf8(&plaintext) {
                         Ok(text) => {
-                            println!("{}", text);
-                            std::io::stdout().flush().ok();
+                            console_print(&format!("{}\n", text));
                             std::process::exit(0);
                         }
                         Err(_) => {
-                            eprintln!("Error: decrypted data is not valid UTF-8");
+                            console_print("Error: decrypted data is not valid UTF-8\n");
                             std::process::exit(1);
                         }
                     },
                     None => {
-                        eprintln!("Error: invalid or tampered license string, or wrong machine");
+                        console_print("Error: invalid or tampered license string, or wrong machine\n");
                         std::process::exit(1);
                     }
                 }
             } else {
-                eprintln!("Error: --license requires an argument");
+                console_print("Error: --license requires an argument\n");
                 std::process::exit(1);
             }
         }
