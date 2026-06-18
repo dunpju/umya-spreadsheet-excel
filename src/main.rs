@@ -95,7 +95,9 @@ fn main() -> eframe::Result<()> {
     // CLI: --uuid 打印本机注册表路径 UUID 后退出
     if std::env::args().any(|a| a == "--uuid") {
         println!("{}", license::fingerprint::registry_uuid());
-        return Ok(());
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        std::process::exit(0);
     }
     // 注册崩溃处理：捕获 panic 并记录调用栈到 crash.log
     std::panic::set_hook(Box::new(handle_panic));
