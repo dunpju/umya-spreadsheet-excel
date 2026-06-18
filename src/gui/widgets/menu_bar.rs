@@ -111,7 +111,7 @@ pub fn draw_menu_bar(
             ui.label("My Excel v0.1.0");
             let label = match lic_status {
                 LicenseStatus::Trial { days_left } => {
-                    format!("剩余 {} 天", (*days_left).max(0))
+                    format!("试用剩余 {} 天", (*days_left).max(0))
                 }
                 LicenseStatus::Licensed { days_left } => {
                     match days_left {

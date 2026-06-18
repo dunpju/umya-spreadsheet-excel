@@ -97,6 +97,7 @@ pub fn draw_license_popup(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.set_min_width(400.0);
+            ui.set_height(300.0);
             ui.vertical_centered(|ui| {
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(status_text).size(16.0).strong());
@@ -118,12 +119,12 @@ pub fn draw_license_popup(
                     } else {
                         ui.set_min_height(200.0);
                     }
-                    ui.label("扫码付款后，联系开发者获取授权码");
+                    ui.label("扫码付款(9.9/月)后，联系开发者获取授权码");
                     ui.add_space(8.0);
 
-                    // 机器码
+                    // 机器码 + "复制"按钮：作为一个整体水平居中
                     ui.label("本机机器码（请发送给开发者）：");
-                    ui.horizontal(|ui| {
+                    ui.horizontal_centered(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let code = state.machine_code.clone();
                         ui.monospace(
@@ -149,7 +150,9 @@ pub fn draw_license_popup(
                     }
                     ui.add_space(8.0);
 
-                    ui.horizontal_centered(|ui| {
+                    // "激活"按钮：靠右对齐（移至弹窗右下角）。
+                    // 弹窗整体高度已由外层 ui.set_height(300.0) 限定，无需在此额外约束。
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let activate_clicked = ui
                             .button(egui::RichText::new("激  活").size(14.0))
                             .clicked();
