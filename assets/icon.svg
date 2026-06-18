@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="256" height="256">
+  <!-- 背景圆角矩形 -->
+  <rect width="1024" height="1024" rx="180" fill="#1D6F42" />
+  
+  <!-- Excel 经典表格网格线（白色透明网格） -->
+  <g stroke="rgba(255,255,255,0.3)" stroke-width="8" fill="none">
+    <!-- 横线 -->
+    <line x1="200" y1="300" x2="824" y2="300" />
+    <line x1="200" y1="500" x2="824" y2="500" />
+    <line x1="200" y1="700" x2="824" y2="700" />
+    <!-- 竖线 -->
+    <line x1="400" y1="200" x2="400" y2="824" />
+    <line x1="600" y1="200" x2="600" y2="824" />
+    <line x1="800" y1="200" x2="800" y2="824" />
+  </g>
+  
+  <!-- 表格中的“XLS”文字标识 -->
+  <text x="512" y="620" font-family="Arial, sans-serif" font-size="260" font-weight="bold" fill="white" text-anchor="middle" letter-spacing="20">XLS</text>
+  
+  <!-- “我的”个人化元素：左下角带小人的徽章 -->
+  <!-- 圆形头像背景 -->
+  <circle cx="740" cy="740" r="140" fill="white" />
+  <!-- 小人轮廓 -->
+  <circle cx="740" cy="690" r="50" fill="#1D6F42" />
+  <ellipse cx="740" cy="820" rx="75" ry="60" fill="#1D6F42" />
+  
+  <!-- 底部“我的 Excel”文字点缀 -->
+  <text x="512" y="900" font-family="Arial, sans-serif" font-size="60" font-weight="bold" fill="white" text-anchor="middle" letter-spacing="8">MY EXCEL</text>
+</svg>

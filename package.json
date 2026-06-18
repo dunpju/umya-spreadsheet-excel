@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.158"
+  },
+  "devDependencies": {
+    "sharp": "^0.33.5",
+    "to-ico": "^1.1.5"
+  },
+  "scripts": {
+    "gen-icon": "node scripts/gen-icon.js"
+  }
+}
