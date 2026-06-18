@@ -652,6 +652,21 @@ impl ExcelViewer {
                                 ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
                             }
                         }
+                        // 重置预警通知状态
+                        self.alert_notify_state = AlertNotifyState::default();
+                        // 导入完成后自动检测预警规则，若有触发则自动弹出预警消息弹窗
+                        if !self.alert_popup.rules.is_empty() {
+                            if let Some(ref excel_data) = self.excel_data {
+                                if let Some(sheet) = excel_data.get_sheet(self.current_sheet) {
+                                    let triggered = check_alert_rules(&self.alert_popup.rules, sheet);
+                                    if !triggered.is_empty() {
+                                        self.alert_notify_state.has_triggered = true;
+                                        self.alert_notify_state.triggered_rules = triggered;
+                                        self.alert_notify_state.visible = true;
+                                    }
+                                }
+                            }
+                        }
                         self.load_state = LoadState::Success(self.excel_data.clone().unwrap());
                     }
                     Err(e) => {
