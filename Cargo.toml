@@ -26,7 +26,7 @@ hmac = "0.12"                                                  # 试用状态校
 base64 = "0.22"                                               # 授权码/指纹编码
 aes-gcm = "0.10"                                              # --license 加密导出（AEAD）
 getrandom = "0.2"                                              # 生成 AES-GCM 随机 nonce
-image = { version = "0.25", default-features = false, features = ["png"] }  # 解码付款二维码 PNG
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }  # 解码付款二维码 PNG + 窗口图标 ICO
 winreg = "0.52"                                               # Windows 注册表（机器指纹 + 冗余存储）
 
 # release 构建配置：strip 去符号（主要防逆向手段）。
