@@ -10,6 +10,7 @@ use crate::gui::widgets::alert_popup::AlertPopupState;
 use crate::gui::widgets::cond_format_popup::CondFormatPopupState;
 use crate::gui::widgets::help_popup::HelpPopupState;
 use crate::gui::widgets::alert_notify::AlertNotifyState;
+use crate::gui::widgets::license_popup::LicensePopupState;
 use crate::license::LicenseStatus;
 use crate::gui::widgets::draw_alert_icon;
 
@@ -35,6 +36,7 @@ pub fn draw_menu_bar(
     _cond_format_popup: &mut CondFormatPopupState,
     help_popup: &mut HelpPopupState,
     alert_notify_state: &mut AlertNotifyState,
+    license_popup: &mut LicensePopupState,
     lic_status: &LicenseStatus,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
@@ -125,6 +127,15 @@ pub fn draw_menu_bar(
             };
             ui.label(label);
             ui.separator();
+            // 仅在试用期内（剩余天数 > 0）显示"激活"入口，允许用户提前激活；
+            // 试用期已结束 / 篡改等拦截态由 viewer 自动弹出模态，此处无需入口。
+            let in_trial =
+                matches!(lic_status, LicenseStatus::Trial { days_left } if *days_left > 0);
+            // 短路求值：in_trial 为 false 时不调用 ui.button，从而不渲染该菜单项
+            if in_trial && ui.button("激活").clicked() {
+                ui.close();
+                license_popup.visible = true;
+            }
             if ui.button("帮助").clicked() {
                 ui.close();
                 help_popup.visible = true;

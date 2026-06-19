@@ -64,6 +64,9 @@ impl LicensePopupState {
 
 /// 绘制授权 / 付款弹窗。
 ///
+/// `can_close` 控制是否渲染右上角的“[X]”关闭按钮：仅在试用期内（剩余天数 > 0）由调用方传 `true`，
+/// 允许用户主动关闭弹窗；到期 / 篡改等拦截状态下传 `false`，弹窗保持不可关闭（强制激活）。
+///
 /// `on_activate` 在用户点击“激活”时被调用，传入授权码字符串：
 /// - `Ok(())` 表示激活成功（弹窗显示成功提示后关闭）
 /// - `Err(msg)` 表示失败，`msg` 作为错误提示展示
@@ -71,6 +74,7 @@ pub fn draw_license_popup(
     ctx: &egui::Context,
     state: &mut LicensePopupState,
     status_text: &str,
+    can_close: bool,
     on_activate: &mut dyn FnMut(&str) -> Result<(), &'static str>,
 ) {
     if !state.visible {
@@ -87,7 +91,11 @@ pub fn draw_license_popup(
         }
     }
 
-    // 模态：居中、前台、无标题栏、不可关闭（强制处理授权）
+    // 用户点击“关闭”（仅 can_close=true 时渲染该按钮）
+    let mut close_clicked = false;
+
+    // 模态：居中、前台、无标题栏。默认不可关闭（强制处理授权）；
+    // 仅在试用期内（can_close）时，右上角额外渲染“[X]”关闭按钮。
     egui::Window::new("license_gate")
         .title_bar(false)
         .resizable(false)
@@ -98,6 +106,20 @@ pub fn draw_license_popup(
         .show(ctx, |ui| {
             ui.set_min_width(400.0);
             ui.set_height(300.0);
+
+            // 右上角“[X]”关闭按钮：固定高度（interact_size.y）的整宽条带，
+            // right_to_left + TOP → 钉在弹窗右上角；下方 vertical_centered 占剩余高度。
+            // 仅试用期内（can_close）渲染；短路求值：can_close 为 false 时不调用 ui.button，按钮不渲染。
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::TOP),
+                |ui| {
+                    if can_close && ui.button("[X]").clicked() {
+                        close_clicked = true;
+                    }
+                },
+            );
+
             ui.vertical_centered(|ui| {
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(status_text).size(16.0).strong());
@@ -119,7 +141,7 @@ pub fn draw_license_popup(
                     } else {
                         ui.set_min_height(200.0);
                     }
-                    ui.label("扫码付款(9.9/月)后，联系开发者获取授权码");
+                    ui.label("扫码付款(9.9元/月)后，联系开发者获取授权码");
                     ui.add_space(8.0);
 
                     // 机器码 + "复制"按钮：作为一个整体水平居中。
@@ -177,8 +199,7 @@ pub fn draw_license_popup(
                     }
                     ui.add_space(8.0);
 
-                    // "激活"按钮：靠右对齐（移至弹窗右下角）。
-                    // 弹窗整体高度已由外层 ui.set_height(300.0) 限定，无需在此额外约束。
+                    // 右下角“激活”按钮：靠右对齐（弹窗整体高度已由外层 ui.set_height(300.0) 限定）。
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let activate_clicked = ui
                             .button(egui::RichText::new("激  活").size(14.0))
@@ -201,6 +222,11 @@ pub fn draw_license_popup(
                 }
             });
         });
+
+    // 用户主动关闭：隐藏弹窗（仅 can_close 时 close_clicked 才可能为 true）
+    if close_clicked {
+        state.visible = false;
+    }
 
     if hide_after_frame {
         state.visible = false;

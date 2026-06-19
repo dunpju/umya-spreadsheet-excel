@@ -809,7 +809,7 @@ impl eframe::App for ExcelViewer {
         // 绘制菜单栏
         let has_data = self.excel_data.is_some();
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
-            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup, &mut self.alert_notify_state, &lic_status);
+            draw_menu_bar(ui, &mut self.show_import_dialog, &mut self.settings_panel, &mut self.search_window, &mut self.add_column, &mut self.add_row, has_data, &mut self.convert_popup, &mut self.alert_popup, &mut self.cond_format_popup, &mut self.help_popup, &mut self.alert_notify_state, &mut self.license_popup, &lic_status);
         });
 
         // 绘制导入对话框
@@ -2119,12 +2119,15 @@ impl eframe::App for ExcelViewer {
 
         // —— 授权状态检查（每帧）——
         let status_text = license_status_text(&lic_status);
+        // 仅试用期内（剩余天数 > 0）允许用户主动关闭激活弹窗；
+        // 到期 / 篡改等拦截态下模态不可关闭，强制激活。
+        let can_close = matches!(lic_status, LicenseStatus::Trial { days_left } if days_left > 0);
         // 闭包只捕获 self.license，与 &mut self.license_popup 是不相交字段借用（edition 2021）
         let mut activate_cb = |code: &str| match self.license.activate(code, lic_today) {
             Ok(_) => Ok(()),
             Err(e) => Err(e.message()),
         };
-        draw_license_popup(&ctx, &mut self.license_popup, &status_text, &mut activate_cb);
+        draw_license_popup(&ctx, &mut self.license_popup, &status_text, can_close, &mut activate_cb);
         // 正常（非拦截）运行时推进高水位，防时钟回拨
         if !lic_status.is_blocking() {
             self.license.checkpoint(lic_today);

@@ -250,8 +250,13 @@ impl LicenseManager {
   └─ 持久化
   status(): 已激活且未到期 → 放行；否则按 Trial/Expired 决定是否拦截
 
+[试用期内（剩余天数 > 0，可选）]
+  用户可经"关于 → 激活"菜单主动唤起付款/激活弹窗提前激活
+  ├─ 与到期拦截共用同一个 LicensePopupState，仅多一个右上角"[X]"关闭按钮（可关闭）
+  └─ 关闭后继续试用，倒计时 / 高水位逻辑照常运行（不延长试用）
+
 [试用到期]
-  UI 渲染遮罩 → 付款二维码弹窗
+  UI 渲染遮罩 → 付款二维码弹窗（is_blocking 自动弹出，无"关闭"按钮，强制激活）
   ├─ 展示机器码（用户复制）
   ├─ 提示：扫码付款 → 把机器码发给开发者 → 获取授权码
   └─ 授权码输入框 + "激活"
@@ -802,6 +807,72 @@ if !status.is_blocking() {
     self.license.checkpoint(crate::license::time::today_epoch_day());
 }
 ```
+
+### 9.9 提前激活入口与可关闭模态（关于菜单 + 右上角 [X] 关闭按钮）
+
+除“试用到期 → 自动拦截弹窗”这条主路径外，试用期内（剩余天数 > 0）用户也可**主动**唤起激活弹窗提前激活；到期 / 篡改等拦截态下弹窗则**强制不可关闭**。两者共用同一个 `LicensePopupState`，仅由 `can_close` 标志区分行为。
+
+**统一判断条件**（“试用中且剩余天数 > 0”）：
+
+```rust
+let can_close = matches!(lic_status, LicenseStatus::Trial { days_left } if *days_left > 0);
+```
+
+**① 关于菜单 → “激活”子菜单项**（`menu_bar.rs`）
+
+在“关于”下拉菜单中，分隔符之后、“帮助”之前，仅当处于试用期内时渲染“激活”按钮，点击即打开激活模态（`draw_menu_bar` 新增 `license_popup: &mut LicensePopupState` 参数）：
+
+```rust
+ui.separator();
+// 仅在试用期内（剩余天数 > 0）显示"激活"入口，允许用户提前激活
+let in_trial = matches!(lic_status, LicenseStatus::Trial { days_left } if *days_left > 0);
+if in_trial {
+    if ui.button("激活").clicked() {
+        ui.close();
+        license_popup.visible = true;   // 唤起激活模态
+    }
+}
+if ui.button("帮助").clicked() { /* ... */ }
+```
+
+> 试用期已结束 / 篡改等拦截态由 `viewer.rs` 自动 `license_popup.visible = true`（参见 9.8），故菜单无需再提供入口。
+
+**② 激活模态 → 右上角“[X]”关闭按钮**（`license_popup.rs`）
+
+`draw_license_popup` 新增 `can_close: bool` 参数，控制是否渲染**弹窗右上角**的“[X]”关闭按钮：
+
+- `can_close == true`（试用期内，通常由用户经“关于 → 激活”主动唤起）：右上角渲染“[X]”按钮，点击于帧末置 `state.visible = false` 关闭弹窗；
+- `can_close == false`（到期 / 篡改 / 授权到期等拦截态）：**完全不渲染**该按钮，模态保持无标题栏、不可拖动、不可关闭，强制完成激活。
+
+“[X]”按钮独立置于弹窗右上角，**不**与右下角的“激活”按钮同行：“激活”按钮始终渲染（用于验签激活），“[X]”仅在可关闭时渲染。
+
+实现要点：弹窗主体为 `vertical_centered`，若直接用 `ui.with_layout`（egui 中其默认占用父级**全部剩余区域**）会挤占居中内容，故改用 `ui.allocate_ui_with_layout` 申请一条**固定高度（`interact_size.y`）、整宽**的顶部条带，再以 `right_to_left(TOP)` 布局把“[X]”钉到条带右上角；居中内容占其下剩余高度。
+
+```rust
+// viewer.rs：每帧由授权状态派生 can_close 并传入
+draw_license_popup(&ctx, &mut self.license_popup, &status_text, can_close, &mut activate_cb);
+
+// license_popup.rs：set_height 之后、vertical_centered 之前，渲染右上角 [X]
+ui.allocate_ui_with_layout(
+    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+    egui::Layout::right_to_left(egui::Align::TOP),
+    |ui| {
+        // 短路求值：can_close 为 false 时不调用 ui.button，按钮不渲染
+        if can_close && ui.button("[X]").clicked() {
+            close_clicked = true;       // 帧末置 state.visible = false
+        }
+    },
+);
+// 右下角始终渲染“激活”按钮（与 [X] 分处弹窗上下两行）
+ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let activate_clicked = ui.button("激  活").clicked();
+    if activate_clicked { /* 验签激活 */ }
+});
+// .show() 之后
+if close_clicked { state.visible = false; }
+```
+
+**安全性说明**：该“[X]”按钮是 UI 层便利性，不影响授权强度——拦截态（`is_blocking()`）下 `can_close` 恒为 `false`，按钮根本不渲染，用户无法绕过强制激活；试用期内允许关闭仅意味着“暂不激活、继续试用”，试用倒计时与防回拨高水位逻辑（见 6.2）照常运行、不延长试用期。
 
 ---
 
