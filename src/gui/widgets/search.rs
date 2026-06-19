@@ -12,9 +12,9 @@ use crate::excel::reader::{CellData, ExcelData, SheetData};
 // ═══════════════════════════════════════════════════════════════
 
 /// 并行行扫描阈值：超过此行数时启用多线程线性扫描
-const PARALLEL_ROW_THRESHOLD: usize = 5000;
+const PARALLEL_ROW_THRESHOLD: usize = 1000;
 /// 每个线程最少处理的行数（避免线程粒度过细）
-const MIN_ROWS_PER_THREAD: usize = 2000;
+const MIN_ROWS_PER_THREAD: usize = 500;
 
 /// 获取单元格的搜索用显示值
 ///
@@ -64,6 +64,8 @@ pub struct RowFilterState {
     /// 该筛选项与下一条筛选项的组合逻辑（And 取交集，Or 取并集）
     /// 最后一条的 logic 无实际效果（无下一条可组合）。
     pub logic: FilterLogic,
+    /// 比较运算符（默认 包含）
+    pub op: CompareOp,
 }
 
 impl RowFilterState {
@@ -87,6 +89,8 @@ pub struct ColumnFilter {
     /// 该条件与下一条条件的组合逻辑（And 取交集，Or 取并集）
     /// 最后一条条件的 logic 无实际效果（无下一条可组合）。
     pub logic: FilterLogic,
+    /// 比较运算符（默认 包含）
+    pub op: CompareOp,
 }
 
 impl ColumnFilter {
@@ -103,6 +107,67 @@ pub enum FilterLogic {
     And,
     /// 任一条件匹配即可
     Or,
+}
+
+/// 比较运算符（列筛选 / 行筛选用）
+///
+/// 决定单元格值与关键字之间的匹配关系：
+/// - 字符串类 `Contains`/`NotContains`：大小写不敏感的子串匹配；
+/// - 精确类 `Equal`/`NotEqual`：忽略大小写的相等比较；
+/// - 数值类 `GreaterThan`/`LessThan`/`GreaterEqual`/`LessEqual`：优先按 f64 数值比较，
+///   任一端无法解析为数值时**降级为字符串字典序比较**，避免类型转换失败导致误判。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompareOp {
+    /// 包含（子串匹配）
+    Contains,
+    /// 不包含（排除匹配）
+    NotContains,
+    /// 等于（精确比较）
+    Equal,
+    /// 不等于
+    NotEqual,
+    /// 大于
+    GreaterThan,
+    /// 小于
+    LessThan,
+    /// 大于等于
+    GreaterEqual,
+    /// 小于等于
+    LessEqual,
+}
+
+impl Default for CompareOp {
+    fn default() -> Self {
+        CompareOp::Contains
+    }
+}
+
+impl CompareOp {
+    /// 下拉框显示文案
+    pub fn label(&self) -> &'static str {
+        match self {
+            CompareOp::Contains => "包含",
+            CompareOp::NotContains => "不包含",
+            CompareOp::Equal => "=",
+            CompareOp::NotEqual => "!=",
+            CompareOp::GreaterThan => ">",
+            CompareOp::LessThan => "<",
+            CompareOp::GreaterEqual => ">=",
+            CompareOp::LessEqual => "<=",
+        }
+    }
+
+    /// 所有运算符（下拉框渲染顺序）
+    pub const ALL: [CompareOp; 8] = [
+        CompareOp::Contains,
+        CompareOp::NotContains,
+        CompareOp::Equal,
+        CompareOp::NotEqual,
+        CompareOp::GreaterThan,
+        CompareOp::LessThan,
+        CompareOp::GreaterEqual,
+        CompareOp::LessEqual,
+    ];
 }
 
 /// 搜索窗口状态
@@ -181,6 +246,7 @@ impl Default for SearchWindowState {
                 column_index: 0,
                 filter_value: String::new(),
                 logic: FilterLogic::And,
+                op: CompareOp::Contains,
             }],
             filter_logic: FilterLogic::And, // 保留兼容，新逻辑使用 ColumnFilter.logic
         }
@@ -532,6 +598,7 @@ fn compute_column_matches(
     target_col: u32,
     target_row: u32,
     keyword: &str,
+    op: CompareOp,
 ) -> (HashSet<u32>, usize, bool) {
     let keyword = keyword.to_lowercase();
     let max_col = sheet.max_col;
@@ -552,12 +619,15 @@ fn compute_column_matches(
 
     let is_sorted = col_values.windows(2).all(|w| w[0].1 <= w[1].1);
 
-    let mut visible: HashSet<u32> = if is_sorted {
+    // 二分查找仅对「包含」运算符正确（前缀/子串扩展）；其他运算符走线性比较
+    let used_binary = is_sorted && op == CompareOp::Contains;
+
+    let mut visible: HashSet<u32> = if used_binary {
         find_sorted_column_matches(&col_values, &keyword)
     } else {
         col_values
             .iter()
-            .filter(|(_, v)| v.contains(&keyword))
+            .filter(|(_, v)| compare_value(v, &keyword, op))
             .map(|(col, _)| *col)
             .collect()
     };
@@ -582,7 +652,7 @@ fn compute_column_matches(
         }
     }
 
-    (visible, total, is_sorted)
+    (visible, total, used_binary)
 }
 
 /// 执行多条件列搜索（支持 AND/OR 组合，AND 优先级高于 OR）
@@ -630,7 +700,7 @@ pub fn execute_multi_column_search(
         }
         let opt = &state.column_options[f.column_index];
         let (filter_visible, ft, fis) =
-            compute_column_matches(sheet, opt.col, opt.row, &f.filter_value);
+            compute_column_matches(sheet, opt.col, opt.row, &f.filter_value, f.op);
         max_total = max_total.max(ft);
         any_binary = any_binary || fis;
 
@@ -885,6 +955,7 @@ pub fn load_row_filter_configs(
                 row,
                 keyword: String::new(),
                 logic: FilterLogic::And,
+                op: CompareOp::Contains,
             }
         })
         .collect()
@@ -940,6 +1011,47 @@ fn row_fuzzy_match(cell_value: &str, keyword: &str) -> bool {
     cell_value.to_lowercase().contains(&keyword.to_lowercase())
 }
 
+/// 尝试将两个字符串解析为 f64 并比较，返回排序结果
+///
+/// 任一端无法解析为数值（或出现 NaN）时返回 `None`，调用方可据此降级为字符串比较。
+fn try_f64_cmp(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let av: f64 = a.trim().parse().ok()?;
+    let bv: f64 = b.trim().parse().ok()?;
+    av.partial_cmp(&bv)
+}
+
+/// 比较运算符求值：单元格值 `value` 与关键字 `keyword` 在 `op` 下是否匹配
+///
+/// - 字符串类：`Contains`/`NotContains` 大小写不敏感子串；`Equal`/`NotEqual` 忽略大小写精确比较。
+/// - 数值类：`>`/`<`/`>=`/`<=` 优先按 f64 数值比较；**任一端不可解析为数值时降级为字符串字典序比较**，
+///   避免因类型转换失败而误判（例如单元格是文本而关键字是数字）。
+fn compare_value(value: &str, keyword: &str, op: CompareOp) -> bool {
+    let v = value.trim();
+    let kw = keyword.trim();
+    match op {
+        CompareOp::Contains => row_fuzzy_match(v, kw),
+        CompareOp::NotContains => !row_fuzzy_match(v, kw),
+        CompareOp::Equal => v.eq_ignore_ascii_case(kw),
+        CompareOp::NotEqual => !v.eq_ignore_ascii_case(kw),
+        CompareOp::GreaterThan => match try_f64_cmp(v, kw) {
+            Some(o) => o.is_gt(),
+            None => v > kw,
+        },
+        CompareOp::LessThan => match try_f64_cmp(v, kw) {
+            Some(o) => o.is_lt(),
+            None => v < kw,
+        },
+        CompareOp::GreaterEqual => match try_f64_cmp(v, kw) {
+            Some(o) => !o.is_lt(),
+            None => v >= kw,
+        },
+        CompareOp::LessEqual => match try_f64_cmp(v, kw) {
+            Some(o) => !o.is_gt(),
+            None => v <= kw,
+        },
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 行筛选性能优化辅助函数
 // ═══════════════════════════════════════════════════════════════
@@ -966,15 +1078,15 @@ fn collect_column_values(
         .collect()
 }
 
-/// 检查单个值是否匹配筛选条件（统一范围匹配和模糊匹配逻辑）
-fn match_filter_value(value: &str, keywords: &[String], is_range: bool) -> bool {
+/// 检查单个值是否匹配筛选条件（统一范围匹配、运算符匹配与模糊匹配逻辑）
+fn match_filter_value(value: &str, keywords: &[String], is_range: bool, op: CompareOp) -> bool {
     if is_range && keywords.len() == 2 {
+        // 范围查询：闭区间 [lo, hi]，与运算符无关（范围本身即区间语义）
         let v = value.trim();
         v >= keywords[0].as_str() && v <= keywords[1].as_str()
     } else {
-        keywords
-            .iter()
-            .any(|kw| row_fuzzy_match(value, kw))
+        // 单值/多值：按运算符逐个判定，命中任一即可
+        keywords.iter().any(|kw| compare_value(value, kw, op))
     }
 }
 
@@ -1172,6 +1284,7 @@ pub fn execute_row_search(
         col: u32,
         keywords: Vec<String>,
         is_range: bool,
+        op: CompareOp,
     }
 
     let parsed: Vec<ParsedFilter> = active_filters
@@ -1182,6 +1295,7 @@ pub fn execute_row_search(
                 col: f.col,
                 keywords,
                 is_range,
+                op: f.op,
             }
         })
         .collect();
@@ -1206,7 +1320,11 @@ pub fn execute_row_search(
         .windows(2)
         .all(|w| w[0].1 <= w[1].1);
 
-    if !has_or && is_sorted {
+    // 二分查找（find_rows_in_sorted）仅支持「范围」与「包含」两种语义；
+    // 当首列运算符为 =/!=/>/< 等时回退到线性扫描以保证正确性。
+    let first_binary_compatible = parsed[0].is_range || parsed[0].op == CompareOp::Contains;
+
+    if !has_or && is_sorted && first_binary_compatible {
         // ══════════ P0: 二分查找路径（仅纯 AND 时可用：首列必须匹配） ══════════
         search_mode = "二分";
 
@@ -1236,7 +1354,7 @@ pub fn execute_row_search(
                             .get_cell(*row, pf.col)
                             .map(|c| cell_search_value(c).to_lowercase())
                             .unwrap_or_default();
-                        match_filter_value(&value, &pf.keywords, pf.is_range)
+                        match_filter_value(&value, &pf.keywords, pf.is_range, pf.op)
                     });
                     if !all_matched {
                         hidden_rows.insert(*row);
@@ -1286,7 +1404,7 @@ pub fn execute_row_search(
                                 .enumerate()
                                 .map(|(fi, pf)| {
                                     let value = &all_col_data_ref[fi][idx].1;
-                                    match_filter_value(value, &pf.keywords, pf.is_range)
+                                    match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
                                 })
                                 .collect();
                             !row_matches_expr(&matches, logic_seq_ref)
@@ -1294,7 +1412,7 @@ pub fn execute_row_search(
                             // 纯 AND：全部匹配才可见
                             !parsed_ref.iter().enumerate().all(|(fi, pf)| {
                                 let value = &all_col_data_ref[fi][idx].1;
-                                match_filter_value(value, &pf.keywords, pf.is_range)
+                                match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
                             })
                         };
                         if hide {
@@ -1330,7 +1448,7 @@ pub fn execute_row_search(
                     .enumerate()
                     .map(|(fi, pf)| {
                         let value = &all_col_data[fi][idx].1;
-                        match_filter_value(value, &pf.keywords, pf.is_range)
+                        match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
                     })
                     .collect();
                 if !row_matches_expr(&matches, &logic_seq) {
@@ -1343,7 +1461,7 @@ pub fn execute_row_search(
                 let row = all_col_data[0][idx].0;
                 let all_matched = parsed.iter().enumerate().all(|(fi, pf)| {
                     let value = &all_col_data[fi][idx].1;
-                    match_filter_value(value, &pf.keywords, pf.is_range)
+                    match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
                 });
                 if !all_matched {
                     hidden_rows.insert(row);
@@ -1548,10 +1666,10 @@ pub fn draw_search_window(
         .open(&mut keep_open)
         .resizable(false)
         .collapsible(false)
-        .default_pos(ctx.content_rect().center() - egui::vec2(210.0, 70.0))
+        .default_pos(ctx.content_rect().center() - egui::vec2(270.0, 70.0))
         .show(ctx, |ui| {
-            ui.set_min_width(440.0);
-            ui.set_max_width(440.0);
+            ui.set_min_width(520.0);
+            ui.set_max_width(520.0);
 
             // ══════ 自定义标题栏（可点击展开/折叠）══════
             ui.horizontal(|ui| {
@@ -1615,6 +1733,7 @@ pub fn draw_search_window(
                             state.row_total_searched = 0;
                             for f in &mut state.row_filters {
                                 f.keyword.clear();
+                                f.op = CompareOp::Contains;
                             }
                             state.row_debug_info.clear();
                             // 清空列筛选条件（保留一条空条件）
@@ -1623,6 +1742,7 @@ pub fn draw_search_window(
                                 column_index: 0,
                                 filter_value: String::new(),
                                 logic: FilterLogic::And,
+                                op: CompareOp::Contains,
                             });
                         }
                     },
@@ -1680,6 +1800,7 @@ pub fn draw_search_window(
                                     column_index: 0,
                                     filter_value: String::new(),
                                     logic: FilterLogic::And,
+                                    op: CompareOp::Contains,
                                 });
                             }
                         },
@@ -1710,6 +1831,24 @@ pub fn draw_search_window(
                                             .clicked()
                                         {
                                             state.column_filters[idx].column_index = i;
+                                        }
+                                    }
+                                });
+
+                            ui.add_space(0.0);
+
+                            // 比较运算符下拉框（width=60）
+                            let op = state.column_filters[idx].op;
+                            egui::ComboBox::from_id_salt(format!("col_filter_op_{}", idx))
+                                .selected_text(op.label())
+                                .width(60.0)
+                                .show_ui(ui, |ui| {
+                                    for variant in CompareOp::ALL {
+                                        if ui
+                                            .selectable_label(op == variant, variant.label())
+                                            .clicked()
+                                        {
+                                            state.column_filters[idx].op = variant;
                                         }
                                     }
                                 });
@@ -1812,6 +1951,23 @@ pub fn draw_search_window(
                         let title = state.row_filters[idx].title.clone();
                         ui.horizontal(|ui| {
                             ui.label(format!("{} ({}):", title, state.row_filters[idx].cell_ref));
+
+                            // 比较运算符下拉框（width=60）
+                            let op = state.row_filters[idx].op;
+                            egui::ComboBox::from_id_salt(format!("row_filter_op_{}", idx))
+                                .selected_text(op.label())
+                                .width(60.0)
+                                .show_ui(ui, |ui| {
+                                    for variant in CompareOp::ALL {
+                                        if ui
+                                            .selectable_label(op == variant, variant.label())
+                                            .clicked()
+                                        {
+                                            state.row_filters[idx].op = variant;
+                                        }
+                                    }
+                                });
+
                             let input = egui::TextEdit::singleline(&mut state.row_filters[idx].keyword)
                                 .desired_width(250.0)
                                 .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
