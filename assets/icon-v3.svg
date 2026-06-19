@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="256" height="256">
+  <!-- 背景：Excel 绿色圆角方块 -->
+  <rect width="1024" height="1024" rx="200" fill="#1D6F42" />
+
+  <!-- 主标识 XLS（略缩小，为副标题留出垂直空间，仍占主导） -->
+  <text x="512" y="470" font-family="Arial, sans-serif" font-size="380" font-weight="bold"
+        fill="white" text-anchor="middle" letter-spacing="16">XLS</text>
+
+  <!-- 副标题 My Excel（居中，位于 XLS 下方、徽章上方） -->
+  <text x="512" y="650" font-family="Arial, sans-serif" font-size="120" font-weight="bold"
+        fill="white" text-anchor="middle" letter-spacing="8">My Excel</text>
+
+  <!-- 右下角个人徽章（白色底 + 绿色小人），与副标题在垂直方向错开，不重叠 -->
+  <circle cx="810" cy="810" r="150" fill="white" />
+  <circle cx="810" cy="756" r="54" fill="#1D6F42" />
+  <ellipse cx="810" cy="896" rx="80" ry="64" fill="#1D6F42" />
+</svg>

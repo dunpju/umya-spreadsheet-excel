@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="256" height="256">
+  <!-- 背景：Excel 绿色圆角方块 -->
+  <rect width="1024" height="1024" rx="200" fill="#1D6F42" />
+
+  <!-- 放大加粗的 XLS 主标识（原 260 → 440，约占 43% 高度，小尺寸下可辨识） -->
+  <text x="512" y="600" font-family="Arial, sans-serif" font-size="440" font-weight="bold"
+        fill="white" text-anchor="middle" letter-spacing="16">XLS</text>
+
+  <!-- 右下角放大的个人徽章（白色底 + 绿色小人），按原比例放大到 r=180，小尺寸仍可见 -->
+  <circle cx="800" cy="800" r="180" fill="white" />
+  <circle cx="800" cy="736" r="64" fill="#1D6F42" />
+  <ellipse cx="800" cy="903" rx="96" ry="77" fill="#1D6F42" />
+</svg>

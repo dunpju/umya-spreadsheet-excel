@@ -18,14 +18,14 @@ use util::date::days_to_ymd;
 
 /// 加载窗口图标（标题栏 + Windows 任务栏），返回 egui::IconData。
 ///
-/// 复用 `image` crate（png feature）将内嵌的精确 256px `assets/icon-256.png`
+/// 复用 `image` crate（png feature）将内嵌的精确 256px `assets/icon-v3-256.png`
 /// 解码为 RGBA，封装为 `egui::IconData`，再经 `ViewportBuilder::with_icon` 设置；
 /// eframe 在 Windows 上据此调用 `WM_SETICON`，标题栏与任务栏图标同源。
 /// 与 `build.rs`（winresource 把 icon.ico 嵌入 .exe 资源）互补：后者覆盖
 /// 资源管理器 / 跳转列表 / 运行前任务栏，本函数覆盖运行时窗口图标。
 /// 解码失败时返回 None（仅无图标，不影响功能，不阻塞启动）。
 fn load_window_icon() -> Option<egui::IconData> {
-    const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
+    const ICON_PNG: &[u8] = include_bytes!("../assets/icon-v3-256.png");
     let img = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     let (width, height) = img.dimensions();
     Some(egui::IconData {
