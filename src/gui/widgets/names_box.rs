@@ -263,6 +263,12 @@ pub fn draw_name_box(
                         egui::Color32::from_rgb(220, 220, 220)
                     }),
             );
+            // 蓝色激活态（dirty）时悬停显示快捷键提示
+            let save_btn = if dirty {
+                save_btn.on_hover_text("Ctrl+S")
+            } else {
+                save_btn
+            };
             if save_btn.clicked() {
                 save_clicked = true;
             }

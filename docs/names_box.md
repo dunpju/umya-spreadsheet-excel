@@ -187,6 +187,7 @@ egui 是立即模式 GUI：**没有跨帧存活的 Widget 对象**，每帧由 `
 | Escape | 下拉浮层 | `key_pressed(Escape)` → 关闭下拉 |
 | 输入 + Enter | 公式栏 | 非空则 `*pending_save = Some(formula_text)`（viewer 消费写格） |
 | 点击保存 | 保存按钮 | `save_clicked=true`（仅 `dirty` 时可点） |
+| 悬停提示（dirty 时） | 保存按钮 | `on_hover_text("Ctrl+S")`：蓝色激活态悬停显示快捷键提示 |
 
 **焦点追踪**：每帧把 `input_response.has_focus()` / `formula_response.has_focus()` 写回 `state.has_focus` /
 `state.formula_has_focus`，作为反向同步（viewer→显示）的"免打扰"门控。
@@ -232,7 +233,8 @@ if save_btn.clicked() {
 
 - **`dirty=false`**：按钮禁用（灰显、不可点击）。
 - **`dirty=true`**：可点击；点击 → `save_clicked=true`，经返回值 `(Option<_>, bool)` 传回 `viewer.rs`。
-- **等价入口**：`Ctrl+S`（`viewer.rs:714`）也调用同一个 `start_async_save`，与按钮殊途同归。
+- **等价入口**：`Ctrl+S`（`viewer.rs:731`）也调用同一个 `start_async_save`，与按钮殊途同归。按钮在
+  蓝色激活态（`dirty`）悬停时会以 `on_hover_text("Ctrl+S")` 显示该快捷键，向用户暴露等价入口。
 
 即触发条件 = `dirty==true` 且用户点击保存按钮（或按 `Ctrl+S`）。
 
