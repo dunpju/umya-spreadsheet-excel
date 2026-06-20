@@ -112,7 +112,11 @@ pub fn draw_menu_bar(
 
         // 关于菜单
         ui.menu_button("关于", |ui| {
-            ui.label("My Excel v0.1.0 @ 2026 [DENGPJU] <121540680@qq.com>");
+            // 版本号在编译时从 Cargo.toml 的 package.version 注入（env!("CARGO_PKG_VERSION")）
+            ui.label(format!(
+                "My Excel v{} @ 2026 [DENGPJU] <121540680@qq.com>",
+                env!("CARGO_PKG_VERSION")
+            ));
             let label = match lic_status {
                 LicenseStatus::Trial { days_left } => {
                     format!("试用剩余 {} 天", (*days_left).max(0))

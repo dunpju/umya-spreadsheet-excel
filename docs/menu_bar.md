@@ -95,7 +95,7 @@ pub fn draw_menu_bar(
 |          | 预警消息 | `alert_popup.visible = true` | 始终 |
 |          | ~~条件格式~~ | **已注释**（见 §5） | — |
 | **转换** | 转换工具 | `convert_popup.visible = true` | 始终 |
-| **关于** | 版本/邮箱 label | 静态展示 `My Excel v0.1.0 @ 2026 ...` | 始终 |
+| **关于** | 版本/邮箱 label | 展示 `My Excel v{CARGO_PKG_VERSION} @ 2026 ...`（版本号在编译时从 `Cargo.toml` 的 `package.version` 注入） | 始终 |
 |          | 授权状态 label | 按 `lic_status` 显示试用剩余/已授权/到期/异常 | 始终 |
 |          | 激活 | `license_popup.visible = true` | 试用期内（剩余>0） |
 |          | 帮助 | `help_popup.visible = true` | 始终 |
@@ -235,7 +235,7 @@ pub fn draw_menu_bar(
 | 1 | **参数过多（14 个）**，调用点（`viewer.rs:480` 附近）一行极长、易错 | 聚合为一个 `MenuBarCtx<'a>` 结构体（持有所有 `&mut` + 只读字段），`draw_menu_bar(ui, &mut ctx)`；签名与调用点都大幅简化 |
 | 2 | **每项都是 `if ui.button(X).clicked() { ui.close(); Y.visible=true; }` 样板** | 抽一个 helper，如 `fn open_popup(ui, label, target: &mut bool)`（注意 egui 闭包借用，可传 `&mut` 或返回 `bool` 由调用方赋值），减少重复 |
 | 3 | **每个浮窗各自一个 `visible` 布尔**，分散在各 state 结构，隐含"多窗同显" | 评估引入 `ActivePanel` 枚举做单点互斥管理（会改变现有"可同时多开"行为，需确认产品诉求后再改） |
-| 4 | **硬编码版本号 / 邮箱 / 菜单文案** | 版本号改用 `env!("CARGO_PKG_VERSION")`；文案集中为常量，便于后续 i18n 与统一维护 |
+| 4 | ~~硬编码版本号~~ / 邮箱 / 菜单文案 | ✅ 版本号已改用 `env!("CARGO_PKG_VERSION")` 编译时注入（不再硬编码）；邮箱与菜单文案仍硬编码，可后续集中为常量便于 i18n |
 | 5 | **两处长期注释代码**（插入配置、条件格式） | 若短期内不恢复，建议**彻底删除**（git 可追溯历史）或改用 `#[cfg(feature = "...")]` feature flag，保持源码整洁；当前"注释 + 导入说明"是可接受的临时态 |
 | 6 | **"添加列/行"与右键插入是两条路径** | 两者最终都走 `insert_columns`/`append_row`，但菜单经 `add_column` 标志、右键经 `ContextMenuState`，存在行为分叉风险；可考虑统一为同一入口/同一确认流程 |
 | 7 | **"关于"菜单混合静态 label 与可点击 button** | 语义上"关于"宜纯展示；"激活/帮助"可独立入口或保留——属偏好取舍，非缺陷 |
