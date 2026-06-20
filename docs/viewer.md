@@ -263,6 +263,8 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 - 名称框输入 `"A1"`/`"AA100"` 回车 → 解析为 `(col,row)` 跳转（`parse_cell_reference`，越界忽略）；
 - 公式栏：选中格变化时自动回填；用户回车写入 `pending_formula_save`（见 §5.3）。
 
+> 名称框组件的完整结构、状态字段、交互逻辑与视觉布局详见 [`names_box.md`](./names_box.md)。
+
 ### 3.3 浮层窗口清单
 
 | 浮层 | 触发 | 渲染方式 | 关键约束 |
