@@ -14,6 +14,7 @@ pub mod convert_popup;
 pub mod help_popup;
 pub mod alert_notify;
 pub mod license_popup;
+pub mod config;
 
 pub use menu_bar::*;
 pub use dialogs::*;
@@ -27,3 +28,4 @@ pub use convert_popup::*;
 pub use help_popup::*;
 pub use alert_notify::*;
 pub use license_popup::*;
+pub use config::*;

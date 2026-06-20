@@ -3,7 +3,7 @@
 //! 负责绘制应用程序的顶部菜单栏
 
 use eframe::egui;
-use crate::gui::viewer::{SettingsPanelState, SettingsPage};
+use crate::gui::widgets::config::{SettingsPanelState, SettingsPage};
 use crate::gui::widgets::search::SearchWindowState;
 use crate::gui::widgets::convert_popup::ConvertPopupState;
 use crate::gui::widgets::alert_popup::AlertPopupState;
