@@ -7,8 +7,8 @@
 //! | tag | 位置 | 说明 |
 //! |---|---|---|
 //! | `home` | `~/.MyExcel/license.dat` | 既有路径，向后兼容 |
-//! | `config` | `{config_dir}/MyExcel/state.dat` | 新增（如 `%APPDATA%\MyExcel\`） |
-//! | `local` | `{data_local_dir}/MyExcel/cache.bin` | 新增（如 `%LOCALAPPDATA%\MyExcel\`） |
+//! | `config` | `{config_dir}/{dir_uuid(config)}/state.dat` | 新增（如 `%APPDATA%\{dir_uuid(config)}\`） |
+//! | `local` | `{data_local_dir}/{dir_uuid(local)}/cache.bin` | 新增（如 `%LOCALAPPDATA%\{dir_uuid(local)}\`） |
 //! | `regmain` | 注册表 `HKCU\Software\{uuid}\Data` | 既有（仅 Windows） |
 //! | `regclsid` | 注册表 `HKCU\Software\Classes\CLSID\{uuid}\Data` | 新增分支（仅 Windows） |
 //!
@@ -171,13 +171,13 @@ fn all_stores() -> Vec<Box<dyn Store>> {
     if let Some(cfg) = dirs::config_dir() {
         stores.push(Box::new(FileStore {
             tag: "config",
-            path: cfg.join("MyExcel").join("state.dat"),
+            path: cfg.join(crate::license::fingerprint::dir_uuid("config")).join("state.dat"),
         }));
     }
     if let Some(loc) = dirs::data_local_dir() {
         stores.push(Box::new(FileStore {
             tag: "local",
-            path: loc.join("MyExcel").join("cache.bin"),
+            path: loc.join(crate::license::fingerprint::dir_uuid("local")).join("cache.bin"),
         }));
     }
 
