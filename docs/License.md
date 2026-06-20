@@ -274,25 +274,64 @@ impl LicenseManager {
 
 ## 六、数据存储方案
 
-### 6.1 存储位置（AES-256-GCM 加密 + 冗余 + 交叉校验，防删文件绕过）
+### 6.1 存储位置（多点分散 + 差异化加密 + 交叉校验，防删文件 / 防批量定位绕过）
 
-| 位置 | 值名 | 内容 | 作用 |
+试用状态 + 授权码分散写入 **5 个存储点**（文件 + 注册表），每点用**分位置密钥**加密 → 各点密文互不相同，单点删除无法绕过，按内容批量定位也失效。实现见 [`src/license/store.rs`](../src/license/store.rs) 与 [`src/license/crypto.rs`](../src/license/crypto.rs)。
+
+| tag | 位置 | 值名 | 说明 |
 |---|---|---|---|
-| `~/.MyExcel/license.dat`（主） | 文件整体 | AES-256-GCM 加密的试用状态 + 授权码 | 主存储，密文单行 base64 |
-| 注册表 `HKCU\Software\{uuid}` | `Data` | 同上的加密副本 | 冗余备份，路径由硬件派生 UUID 混淆 |
-| 注册表 `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示） | 技术支持用 |
+| `home` | `~/.MyExcel/license.dat` | 文件整体 | 既有主存储（保兼容） |
+| `config` | `{config_dir}/{dir_uuid(config)}/state.dat`（如 `%APPDATA%\{dir_uuid(config)}\state.dat`） | 文件整体 | 新增分散点 |
+| `local` | `{data_local_dir}/{dir_uuid(local)}/cache.bin`（如 `%LOCALAPPDATA%\{dir_uuid(local)}\cache.bin`） | 文件整体 | 新增分散点 |
+| `regmain` | 注册表 `HKCU\Software\{uuid}` | `Data` | 既有（路径由硬件派生 UUID 混淆） |
+| `regclsid` | 注册表 `HKCU\Software\Classes\CLSID\{uuid}` | `Data` | 新增分支（仅 Windows） |
+| `regmain` | 注册表 `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示，**保持无 tag**） |
 
-> **所有存储位置均为 AES-256-GCM 加密**，密钥由机器指纹派生（绑机），加载时先尝试解密，解密失败视为篡改。升级前的明文格式仍可读取（向后兼容）。
+**目录名混淆（config / local）**：这两点的目录名不再用固定的 `MyExcel`，而是按存储位置前缀派生一个**每机确定、每点不同**的 UUID 目录名 `{dir_uuid(prefix)}`。生成规则：以机器派生 UUID `registry_uuid()`（见 §9.4）为基，将位置前缀字符串与该 UUID **拼接后计算**得到最终目录名——
 
-**加载时的冲突仲裁（取“更严格”的那份）**：
-
-```rust
-// 对试用状态：取所有有效副本中 last_run_day 的最大值（高水位）
-// → 即使用户删了 license.dat，注册表里仍记得“已经用了 35 天”
-// 对授权码：两份都验签；任一有效且机器码匹配即放行
+```text
+dir_uuid(prefix) = uuid_v5_style( sha256( prefix_string + registry_uuid() ) )
+# 取 SHA-256 的前 16 字节，按 UUID v5 风格格式化（与 registry_uuid() 同套派生方式）
+# config 点用前缀 "config" → dir_uuid("config")；local 点用前缀 "local" → dir_uuid("local")
+# 例：得到形如 71445fac-d6ef-5436-9da7-5a323762d7f5 的目录名，且两个前缀产出互不相同
 ```
 
-> 这是抗“删配置文件重置试用”的关键：**高水位只增不减，且写两处**。删一处，另一处仍记得试用已过期。
+故 config / local / 注册表 `{uuid}` 三者目录名互不相同、且与机器绑定——路径中无可识别的固定产品名，进一步抬高"按路径批量定位并删除"的门槛。
+
+> 所有内部存储点均为 AES-256-GCM 加密。`dirs` 返回 `None`（极少数环境）的点直接跳过；非 Windows 仅有 3 个文件点。`regclsid` 分支为 user-writable、best-effort：偶有 AV/EDR 会清理 `CLSID` 下的值，清理后该点缺失（按"非篡改"处理），不影响其余 4 点兜底。
+
+**差异化加密**：每点密钥 = `SHA256(LOCATION_LABEL || PEPPER || 机器指纹 || tag)`（`tag` 即位置标识，`LOCATION_LABEL` 与导出/HMAC 的标签区隔以防密钥复用），且每次写入随机 nonce。因此：
+
+- 各点密文**互不相同** → 无法凭一份样本按内容 `find` / 注册表搜索批量定位全部；
+- 无法把 A 点密文搬到 B 点解密（密钥不同）→ 抗重定位；
+- 路径 / 文件名 / 注册表分支均不同 → 按路径批量定位也失效。
+
+**明文格式**（加密前，两行）：
+
+```text
+f=<first_run_day>|l=<last_run_day>|r=<rollback_count>|mac=<hex>|loc=<tag>|mani=<manifest>
+<授权码或空>
+```
+
+- `mac` = HMAC over `f|l|r`（核心试用字段，与 `TrialState::body` 一致）；
+- `loc`（本点 tag）与 `mani`（清单哈希 = `sha256(排序后全部 tag)`，每个二进制版本固定）追加在后，**不**进 HMAC，但被 AES-GCM 整体认证 → 防篡改。
+
+**加载与交叉校验**（`store::load`）：
+
+1. 每点**三级解密兜底**：分位置解密 → 无 tag 旧版解密（兼容升级前数据）→ 原始明文（pre-encryption 时代）；
+2. 缺失点**不算**篡改（best-effort 写入，单点失败 / 被 AV 清理不影响其余）；
+3. 有数据但解不开 / HMAC 失败 / 当前版本 blob 的 `loc` 与读取点 tag 不符 → **篡改**；
+4. 合并：`min(first_run_day)` / `max(last_run_day)` / `max(rollback_count)`，重新签名；
+5. **交叉校验**（纯函数 `cross_validate`，仅"当前版本"blob 参与）：≥2 点的 `first_run_day` 或非空 license 不一致 → **篡改**。`last_run_day` / `rollback_count` 的不一致**不算**篡改（volatile，靠 `max` 合并即可，避免中断保存误锁合法用户）。
+
+```rust
+// 对试用状态：取所有幸存点中 last_run_day 的最大值（高水位）
+// → 删任意子集都不降高水位：幸存点仍记得"已经用了 35 天"，试用不重置、不进 Tampered
+// 对授权码：各点都验签；任一有效且机器码匹配即放行
+// 交叉校验：各点 first_run_day / license 必须一致，否则判定篡改
+```
+
+> **为什么删点无法重置试用**：每次 `save()` 向**所有**点写入**相同的** `f|l|r` 值（但**不同**密文）。删除任意**子集**都不能降低高水位——幸存点仍记着最先进的 `last_run_day`，`max` 合并生效，试用**不**重置、也**不**进入 Tampered。只有删除**全部**点才回到"首次运行"（离线场景不可判定的固有局限），而差异化密文 + 分散路径 / 文件名 / 注册表分支让"找到并删除全部"成本极高。
 
 ### 6.2 防时钟回拨
 
@@ -308,7 +347,9 @@ impl LicenseManager {
 |---|---|
 | 伪造授权码 | Ed25519 非对称签名，无私钥无法伪造 ✅（强保证） |
 | 改系统时间延长试用 | 高水位 `last_run_day` + 回拨检测 + 多位置冗余 |
-| 删除 `license.dat` 重置 | 注册表冗余副本（同为加密），取 `max(last_run_day)` |
+| 删除 `license.dat` 重置 | **5 个分散存储点**（3 文件 + 2 注册表分支），各点**差异化密文**；删任意子集不降高水位（幸存点 `max(last_run_day)` 生效），删全部才重置（见 6.1） |
+| 按内容 / 路径批量定位删除全部存储 | 每点**分位置密钥**（密文互不相同）+ 分散路径 / 文件名 / 注册表分支 → 无统一模式可 grep / find |
+| 搬迁 / 复制某点密文到他处绕过 | 分位置密钥（tag 绑定密钥）+ blob 内嵌 `loc` 校验 → 换位置解密失败、加载标篡改 |
 | 手改试用状态文件 | AES-256-GCM 加密存储 + HMAC 双重校验，改密文或改明文均失败 |
 | 直接读取授权数据 | AES-256-GCM 加密，无机器密钥无法解密 |
 | 一份授权码多机用 | 机器码绑定，`activate` 校验 `machine == 本地` |
@@ -876,6 +917,160 @@ if close_clicked { state.visible = false; }
 
 ---
 
+### 9.10 弹窗视觉布局图（`license_popup.rs`）
+
+> 以下布局依据 `src/gui/widgets/license_popup.rs` 中 `draw_license_popup` 的 egui 组件层级绘制，描述弹窗在屏幕居中渲染时的实际视觉结构。`can_close` 由调用方（`viewer.rs`）依据 `LicenseStatus` 每帧派生：试用期内（剩余天数 > 0）为 `true`，到期 / 篡改等拦截态为 `false`。
+
+#### 9.10.1 组件层级树
+
+```
+egui::Window "license_gate"
+│   属性: title_bar(false) · resizable(false) · collapsible(false) · movable(false)
+│         order(Foreground) · anchor(CENTER_CENTER,[0,0])
+│         set_min_width(400.0) · set_height(300.0)
+│
+├──【顶部条带】allocate_ui_with_layout
+│       布局: right_to_left(TOP)  尺寸: 整宽 × interact_size.y
+│   └── Button "[X]"            (仅 can_close=true 渲染 → close_clicked=true → 帧末 visible=false)
+│
+└──【主体】vertical_centered      (占顶部条带以下全部剩余高度，子项整体水平居中)
+    ├── add_space(4.0)
+    ├── Label status_text                  (16px · strong 加粗)
+    ├── add_space(8.0)
+    │
+    ├── ══ 分支 A：激活成功态 (activated_timer > 0) ══
+    │   ├── add_space(20.0)
+    │   ├── Label "✅ 激活成功，感谢支持！"      (15px · 绿色 rgb(0,150,0))
+    │   └── add_space(20.0)
+    │   (1.5 秒倒计时结束后 hide_after_frame → visible=false)
+    │
+    └── ══ 分支 B：常规激活态 (else，默认) ══
+        ├── Image 二维码纹理                  (200×200)   ── 无纹理时占位 set_min_height(200)
+        ├── Label "扫码付款(9.9元/月)后，联系开发者获取授权码"
+        ├── add_space(8.0)
+        ├── Label "本机机器码（请发送给开发者）："
+        ├── horizontal                        (机器码 + "复制" 整组水平居中)
+        │   ├── allocate_space(left_pad)      ── left_pad=(可用宽-整组宽)/2，实现整组居中
+        │   ├── monospace 机器码              (14px · 灰底 rgb(235))
+        │   └── Button "复制"                 → ctx.copy_text(code)
+        ├── add_space(12.0)
+        ├── Label "输入授权码："
+        ├── TextEdit multiline                (desired_width 380 · desired_rows 3)
+        ├── colored_label error               (红 rgb(200,0,0), 仅 state.error 时)
+        ├── add_space(8.0)
+        └── with_layout right_to_left(Center)
+            └── Button "激  活"               (14px) → 校验非空 → on_activate(code)
+                                                Ok  → activated_timer=1.5
+                                                Err → state.error=Some(msg)
+```
+
+#### 9.10.2 窗口属性
+
+| 属性 | 取值 | 说明 |
+|---|---|---|
+| 标题栏 | `title_bar(false)` | 无原生标题栏，纯自绘内容 |
+| 锚定 | `anchor(CENTER_CENTER, [0, 0])` | 屏幕正中，偏移 0 |
+| 层级 | `Order::Foreground` | 覆盖主界面，模态遮罩 |
+| 缩放 | `resizable(false)` | 不可拖拽拉伸 |
+| 折叠 | `collapsible(false)` | 不可折叠收起 |
+| 拖动 | `movable(false)` | 不可拖动移位 |
+| 最小宽 | `set_min_width(400.0)` | 400px |
+| 高度 | `set_height(300.0)` | 标称 300px；内容超出时窗口自动增高 |
+
+#### 9.10.3 常规激活态布局（分支 B，主视图）
+
+拦截态（`can_close=false`）下右上角**无** `[X]` 按钮，弹窗强制不可关闭；试用期内（`can_close=true`）则在顶部条带右上角额外渲染 `[X]`。两种情形的主体内容完全一致：
+
+```
+        ┌─────────────────────────────────────────────┐  ← 最小宽 400px
+        │  顶部条带 (整宽 × interact_size.y)         [X]│     仅 can_close=true 时
+        ├─────────────────────────────────────────────┤     渲染右上角 [X]
+        │              ↑ 4px                          │
+        │        状态文本  (16px · 加粗)               │  status_text
+        │              ↓ 8px                          │
+        │     ┌───────────────────┐                   │
+        │     │                   │                   │
+        │     │   二维码 200 × 200 │   ← 水平居中       │
+        │     │                   │                   │
+        │     └───────────────────┘                   │
+        │  扫码付款(9.9元/月)后，联系开发者获取授权码    │
+        │              ↑ 8px                          │
+        │  本机机器码（请发送给开发者）：                │
+        │       ┌──────────────┐ 6px ┌─────┐          │
+        │       │ XXXX-XXXX-…  │     │ 复制 │          │  ← 整组水平居中
+        │       └──────────────┘     └─────┘          │    (monospace 14px · 灰底)
+        │              ↑ 12px                         │
+        │           输入授权码：                       │
+        │    ┌──────────────────────────────┐         │
+        │    │                              │         │
+        │    │   TextEdit (宽 380 · 3 行)    │         │
+        │    │                              │         │
+        │    └──────────────────────────────┘         │
+        │    [红色错误提示  ·  仅 state.error 时显示]   │
+        │              ↑ 8px                          │
+        │                          ┌─────────┐        │
+        │                          │  激  活  │        │  ← 右对齐 right_to_left
+        │                          └─────────┘        │
+        └─────────────────────────────────────────────┘
+                          ↑
+          标称高 300px (set_height)，内容超出时窗口自动增高
+```
+
+#### 9.10.4 激活成功态布局（分支 A，`activated_timer > 0`）
+
+验签通过后 `activated_timer` 置为 1.5 秒，弹窗切到成功提示；倒计时归零后于帧末自动关闭（`visible=false`）。此态下**不渲染**二维码 / 机器码 / 输入框 / 激活按钮：
+
+```
+        ┌─────────────────────────────────────────────┐
+        │  顶部条带                                  [X]│
+        ├─────────────────────────────────────────────┤
+        │              ↑ 4px                          │
+        │        状态文本  (16px · 加粗)               │
+        │              ↓ 8px + 20px                   │
+        │                                              │
+        │                                              │
+        │      ✅ 激活成功，感谢支持！  (15px · 绿)     │
+        │                                              │
+        │              ↓ 20px                          │
+        └─────────────────────────────────────────────┘
+              1.5 秒后 hide_after_frame → 自动关闭
+```
+
+#### 9.10.5 交互区域与对齐说明
+
+| 区域 | 位置 / 对齐 | 交互行为 |
+|---|---|---|
+| `[X]` 关闭按钮 | 顶部条带右上角（`right_to_left(TOP)`） | 仅 `can_close=true` 渲染；点击 → `visible=false` |
+| 二维码 | 主体顶部，水平居中 | 仅展示（`ui.image`，无可点交互） |
+| 机器码文本 | 与"复制"按钮成组，**整组**水平居中 | 仅展示；不可选中编辑 |
+| "复制"按钮 | 紧邻机器码右侧，组内间距 6px | 点击 → `ctx.copy_text(code)` 写入剪贴板 |
+| 授权码输入框 | 居中，宽 380px / 3 行 | 多行可编辑（`TextEdit::multiline`） |
+| 错误提示 | 输入框正下方，红色 | 仅 `state.error` 为 `Some` 时出现 |
+| "激  活"按钮 | 主体底部右对齐（`right_to_left(Center)`） | 点击 → 空则报错"请输入授权码"；非空调用 `on_activate` |
+| 成功提示 | 替换整个输入区（分支 A） | 无交互，1.5 秒自动消失 |
+
+#### 9.10.6 尺寸与间距一览
+
+| 元素 | 尺寸 / 样式 | 来源 |
+|---|---|---|
+| 窗口最小宽 | 400px | `set_min_width(400.0)` |
+| 窗口标称高 | 300px（最小值，可增高） | `set_height(300.0)` |
+| 顶部条带高 | `interact_size.y`（≈ 按钮行高） | `ui.spacing().interact_size.y` |
+| 状态文本 | 16px · 加粗 | `RichText::size(16.0).strong()` |
+| 二维码 | 200×200px | `SizedTexture::new(.., [200.0, 200.0])` |
+| 成功提示 | 15px · 绿色 rgb(0,150,0) | `RichText::size(15.0).color(..)` |
+| 机器码 | monospace 14px · 灰底 rgb(235) | `monospace(..).background_color(..)` |
+| 机器码 ↔ "复制" 间距 | 6px | `gap = 6.0` / `item_spacing.x = gap` |
+| 整组居中左留白 | `(可用宽 − 整组宽) / 2` | `left_pad` 测量后计算 |
+| 授权码输入框 | 宽 380px · 3 行 | `desired_width(380.0).desired_rows(3)` |
+| 错误提示 | 红色 rgb(200,0,0) | `colored_label(..)` |
+| "激  活"按钮 | 14px 文本 | `RichText::new("激  活").size(14.0)` |
+| 段间垂直留白 | 4 / 8 / 8 / 12 / 8 / 20 px | `ui.add_space(..)` |
+
+> **整组居中技巧**：egui 的 `ui.horizontal` 会声明满宽且左对齐，无内置"整组居中"。代码先用 `painter.layout_no_wrap` 测量机器码文本宽与"复制"按钮宽（`text宽 + button_padding*2`，且不小于 `interact_size.x`），得 `整组宽 = 码宽 + 6 + 按钮宽`，再在行首 `allocate_space(left_pad)` 预留 `(可用宽 − 整组宽)/2` 实现居中。
+
+---
+
 ## 十、配套 keygen 工具（开发者离线生成授权码）
 
 单独一个小 crate（含私钥，**绝不分发**）：
@@ -932,7 +1127,7 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 ## 十一、现实局限与进阶建议
 
-**本方案能挡住**：授权码伪造（Ed25519）、改时间（高水位）、删文件（注册表冗余）、改试用状态（HMAC + AES-256-GCM）、直接读取授权数据（AES-256-GCM 加密存储）、一码多机（机器码绑定）。
+**本方案能挡住**：授权码伪造（Ed25519）、改时间（高水位）、删文件重置（5 点分散 + 差异化密文，删全部才重置）、按内容/路径批量定位删除（密文互不相同 + 分散路径）、改试用状态（HMAC + AES-256-GCM）、直接读取授权数据（AES-256-GCM 加密存储）、一码多机（机器码绑定）。
 
 **本方案挡不住**：专业逆向直接 patch `ed25519_verify` 返回 `true`。进阶对策（按预算）：
 

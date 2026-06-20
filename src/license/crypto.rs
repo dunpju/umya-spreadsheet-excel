@@ -163,6 +163,82 @@ pub fn aes256gcm_decrypt(encoded: &str, machine_fingerprint: &[u8]) -> Option<Ve
     cipher.decrypt(nonce, &data[12..]).ok()
 }
 
+// ---------------------------------------------------------------------------
+// 分位置（per-location）AES-256-GCM：内部多存储点用，密文按位置差异化
+// ---------------------------------------------------------------------------
+
+/// 分位置加密的上下文标签（与 [`EXPORT_LABEL`]、[`HMAC_PEPPER`] 互不相同，
+/// 避免三套密钥派生路径之间的密钥复用）。
+const LOCATION_LABEL: &[u8] = b"umya-excel-license-store-v1";
+
+/// 从机器指纹 + 存储位置 tag 派生 AES-256 密钥（32 字节）。
+///
+/// 每个 tag 对应不同密钥：同一明文在不同存储点产出不同密文，
+/// 且无法把 A 点的密文搬到 B 点解密（抗重定位 / 抗按内容批量定位）。
+fn derive_location_key(machine_fingerprint: &[u8], location_tag: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(LOCATION_LABEL);
+    hasher.update(HMAC_PEPPER);
+    hasher.update(machine_fingerprint);
+    hasher.update(location_tag);
+    let out = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out);
+    key
+}
+
+/// 分位置 AES-256-GCM 加密。返回 `base64(nonce[12] || ciphertext || tag[16])`。
+///
+/// - `plaintext`：明文字节
+/// - `machine_fingerprint`：机器指纹（绑机）
+/// - `location_tag`：存储位置标识（决定派生密钥）
+///
+/// 每次随机 nonce → 同明文多次/多点产出不同密文；不同 tag → 不同密钥。
+pub fn aes256gcm_encrypt_for(
+    plaintext: &[u8],
+    machine_fingerprint: &[u8],
+    location_tag: &[u8],
+) -> Option<String> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let key = derive_location_key(machine_fingerprint, location_tag);
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let mut nonce_bytes = [0u8; 12];
+    if getrandom::getrandom(&mut nonce_bytes).is_err() {
+        return None;
+    }
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext).ok()?;
+
+    let mut out = Vec::with_capacity(12 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+
+    Some(base64::engine::general_purpose::STANDARD.encode(&out))
+}
+
+/// 分位置 AES-256-GCM 解密。与 [`aes256gcm_encrypt_for`] 配对，
+/// 必须用**相同的 location_tag** 才能解密成功。
+pub fn aes256gcm_decrypt_for(
+    encoded: &str,
+    machine_fingerprint: &[u8],
+    location_tag: &[u8],
+) -> Option<Vec<u8>> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let data = b64_decode(encoded)?;
+    if data.len() < 12 + 16 {
+        return None;
+    }
+
+    let key = derive_location_key(machine_fingerprint, location_tag);
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let nonce = Nonce::from_slice(&data[..12]);
+    cipher.decrypt(nonce, &data[12..]).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +301,61 @@ mod tests {
                 "tampered ciphertext must not decrypt successfully"
             );
         }
+    }
+
+    #[test]
+    fn aes256gcm_for_roundtrip() {
+        let fp: &[u8] = b"test-fingerprint-bytes";
+        let plaintext = b"f=20622|l=20622|r=0|mac=abc123|loc=home|mani=zzz";
+        let encoded = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("encrypt_for");
+        let decoded = aes256gcm_decrypt_for(&encoded, fp, b"home").expect("decrypt_for");
+        assert_eq!(decoded, plaintext);
+    }
+
+    #[test]
+    fn aes256gcm_for_tag_isolation() {
+        // home 点的密文不能用 config 的 tag 解密（密钥不同）→ 抗重定位
+        let fp: &[u8] = b"machine-fp";
+        let plaintext = b"secret trial state";
+        let encoded = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("encrypt_for home");
+        assert!(
+            aes256gcm_decrypt_for(&encoded, fp, b"config").is_none(),
+            "blob encrypted under 'home' must not decrypt under 'config'"
+        );
+    }
+
+    #[test]
+    fn aes256gcm_for_distinct_ciphertext_per_call() {
+        // 同明文、同 tag 两次加密，因随机 nonce 应产出不同密文
+        let fp: &[u8] = b"machine-fp";
+        let plaintext = b"identical plaintext";
+        let a = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("encrypt a");
+        let b = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("encrypt b");
+        assert_ne!(a, b, "two encryptions of same plaintext must differ (random nonce)");
+    }
+
+    #[test]
+    fn aes256gcm_for_distinct_ciphertext_per_tag() {
+        // 同明文、不同 tag 应产出不同密文
+        let fp: &[u8] = b"machine-fp";
+        let plaintext = b"identical plaintext";
+        let home = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("encrypt home");
+        let config = aes256gcm_encrypt_for(plaintext, fp, b"config").expect("encrypt config");
+        assert_ne!(home, config, "ciphertext must differ per location tag");
+    }
+
+    #[test]
+    fn aes256gcm_for_distinct_from_legacy() {
+        // 分位置密文应与无 tag 旧版密文不同（不同标签 / 不同派生）
+        let fp: &[u8] = b"machine-fp";
+        let plaintext = b"identical plaintext";
+        let legacy = aes256gcm_encrypt(plaintext, fp).expect("legacy encrypt");
+        let tagged = aes256gcm_encrypt_for(plaintext, fp, b"home").expect("tagged encrypt");
+        assert_ne!(legacy, tagged, "tagged ciphertext must differ from legacy");
+        // 旧版密文不能被分位置解密（兜底时需走无 tag 路径）
+        assert!(
+            aes256gcm_decrypt_for(&legacy, fp, b"home").is_none(),
+            "legacy blob must not decrypt via tagged path"
+        );
     }
 }
