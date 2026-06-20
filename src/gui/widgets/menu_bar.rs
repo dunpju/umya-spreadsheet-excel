@@ -110,7 +110,7 @@ pub fn draw_menu_bar(
 
         // 关于菜单
         ui.menu_button("关于", |ui| {
-            ui.label("My Excel v0.1.0");
+            ui.label("My Excel v0.1.0 @ 2026 [DENGPJU] <121540680@qq.com>");
             let label = match lic_status {
                 LicenseStatus::Trial { days_left } => {
                     format!("试用剩余 {} 天", (*days_left).max(0))
