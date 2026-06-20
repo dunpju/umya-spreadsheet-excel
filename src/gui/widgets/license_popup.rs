@@ -141,7 +141,7 @@ pub fn draw_license_popup(
                     } else {
                         ui.set_min_height(200.0);
                     }
-                    ui.label("扫码付款(9.9元/月)后，联系开发者获取授权码");
+                    ui.label("扫码付款(9.9元/30天)后，联系开发者获取授权码");
                     ui.add_space(8.0);
 
                     // 机器码 + "复制"按钮：作为一个整体水平居中。
