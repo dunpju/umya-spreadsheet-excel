@@ -210,6 +210,10 @@ pub struct ExcelViewer {
     save_rx: Option<Receiver<Result<String, String>>>,
     /// 保存请求标志（用于延迟到 excel_data 借用释放后执行）
     save_requested: bool,
+    /// 当前在途保存的输出路径（供失败时拼装"文件被占用"提示文案）
+    pending_save_path: Option<String>,
+    /// 保存失败红色提示框文案（Some 时弹出居中红色提示，关闭后置 None）
+    save_failed: Option<String>,
     /// 搜索窗口状态
     pub search_window: SearchWindowState,
     /// 转换弹窗状态
@@ -270,6 +274,8 @@ impl ExcelViewer {
             save_path: None,
             save_rx: None,
             save_requested: false,
+            pending_save_path: None,
+            save_failed: None,
             drag_anchor: None,
             search_window: SearchWindowState::default(),
             convert_popup: ConvertPopupState::default(),
@@ -509,6 +515,8 @@ impl ExcelViewer {
         };
 
         self.saving = true;
+        // 记录在途保存的输出路径，供失败时拼装"文件被占用"提示文案
+        self.pending_save_path = Some(output_path.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         self.save_rx = Some(rx);
 
@@ -530,13 +538,24 @@ impl ExcelViewer {
     fn check_save_result(&mut self) {
         if let Some(ref rx) = self.save_rx {
             if let Ok(result) = rx.try_recv() {
+                // 取走在途保存的输出路径：成功则忽略，失败则用于拼装提示文案
+                let pending_path = self.pending_save_path.take();
                 match result {
                     Ok(path) => {
                         self.save_path = Some(path);
                         self.dirty = false;
+                        self.save_failed = None; // 重试成功，清除失败提示框
                     }
                     Err(e) => {
                         self.error_message = Some(e);
+                        // 弹出居中红色提示框（非状态栏文字）：文件可能被占用打开。
+                        // 覆盖两种触发方式（点"保存"按钮 / Ctrl+S）——二者都汇入此函数。
+                        if let Some(p) = pending_path {
+                            self.save_failed = Some(format!(
+                                "保存失败!请检查{}文件是否被占用打开",
+                                p
+                            ));
+                        }
                     }
                 }
                 self.saving = false;
@@ -713,6 +732,45 @@ impl eframe::App for ExcelViewer {
             if self.dirty && !self.saving && self.excel_data.is_some() {
                 self.start_async_save(ctx.clone());
             }
+        }
+
+        // 保存失败红色提示框（文件被占用等）：居中 Foreground 浮窗，区别于状态栏文字。
+        // 两种触发方式（点"保存"按钮 / Ctrl+S）都汇入 start_async_save → check_save_result，
+        // 失败时由 check_save_result 置位 self.save_failed，这里据此渲染。
+        if let Some(msg) = self.save_failed.clone() {
+            egui::Window::new("save_failed")
+                .title_bar(false)
+                .resizable(false)
+                .collapsible(false)
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style())
+                        .fill(egui::Color32::from_rgb(253, 236, 236))
+                        .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 53, 69)))
+                        .show(ui, |ui| {
+                            ui.set_min_width(360.0);
+                            ui.horizontal_top(|ui| {
+                                ui.label(
+                                    egui::RichText::new("✖")
+                                        .color(egui::Color32::from_rgb(220, 53, 69))
+                                        .size(18.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&msg)
+                                        .color(egui::Color32::from_rgb(190, 0, 0))
+                                        .size(14.0)
+                                        .strong(),
+                                );
+                            });
+                            ui.add_space(10.0);
+                            ui.vertical_centered(|ui| {
+                                if ui.button("知道了").clicked() {
+                                    self.save_failed = None;
+                                }
+                            });
+                        });
+                });
         }
 
         // 底部区域：工作表选择器 + 文件路径状态栏

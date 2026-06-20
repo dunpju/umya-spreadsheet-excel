@@ -207,6 +207,147 @@ egui 是立即模式 GUI：**没有跨帧存活的 Widget 对象**，每帧由 `
 
 ---
 
+## 3. "保存"按钮业务逻辑详解
+
+> **重要澄清（请先读这段）**：`names_box.rs` 中的"保存"按钮**本身几乎不含业务逻辑**——点击只置一个布尔
+> 标志 `save_clicked=true` 并随返回值传出。真正的保存流程（路径生成、授权校验、异步落盘、错误回收、
+> 状态更新）**全部位于 [`viewer.rs`](../../src/gui/viewer.rs)**，详见 [`viewer.md`](./viewer.md) §5.4
+> 保存流。此外，该按钮保存的是**整个工作簿文件**，与"Excel 名称管理器"**没有任何交互**——名称管理在本
+> 项目中是未实现的占位功能（见 §3.6）。下文按「触发 / 校验 / 保存流程 / 界面状态 / 异常处理 / 名称管理
+> 交互」逐项**如实**说明，对代码中并不存在的部分会明确标注，避免误导。
+
+### 3.1 触发条件
+
+按钮在 `draw_name_box` 内以 `add_enabled` 渲染（`names_box.rs:257-268`）：
+
+```rust
+let save_btn = ui.add_enabled(
+    dirty,                                              // ← 可点击前置条件
+    egui::Button::new(btn_text).fill(/* dirty 双态配色 */),
+);
+if save_btn.clicked() {
+    save_clicked = true;                                // ← 唯一副作用
+}
+```
+
+- **`dirty=false`**：按钮禁用（灰显、不可点击）。
+- **`dirty=true`**：可点击；点击 → `save_clicked=true`，经返回值 `(Option<_>, bool)` 传回 `viewer.rs`。
+- **等价入口**：`Ctrl+S`（`viewer.rs:714`）也调用同一个 `start_async_save`，与按钮殊途同归。
+
+即触发条件 = `dirty==true` 且用户点击保存按钮（或按 `Ctrl+S`）。
+
+### 3.2 输入校验规则
+
+> **结论：保存按钮路径上没有任何"输入校验"。**
+
+- 按钮不读取 `input_text` / `formula_text`，不校验任何单元格内容；
+- 项目中的**数据有效性校验**（`SheetData::validate_cell` / `validation_error`）发生在**单元格编辑提交时**
+  （公式栏 Enter / 双击编辑提交，由 `viewer.rs` 处理），**与保存按钮无关**；
+- 保存流程里唯一的"校验门控"是**授权状态**：`start_async_save` 首行检查 `license.status(...).is_blocking()`
+  （`viewer.rs:493-497`）——这是**权限校验**，不是数据校验。
+
+所以「能否点保存」的唯一前置条件是 `dirty`；点下后也不会对工作簿内容做任何合法性校验。
+
+### 3.3 数据保存流程（跨 `names_box.rs` → `viewer.rs`）
+
+按钮只是整条链路的**第①步**：
+
+```
+① names_box.rs:257-268   save_btn.clicked() ──► save_clicked = true
+② viewer.rs:939-940      if save_clicked { self.save_requested = true; }      // 记录请求
+③ viewer.rs:1755-1757    if self.save_requested {
+                            self.save_requested = false;
+                            start_async_save(ctx.clone());                      // 延后执行
+                         }
+④ viewer.rs:498  start_async_save:
+     ├─ 授权拦截（blocking ──► 弹激活窗并 return）
+     ├─ output_path  = generate_save_path()   // stem_YYYYMMDD.ext（Howard Hinnant 算法，无 chrono）
+     ├─ pending_save_path = Some(output_path.clone())   // 记录在途路径，供失败提示
+     ├─ original_path = file_path
+     ├─ excel_data    = self.excel_data.clone()
+     ├─ saving=true; (tx,rx)=channel; save_rx=Some(rx)
+     └─ spawn 线程: writer::save_to_file(original, data, output)
+                       └─► tx.send(Ok(path) | Err(e)) ──► ctx.request_repaint()
+⑤ viewer.rs:723 + 538  check_save_result（每帧）: rx.try_recv()（并 take pending_save_path）
+     ├─ Ok(path) ──► save_path = Some(path); dirty = false; save_failed = None   // 重试成功清提示
+     └─ Err(e)   ──► error_message = Some(e);
+                   save_failed = Some("保存失败!请检查{output_path}文件是否被占用打开")
+     saving=false; save_rx=None
+⑥ ui(): save_failed.is_some() ──► 渲染居中红色 Foreground 浮窗（"保存失败!请检查{路径}..."，"知道了"关闭）
+```
+
+要点：
+
+- **延迟执行（②→③）**：按钮回调发生在 `draw_name_box` 内（此时 `viewer.rs` 仍持有 `excel_data` 借用），
+  无法立即 `start_async_save`（它需要 `excel_data.clone()`）。故先置 `save_requested` 标志，待 CentralPanel
+  闭包结束、借用释放后，在 `viewer.rs:1755` 才真正执行——这是 viewer 处理借用冲突的惯用"命令标志"模式。
+- **副本落盘**：后台线程持有 `excel_data` 的克隆，主线程可继续编辑，UI 不阻塞。
+- **输出带日期后缀的新文件**（`stem_YYYYMMDD.ext`，`generate_save_path`，`viewer.rs:463-489`），**不改原模板**。
+
+### 3.4 界面状态变化
+
+按钮自身（`names_box.rs`）：
+
+- `dirty` 驱动**配色与启用**（见 §2.5 配色表）：`dirty=true` 白字蓝底高亮、可点；`dirty=false` 灰字浅灰底、禁用。
+- 点击瞬间仅有 egui 按钮默认的按压视觉，无额外反馈。
+
+保存流程驱动的界面变化（`viewer.rs` / 底部状态栏）：
+
+| 阶段 | 状态字段 | 界面表现 |
+|------|----------|----------|
+| 保存中 | `saving=true` | 状态栏右侧 spinner + "正在保存..."；每帧 `request_repaint` 驱动动画 |
+| 成功 | `save_path=Some(path)`、`dirty=false` | 状态栏显示**绿色**新路径（带日期后缀）；保存按钮变灰禁用 |
+| 失败 | `error_message=Some(e)`、`save_failed=Some(...)` | 弹出**居中红色提示框**（Foreground 浮窗，非状态栏文字）"保存失败!请检查{路径}文件是否被占用打开"，点"知道了"关闭 |
+| （始终） | 名称框/公式栏文本 | 不受保存影响 |
+
+### 3.5 异常处理机制
+
+- **授权拦截**：拦截态点保存 → **不保存**，弹出激活/付款模态（`license_popup.visible=true`）后 `return`
+  （`viewer.rs:500-503`）。
+- **路径缺失**：`file_path` 为 `None` 或 `generate_save_path()` 返回 `None` → 静默 `return`，不保存
+  （`viewer.rs:504-515`）。
+- **写盘失败（红色提示框，本次新增反馈）**：`writer::save_to_file` 返回 `Err(e)`（重读原文件失败 = 模板被占用；
+  写入输出失败 = 输出文件被占用）→ `check_save_result`（`viewer.rs:538`）置 `error_message=Some(e)` **并**
+  `save_failed=Some("保存失败!请检查{output_path}文件是否被占用打开")`；`ui()` 据此渲染**居中红色提示框**
+  （`egui::Window` + `Frame::popup` 红底红边，Foreground 浮窗，**区别于状态栏文字**），点"知道了"关闭。
+  **两种触发方式（点"保存"按钮 / Ctrl+S）都汇入 `start_async_save` → `check_save_result`，故对二者均生效。**
+- **重试自清除**：用户关闭占用文件后再次保存，若返回 `Ok` 则 `save_failed=None` 自动收起提示框。
+- **无自动重试**：失败不自动重试，需用户手动再次触发保存。
+- **名称框侧无任何异常处理**：按钮点击"不会失败"（只是置一个布尔）。
+
+### 3.6 与"Excel 名称管理器"的交互
+
+> **没有交互。本项目不存在 Excel 名称管理器功能。**
+
+- 名称框下拉里的「定义名称...」「管理名称...」（`names_box.rs:183-189`）是**占位 UI**：点击仅
+  `show_dropdown=false`，未实现任何名称的增删改查，也**不读写工作簿的命名区域（defined names）**。
+- 「保存」按钮保存的是**整个工作簿**（所有 sheet 的单元格、公式、样式、合并、数据有效性等，经
+  `writer::save_to_file`），与"名称管理"是**两件相互独立的事**——请勿把保存按钮误当作名称管理的一部分。
+- 若未来实现名称管理，它应挂在下拉菜单项下，与保存按钮无耦合。
+
+### 3.7 完整时序（按钮 → 落盘）
+
+```
+用户（dirty=true）── 点 [💾 保存] ──► names_box: save_clicked = true
+      │
+      ▼ viewer.rs
+save_requested = true ──（excel_data 借用释放后）──► start_async_save(ctx)
+      │
+      ├─ license blocking? ──是──► 弹激活窗，结束（不保存）
+      │
+      └─ 否：saving=true；pending_save_path=Some(output)；spawn 线程 ──► writer::save_to_file ──► tx.send(Ok|Err)
+                                                                     │
+      每帧 check_save_result ◄── try_recv（take pending_save_path）──┘
+            ├─ Ok(path) ──► 状态栏绿色路径；dirty=false；save_failed=None；按钮灰显
+            └─ Err(e)   ──► error_message + save_failed ──► 居中红色提示框
+                          （"保存失败!请检查{output}文件是否被占用打开"，"知道了"关闭）
+```
+
+> 与 [`viewer.md`](./viewer.md) 的关系：本节只刻画按钮侧的"发信号"；授权门面、日期后缀路径、异步通道、
+> 状态栏反馈的完整实现均在 `viewer.rs`，详见 [`viewer.md`](./viewer.md) §2.6（方法表）与 §5.4（保存流）。
+
+---
+
 ## 附：未完成 / 占位功能与改进建议
 
 ### 占位功能（当前无实际行为）
