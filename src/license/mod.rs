@@ -107,6 +107,12 @@ impl LicenseManager {
                 if t.last_run_day > today + ROLLBACK_TOLERANCE_DAYS {
                     t.rollback_count = t.rollback_count.saturating_add(1);
                 }
+                // 主动自愈：非篡改且部分存储点缺失（含 LicenseBlob）→ 立即重写全部存储点补齐冗余。
+                // 堵掉"同天反复删点逐步侵蚀冗余"的窗口（否则要等到次日跨天 checkpoint 才补）。
+                if lr.needs_heal {
+                    t.sign(&machine_fp);
+                    store::save(&t, &lr.license_raw, &machine_fp);
+                }
                 Some(t)
             }
             None => {

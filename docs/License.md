@@ -1156,27 +1156,40 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 ### 13.1 用途
 
-用于技术支持场景：用户运行程序后，可从注册表获取加密字符串提供给开发者验证授权状态。
-加密字符串由程序在每次调用 `store::save()`（激活、每日 checkpoint）时**自动生成**，无需用户手动操作。
+用于技术支持场景：用户把一段加密字符串发给开发者，开发者用本机 `--license` 解密查看授权状态。
+加密字符串由程序在每次调用 `store::save()`（激活、每日 checkpoint、自愈补写）时**自动生成**并分散写入多处存储，无需用户手动操作。
+
+> **兼容任意存储来源**：`--license` 不绑定具体存储位置——无论该串来自注册表 `LicenseBlob` 导出，还是任一存储点（`license.dat` / `state.dat` / `cache.bin` / 注册表 `Data`）的内部密文，都能解密。详见 13.4。
 
 ### 13.2 自动生成
 
-程序在每次调用 `store::save()`（激活、每日 checkpoint）时，自动对所有存储内容进行 AES-256-GCM 加密：
+程序在每次 `store::save()` 时向以下 6 处写入加密数据。**前 5 处是内部存储点**（各用**分位置密钥**，密文互不相同），第 6 处 `LicenseBlob` 是**导出专用**（无 tag 导出密钥）。`--license` 对这 6 处的密文**全部可解**（见 13.4）。
 
-| 位置 | 值名 | 说明 |
-|---|---|---|
-| `~/.MyExcel/license.dat` | 文件整体 | AES-256-GCM 加密的试用状态 + 授权码（密文单行 base64） |
-| `HKCU\Software\{uuid}` | `Data` | 同上的加密副本（注册表冗余） |
-| `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示） |
+| tag | 位置 | 文件/值名 | 加密密钥 | `--license` 可解 |
+|---|---|---|---|---|
+| `home` | `~/.MyExcel/` | `license.dat` | 分位置（tag=`home`） | ✅ |
+| `config` | `{config_dir}/{dir_uuid(config)}/` | `state.dat` | 分位置（tag=`config`） | ✅ |
+| `local` | `{data_local_dir}/{dir_uuid(local)}/` | `cache.bin` | 分位置（tag=`local`） | ✅ |
+| `regmain` | `HKCU\Software\{uuid}` | `Data` | 分位置（tag=`regmain`） | ✅ |
+| `regclsid` | `HKCU\Software\Classes\CLSID\{uuid}` | `Data` | 分位置（tag=`regclsid`） | ✅ |
+| `regmain` | `HKCU\Software\{uuid}` | `LicenseBlob` | 无 tag 导出密钥 | ✅ |
 
-获取导出字符串的方式（PowerShell）：
+> 每个存储点密文各不相同（分位置密钥 + 随机 nonce），故**无法凭一份样本按内容批量定位**；但 `--license` 会依次尝试全部密钥，故来源不影响解密。
+
+获取加密字符串的几种方式（任选其一，PowerShell；将 `{uuid}` / `{dir_uuid(...)}` 替换为本机实际值）：
 
 ```powershell
-# 查看本机注册表路径
+# 1) 查看本机注册表路径 UUID（用于下面的 {uuid}）
 .\umya-spreadsheet-excel.exe --uuid
 
-# 读取 LicenseBlob 值（将 {uuid} 替换为上一步输出的值）
+# 2a) 从注册表 LicenseBlob 读取（导出专用）
 Get-ItemProperty "HKCU:\Software\{uuid}" | Select-Object -ExpandProperty LicenseBlob
+
+# 2b) 从注册表 Data 读取（regmain 存储点密文）
+Get-ItemProperty "HKCU:\Software\{uuid}" | Select-Object -ExpandProperty Data
+
+# 2c) 从文件存储点读取（如 local 点的 cache.bin）
+Get-Content "$env:LOCALAPPDATA\{dir_uuid(local)}\cache.bin" -Raw
 ```
 
 ### 13.3 解密查看
@@ -1184,6 +1197,8 @@ Get-ItemProperty "HKCU:\Software\{uuid}" | Select-Object -ExpandProperty License
 ```cmd
 .\umya-spreadsheet-excel.exe --license "加密字符串"
 ```
+
+无论入参来自哪个存储位置，输出都**统一规范化为导出格式**：存储点内部密文（带 `mac`/`loc`/`mani` 的内部格式）会被解析为 trial + license 后重新格式化，故输出与来源无关。
 
 输出格式：
 
@@ -1200,24 +1215,33 @@ f=20622|l=20622|r=0|mac=abc123def456...
 | `r` | 天数 | 剩余天数：`0` = 永久授权；正整数 = 距离到期的剩余天数 |
 | `mac` | hex 字符串 | 本机机器指纹的 SHA-256 摘要（用于验证绑机身份） |
 
-### 13.4 加密方案
+### 13.4 多存储位置兼容性
+
+`--license` 的解密逻辑（`store::decrypt_for_display`）依次尝试以下密钥，**短路于第一个成功**：
+
+1. **无 tag 导出密钥**（`LicenseBlob` 原生格式）—— `derive_export_key(机器指纹)`；
+2. **各存储点的分位置密钥**（`home` / `config` / `local` / `regmain` / `regclsid`）—— `derive_location_key(机器指纹, tag)`。
+
+由于 AES-256-GCM 的认证标签，错误密钥必然解密失败、只有匹配的密钥能成功——故任一存储位置的密文都能被正确解密，且不会误判。解密成功后，若明文是内部存储格式（带 `mac`/`loc`/`mani`），会被 `normalize_for_display` 重新格式化为导出格式（13.3），使输出与来源无关。
+
+### 13.5 加密方案
 
 | 项目 | 说明 |
 |---|---|
 | **算法** | AES-256-GCM（AEAD，同时提供加密和完整性校验） |
-| **密钥派生** | `SHA-256("umya-excel-license-export-v1" + 内置胡椒 + 机器指纹)` → 32 字节 AES 密钥 |
+| **内部存储点密钥** | `SHA-256(LOCATION_LABEL + 胡椒 + 机器指纹 + tag)` → 32B；每个 tag 不同 |
+| **导出密钥（LicenseBlob）** | `SHA-256(EXPORT_LABEL + 胡椒 + 机器指纹)` → 32B；无 tag |
 | **Wire 格式** | `base64( nonce[12字节] \|\| 密文 \|\| GCM_tag[16字节] )` |
 | **Nonce** | 每次生成使用 OS 随机源，同一明文产出不同密文 |
 | **防篡改** | 16 字节 GCM 认证标签保证任何字节篡改都会导致解密失败 |
 | **绑机** | 密钥由机器指纹派生，换机器无法解密 |
-| **密钥隔离** | 与 HMAC 密钥使用不同上下文标签（`EXPORT_LABEL` vs `HMAC_PEPPER`），避免密钥复用风险 |
+| **密钥隔离** | 导出 / 分位置 / HMAC 三套密钥用不同上下文标签，避免复用 |
 
-### 13.5 错误信息
+### 13.6 错误信息
 
 | 输出 | 原因 |
 |---|---|
 | `f=...\|l=...\|r=...\|mac=...` | 解密成功，授权状态信息 |
-| `Error: invalid or tampered license string, or wrong machine` | 字符串被篡改、格式错误、或非本机生成的加密串 |
-| `Error: decrypted data is not valid UTF-8` | 数据损坏 |
+| `Error: invalid or tampered license string, or wrong machine` | 所有密钥都解不开：串被篡改 / 损坏、格式错误、或非本机生成的加密串 |
 | `Error: --license requires an argument` | 缺少加密字符串参数 |
 

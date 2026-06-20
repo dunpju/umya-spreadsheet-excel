@@ -81,6 +81,9 @@ pub struct LoadResult {
     pub license_raw: Option<String>,
     /// 是否检测到"存在但验签失败"的存储（篡改信号）
     pub tampered: bool,
+    /// 是否需要**主动自愈**：非篡改、且已有 trial，但有存储点（含 `LicenseBlob`）缺失。
+    /// 调用方据此立即 `save()` 重写全部存储点，补齐冗余。
+    pub needs_heal: bool,
 }
 
 // ===========================================================================
@@ -355,15 +358,58 @@ pub fn build_export_blob(
     )
 }
 
-/// 从注册表读取已保存的加密导出字符串（`LicenseBlob` 值）
+/// 从注册表读取已保存的加密导出字符串（`LicenseBlob` 值）。
+/// 亦用于自愈判定：`LicenseBlob` 缺失时触发重写。
 #[cfg(windows)]
-#[allow(dead_code)]
 pub fn read_export_blob() -> Option<String> {
     use winreg::enums::*;
     use winreg::RegKey;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu.open_subkey(&reg_path()).ok()?;
     key.get_value("LicenseBlob").ok()
+}
+
+// ===========================================================================
+// --license 解密（兼容导出 blob 与各存储点密文）
+// ===========================================================================
+
+/// 解密 `--license` 入参，并统一输出为**导出格式**
+/// （`f=<first_run_day>|l=<last_run_day>|r=<剩余天数>|mac=<指纹哈希>`），便于技术支持阅读。
+///
+/// **多存储位置兼容**：入参的加密字符串可能来自两种来源——
+/// - `LicenseBlob` 导出（`save()` 写入注册表，**无 tag** 导出密钥）；
+/// - 任一存储点的内部密文（`home` / `config` / `local` / `regmain` / `regclsid`，**分位置密钥**）。
+///
+/// 每个存储位置的密钥各不相同（见 [`super::crypto::aes256gcm_encrypt_for`]），故本函数依次尝试
+/// 「无 tag 导出密钥」+「各存储点分位置密钥」，**任一成功即解密**，不受来源位置影响。
+/// 存储点密文解密后是内部格式（带 `mac`/`loc`/`mani`），会被 [`normalize_for_display`]
+/// 重新格式化为导出格式，使输出与来源无关。
+///
+/// 返回 `None` 表示所有密钥都解不开（串损坏 / 非本机生成 / 格式错误）。
+pub fn decrypt_for_display(encoded: &str, machine_fp: &[u8]) -> Option<String> {
+    let trimmed = encoded.trim();
+
+    // 依次尝试：无 tag 导出密钥 → 各存储点分位置密钥（短路于第一个成功）
+    let bytes = super::crypto::aes256gcm_decrypt(trimmed, machine_fp).or_else(|| {
+        all_store_tags().iter().find_map(|tag| {
+            super::crypto::aes256gcm_decrypt_for(trimmed, machine_fp, tag.as_bytes())
+        })
+    })?;
+
+    let text = std::str::from_utf8(&bytes).ok()?;
+    Some(normalize_for_display(text, machine_fp))
+}
+
+/// 把解密后的明文统一为导出格式：能解析成内部 trial + license 就用 [`build_export_blob`]
+/// 重新格式化（存储点密文的情况）；否则（已是导出格式或无法解析）原样返回。
+fn normalize_for_display(text: &str, machine_fp: &[u8]) -> String {
+    let rec = parse_record(text, machine_fp);
+    if let Some(t) = rec.trial {
+        // 内部存储格式（带 mac/loc/mani + 第二行 license）→ 导出格式
+        return build_export_blob(&t, &rec.license, machine_fp);
+    }
+    // 已是导出格式（或无法解析）→ 原样（去尾换行）返回
+    text.trim_end().to_string()
 }
 
 // ===========================================================================
@@ -418,13 +464,25 @@ fn cross_validate(records: &[(&str, &Record)], manifest: &str) -> bool {
 // load / save（签名与既有调用点兼容：load(fp) / save(trial, license_raw, fp)）
 // ===========================================================================
 
-/// 加载并合并所有存储点，交叉校验一致性。
+/// 加载并合并所有存储点，交叉校验一致性，并标记是否需要**主动自愈**（[`LoadResult::needs_heal`]）。
 pub fn load(machine_fp: &[u8]) -> LoadResult {
+    let mut lr = load_from(all_stores(), machine_fp);
+    // LicenseBlob 是与内部存储点并列的第 6 处（仅 Windows）；缺失也触发自愈
+    #[cfg(windows)]
+    if !lr.tampered && read_export_blob().is_none() {
+        lr.needs_heal = true;
+    }
+    lr
+}
+
+/// 从给定存储点集合加载（可注入 mock，便于单测自愈逻辑）。
+fn load_from(stores: Vec<Box<dyn Store>>, machine_fp: &[u8]) -> LoadResult {
     let manifest = expected_manifest();
+    let expected = stores.len();
     let mut records: Vec<(&'static str, Record)> = Vec::new();
     let mut tampered = false;
 
-    for store in all_stores() {
+    for store in stores {
         let tag = store.tag();
         let Some(raw) = store.read() else {
             continue; // 不存在 / 不可读 → 非篡改，跳过
@@ -477,11 +535,24 @@ pub fn load(machine_fp: &[u8]) -> LoadResult {
         tampered = true;
     }
 
+    // 主动自愈判定：非篡改 且 内部存储点有缺失（present < expected）。
+    // LicenseBlob 的缺失在 [`load`] 包装层额外置位。
+    let present = records.len();
+    let needs_heal = healing_needed(present, expected, tampered);
+
     LoadResult {
         trial,
         license_raw,
         tampered,
+        needs_heal,
     }
+}
+
+/// 是否需要主动自愈补写：非篡改，且内部存储点有缺失（`present < expected`）。
+///
+/// 篡改时**永不**自愈（避免覆盖篡改证据 / 被攻击者借机迫使重写）。
+fn healing_needed(stores_present: usize, stores_expected: usize, tampered: bool) -> bool {
+    !tampered && stores_present < stores_expected
 }
 
 /// 保存：向**所有**存储点写入**分位置差异化密文**；LicenseBlob 导出保持无 tag（供 `--license`）。
@@ -761,5 +832,171 @@ mod tests {
         let rec = parse_record(&format!("{line}\n\n"), fp);
         assert_eq!(rec.loc.as_deref(), Some("home"));
         assert_ne!(rec.loc.as_deref(), Some("config"), "loc mismatches the store it was read from");
+    }
+
+    // ----- 主动自愈 -----
+
+    #[test]
+    fn healing_needed_predicate() {
+        // 非篡改 + 有缺失 → 需要自愈
+        assert!(healing_needed(4, 5, false));
+        assert!(healing_needed(0, 3, false));
+        // 全部在场 + 非篡改 → 不需要
+        assert!(!healing_needed(5, 5, false));
+        assert!(!healing_needed(3, 3, false));
+        // 篡改 → 永不自愈
+        assert!(!healing_needed(4, 5, true));
+        assert!(!healing_needed(0, 5, true));
+    }
+
+    /// 内存 mock 存储点：不碰真实文件系统 / 注册表即可测试 load_from
+    use std::cell::RefCell;
+    struct MemStore {
+        tag: &'static str,
+        data: RefCell<Option<String>>,
+    }
+    impl Store for MemStore {
+        fn tag(&self) -> &'static str {
+            self.tag
+        }
+        fn read(&self) -> Option<String> {
+            self.data.borrow().clone()
+        }
+        fn write(&self, d: &str) {
+            *self.data.borrow_mut() = Some(d.to_string());
+        }
+    }
+
+    /// 用真实加密路径构造一份合法"当前版本"blob（loc 与 tag 一致）
+    fn mem_blob(tag: &'static str, t: &TrialState, fp: &[u8], manifest: &str) -> String {
+        let line = format!(
+            "f={}|l={}|r={}|mac={}|loc={}|mani={}",
+            t.first_run_day, t.last_run_day, t.rollback_count, t.mac, tag, manifest
+        );
+        let pt = format!("{line}\n\n");
+        super::super::crypto::aes256gcm_encrypt_for(pt.as_bytes(), fp, tag.as_bytes())
+            .expect("encrypt_for")
+    }
+
+    #[test]
+    fn load_from_no_heal_when_all_present() {
+        let fp: &[u8] = b"machine-fp";
+        let manifest = expected_manifest();
+        let t = signed_trial(100, 150, 0, fp);
+        let stores: Vec<Box<dyn Store>> = vec![
+            Box::new(MemStore { tag: "home", data: RefCell::new(Some(mem_blob("home", &t, fp, &manifest))) }),
+            Box::new(MemStore { tag: "config", data: RefCell::new(Some(mem_blob("config", &t, fp, &manifest))) }),
+            Box::new(MemStore { tag: "local", data: RefCell::new(Some(mem_blob("local", &t, fp, &manifest))) }),
+        ];
+        let lr = load_from(stores, fp);
+        assert!(lr.trial.is_some());
+        assert!(!lr.tampered);
+        assert!(!lr.needs_heal, "all stores present => no heal");
+    }
+
+    #[test]
+    fn load_from_heals_when_store_missing() {
+        let fp: &[u8] = b"machine-fp";
+        let manifest = expected_manifest();
+        let t = signed_trial(100, 150, 0, fp);
+        // config 点缺失（read None）
+        let stores: Vec<Box<dyn Store>> = vec![
+            Box::new(MemStore { tag: "home", data: RefCell::new(Some(mem_blob("home", &t, fp, &manifest))) }),
+            Box::new(MemStore { tag: "config", data: RefCell::new(None) }),
+            Box::new(MemStore { tag: "local", data: RefCell::new(Some(mem_blob("local", &t, fp, &manifest))) }),
+        ];
+        let lr = load_from(stores, fp);
+        assert!(lr.trial.is_some(), "trial reconstructed from survivors");
+        assert!(!lr.tampered, "missing store is NOT tamper");
+        assert!(lr.needs_heal, "one store missing => needs_heal");
+    }
+
+    #[test]
+    fn load_from_no_heal_when_tampered() {
+        let fp: &[u8] = b"machine-fp";
+        let manifest = expected_manifest();
+        let t = signed_trial(100, 150, 0, fp);
+        // home 点缺失；config 点放一个"被搬迁"的 blob（loc=home 却在 config 点）→ tamper
+        let bad_line = format!(
+            "f={}|l={}|r={}|mac={}|loc=home|mani={}",
+            t.first_run_day, t.last_run_day, t.rollback_count, t.mac, manifest
+        );
+        let bad_blob = super::super::crypto::aes256gcm_encrypt_for(
+            format!("{bad_line}\n\n").as_bytes(),
+            fp,
+            b"config",
+        )
+        .expect("encrypt_for");
+        let stores: Vec<Box<dyn Store>> = vec![
+            Box::new(MemStore { tag: "home", data: RefCell::new(None) }),
+            Box::new(MemStore { tag: "config", data: RefCell::new(Some(bad_blob)) }),
+        ];
+        let lr = load_from(stores, fp);
+        assert!(lr.tampered, "relocated blob => tamper");
+        assert!(!lr.needs_heal, "tampered => never heal");
+    }
+
+    // ----- --license 多存储位置兼容解密 -----
+
+    #[test]
+    fn decrypt_for_display_accepts_store_ciphertext() {
+        let fp: &[u8] = b"machine-fp";
+        let t = signed_trial(20622, 20630, 0, fp);
+        // local 点的内部格式密文（即 cache.bin 中的内容）
+        let store_pt = build_plaintext(&t, &None, "local");
+        let local_enc = super::super::crypto::aes256gcm_encrypt_for(store_pt.as_bytes(), fp, b"local")
+            .expect("encrypt_for local");
+
+        // --license 应能解密（无论来自哪个存储点），并输出导出格式
+        let out = decrypt_for_display(&local_enc, fp).expect("should decrypt store ciphertext");
+        assert!(out.starts_with("f=20622|l=20630|"), "export format: {out}");
+        assert!(out.contains("mac="));
+        // 导出格式不含内部字段 loc/mani（已规范化）
+        assert!(!out.contains("loc="));
+        assert!(!out.contains("mani="));
+    }
+
+    #[test]
+    fn decrypt_for_display_accepts_each_store_tag() {
+        let fp: &[u8] = b"machine-fp";
+        let t = signed_trial(100, 150, 0, fp);
+        // 每个存储点的密文都应能被 --license 解密
+        for tag in ["home", "config", "local", "regmain", "regclsid"] {
+            let pt = build_plaintext(&t, &None, tag);
+            let enc = super::super::crypto::aes256gcm_encrypt_for(pt.as_bytes(), fp, tag.as_bytes())
+                .expect("encrypt_for");
+            let out = decrypt_for_display(&enc, fp)
+                .unwrap_or_else(|| panic!("should decrypt {tag} ciphertext"));
+            assert!(out.starts_with("f=100|l=150|"), "[{tag}] export format: {out}");
+        }
+    }
+
+    #[test]
+    fn decrypt_for_display_accepts_export_blob() {
+        let fp: &[u8] = b"machine-fp";
+        let t = signed_trial(20622, 20630, 0, fp);
+        // 导出 blob（无 tag，LicenseBlob 格式）
+        let export_text = build_export_blob(&t, &None, fp);
+        let blob_enc = super::super::crypto::aes256gcm_encrypt(export_text.as_bytes(), fp)
+            .expect("tag-less encrypt");
+        let out = decrypt_for_display(&blob_enc, fp).expect("should decrypt export blob");
+        assert_eq!(out, export_text, "export blob round-trips unchanged");
+    }
+
+    #[test]
+    fn decrypt_for_display_rejects_garbage_and_wrong_machine() {
+        let fp: &[u8] = b"machine-fp";
+        // 非法串
+        assert!(decrypt_for_display("not-a-valid-blob", fp).is_none());
+        // 用错误机器指纹加密的 local 密文（绑机）→ 解不开
+        let other: &[u8] = b"other-machine";
+        let t = signed_trial(100, 150, 0, other);
+        let enc = super::super::crypto::aes256gcm_encrypt_for(
+            build_plaintext(&t, &None, "local").as_bytes(),
+            other,
+            b"local",
+        )
+        .expect("encrypt_for");
+        assert!(decrypt_for_display(&enc, fp).is_none(), "wrong-machine blob must fail");
     }
 }

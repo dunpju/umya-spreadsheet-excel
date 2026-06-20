@@ -153,17 +153,13 @@ fn main() -> eframe::Result<()> {
             if pos + 1 < args.len() {
                 let encrypted = &args[pos + 1];
                 let machine_fp = license::fingerprint::fingerprint_bytes();
-                match license::crypto::aes256gcm_decrypt(encrypted, &machine_fp) {
-                    Some(plaintext) => match std::str::from_utf8(&plaintext) {
-                        Ok(text) => {
-                            console_print(&format!("{}\n", text));
-                            std::process::exit(0);
-                        }
-                        Err(_) => {
-                            console_print("Error: decrypted data is not valid UTF-8\n");
-                            std::process::exit(1);
-                        }
-                    },
+                // 兼容多种来源：LicenseBlob 导出（无 tag）或任一存储点的分位置密文
+                // （home/config/local/regmain/regclsid）。详见 store::decrypt_for_display。
+                match license::store::decrypt_for_display(encrypted, &machine_fp) {
+                    Some(text) => {
+                        console_print(&format!("{}\n", text));
+                        std::process::exit(0);
+                    }
                     None => {
                         console_print("Error: invalid or tampered license string, or wrong machine\n");
                         std::process::exit(1);
