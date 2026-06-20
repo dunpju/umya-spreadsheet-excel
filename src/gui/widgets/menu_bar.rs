@@ -3,7 +3,8 @@
 //! 负责绘制应用程序的顶部菜单栏
 
 use eframe::egui;
-use crate::gui::widgets::config::{SettingsPanelState, SettingsPage};
+// 注：插入配置子菜单已暂时注释；恢复时需把 SettingsPage 加回导入
+use crate::gui::widgets::config::SettingsPanelState;
 use crate::gui::widgets::search::SearchWindowState;
 use crate::gui::widgets::convert_popup::ConvertPopupState;
 use crate::gui::widgets::alert_popup::AlertPopupState;
@@ -73,18 +74,19 @@ pub fn draw_menu_bar(
 
         // 配置菜单
         ui.menu_button("配置", |ui| {
-            ui.menu_button("插入配置", |ui| {
-                if ui.button("列配置").clicked() {
-                    ui.close();
-                    settings_panel.visible = true;
-                    settings_panel.active_page = Some(SettingsPage::ColumnConfig);
-                }
-                if ui.button("行配置").clicked() {
-                    ui.close();
-                    settings_panel.visible = true;
-                    settings_panel.active_page = Some(SettingsPage::RowConfig);
-                }
-            });
+            // 暂时未使用，先注释
+            // ui.menu_button("插入配置", |ui| {
+            //     if ui.button("列配置").clicked() {
+            //         ui.close();
+            //         settings_panel.visible = true;
+            //         settings_panel.active_page = Some(SettingsPage::ColumnConfig);
+            //     }
+            //     if ui.button("行配置").clicked() {
+            //         ui.close();
+            //         settings_panel.visible = true;
+            //         settings_panel.active_page = Some(SettingsPage::RowConfig);
+            //     }
+            // });
             if ui.button("搜索配置").clicked() {
                 ui.close();
                 settings_panel.show_search_dialog = true;
