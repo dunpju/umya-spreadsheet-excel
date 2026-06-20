@@ -12,6 +12,7 @@ mod excel;
 mod gui;
 mod util;
 mod license;
+mod shortcut;
 
 use gui::viewer::ExcelViewer;
 use util::date::days_to_ymd;
@@ -176,6 +177,10 @@ fn main() -> eframe::Result<()> {
 
     // 启用调用栈捕获（release 模式下默认不捕获）
     std::env::set_var("RUST_BACKTRACE", "1");
+
+    // 确保桌面存在指向本程序的 my-excel.lnk 快捷方式（缺失才创建；best-effort，失败不阻塞启动）。
+    // 仅 Windows 生效，非 Windows 平台为空操作。
+    shortcut::ensure_desktop_shortcut();
 
     let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]);
     // 设置窗口图标（Windows 上同时作用于标题栏与任务栏）；解码失败则回退默认图标。

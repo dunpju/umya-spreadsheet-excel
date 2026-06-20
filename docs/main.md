@@ -7,20 +7,22 @@
 
 ## 1. 文件定位与职责
 
-`main.rs` 是 `[[bin]] name = "my-excel"` 的入口（见 `Cargo.toml`），一个基于 `eframe`/`egui` 的桌面 Excel 查看器。它把程序分为四个模块：
+`main.rs` 是 `[[bin]] name = "my-excel"` 的入口（见 `Cargo.toml`），一个基于 `eframe`/`egui` 的桌面 Excel 查看器。它把程序分为五个模块：
 
 ```rust
 mod excel;    // Excel 读写（umya-spreadsheet 封装）
 mod gui;      // eframe/egui 界面，主结构 ExcelViewer
 mod util;     // 通用工具（无 chrono 的日期换算）
 mod license;  // 离线授权（机器指纹 + 多点加密存储 + ed25519 验签）
+mod shortcut; // 桌面快捷方式（Windows：启动时确保桌面存在 my-excel.lnk）
 ```
 
-`main.rs` 自身**不实现业务逻辑**，只做三件事：
+`main.rs` 自身**不实现业务逻辑**，只做四件事：
 
 1. **CLI 分支**：`--uuid` / `--license` 两个诊断子命令，命中即处理后 `exit`，绝不进入 GUI。
 2. **崩溃兜底**：注册 panic hook，把崩溃信息 + 调用栈落盘并弹窗提示。
-3. **GUI 装配**：构建 `Viewport`（尺寸 + 图标），交给 `eframe::run_native` 启动 `ExcelViewer`。
+3. **桌面快捷方式**：启动时确保 Windows 桌面存在指向本程序的 `my-excel.lnk`（缺失才创建）。
+4. **GUI 装配**：构建 `Viewport`（尺寸 + 图标），交给 `eframe::run_native` 启动 `ExcelViewer`。
 
 这种“入口极薄、逻辑下沉到模块”的结构，让 GUI 与 CLI、授权诊断、崩溃处理彼此正交，互不耦合。
 
@@ -175,7 +177,18 @@ std::env::set_var("RUST_BACKTRACE", "1");
 - 仅在确认**不是 CLI 调用**后才注册 hook（CLI 路径已 `exit`，不会走到这里）。
 - `RUST_BACKTRACE=1`：release 模式下默认不捕获 backtrace，显式开启才能让 §4 的 `Backtrace::capture()` 拿到真实调用栈。
 
-### 6.4 GUI 装配与启动
+### 6.4 桌面快捷方式
+```rust
+shortcut::ensure_desktop_shortcut();
+```
+- **目的**：启动时确保 Windows 桌面存在指向当前 exe 的 `my-excel.lnk`，缺失才创建。
+- **幂等且廉价**：先做一次 `lnk.exists()` 检测；已存在直接返回，**正常启动几乎零开销（不初始化 COM）**。只有真正缺失时才走 COM 生成。
+- **桌面路径**：优先 `dirs::desktop_dir()`（走 Windows Known Folder API，正确处理 OneDrive 桌面重定向），回退 `%USERPROFILE%\Desktop`。
+- **best-effort**：取不到 exe 路径 / 桌面不可写 / COM 失败一律静默忽略，绝不阻塞启动。
+- **实现**：原始 COM FFI（`IShellLinkW` + `IPersistFile`），零新增依赖，与 `console_print` 的 FFI 风格一致；非 Windows 平台 `#[cfg]` 门控为空操作。详见 `src/shortcut.rs`。
+- **图标**：不显式 `SetIconLocation`——`build.rs` 嵌入的 ICO 资源自动成为 `.lnk` 默认图标。
+
+### 6.5 GUI 装配与启动
 ```rust
 let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]);
 if let Some(icon) = load_window_icon() {
@@ -224,6 +237,9 @@ fn chrono_free_timestamp() -> String {
 5. **依赖最小化**
    时间换算手写、不用 chrono；图标解码复用已依赖的 `image` crate；CLI 不引第三方 argparse。整个入口文件零业务依赖，只有 `eframe` / `rfd` / `image` / 标准库。
 
+6. **桌面集成幂等且无侵入**
+   `shortcut::ensure_desktop_shortcut()` 先检测后创建：已存在即零成本跳过，缺失才初始化 COM 生成 `.lnk`；全链路 best-effort，失败静默，绝不阻塞启动或弹错。原始 COM FFI 实现零新增依赖，与 `console_print` 风格一致，非 Windows 编译为空操作。
+
 ---
 
 ## 9. 与其他模块的关系（速查）
@@ -231,6 +247,7 @@ fn chrono_free_timestamp() -> String {
 | `main.rs` 调用 | 作用 | 所在文件 |
 |---|---|---|
 | `gui::viewer::ExcelViewer` | GUI 主结构，构造期完成授权加载与 UI 状态初始化 | `src/gui/viewer.rs` |
+| `shortcut::ensure_desktop_shortcut` | 启动时确保桌面存在指向本程序的 `my-excel.lnk`（缺失才创建） | `src/shortcut.rs` |
 | `util::date::days_to_ymd` | Unix 天数 → (年, 月, 日)，崩溃日志与时间戳复用 | `src/util/date.rs` |
 | `license::fingerprint::registry_uuid` | `--uuid` 输出的稳定硬件派生 UUID（注册表路径） | `src/license/fingerprint.rs` |
 | `license::fingerprint::fingerprint_bytes` | `--license` 解密用的机器指纹（HMAC/AES 密钥派生） | `src/license/fingerprint.rs` |
@@ -252,6 +269,8 @@ fn chrono_free_timestamp() -> String {
             │ 否                          └─ 失败 ► console_print(Error)   ► exit(1)
             ▼
    注册 panic hook（handle_panic） + 设 RUST_BACKTRACE=1
+            ▼
+   shortcut::ensure_desktop_shortcut()（桌面无 my-excel.lnk 才创建）
             ▼
    构建 Viewport（1200×800 + 可选图标）
             ▼
