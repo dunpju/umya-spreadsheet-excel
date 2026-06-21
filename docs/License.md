@@ -284,10 +284,10 @@ impl LicenseManager {
 | `config` | `{config_dir}/{dir_uuid(config)}/state.dat`（如 `%APPDATA%\{dir_uuid(config)}\state.dat`） | 文件整体 | 新增分散点 |
 | `local` | `{data_local_dir}/{dir_uuid(local)}/cache.bin`（如 `%LOCALAPPDATA%\{dir_uuid(local)}\cache.bin`） | 文件整体 | 新增分散点 |
 | `regmain` | 注册表 `HKCU\Software\{uuid}` | `Data` | 既有（路径由硬件派生 UUID 混淆） |
-| `regclsid` | 注册表 `HKCU\Software\Classes\CLSID\{大写UUID}`（如 `…\CLSID\{71445FAC-…}`，**大写 + 花括号**，Windows CLSID 惯例） | `Data` | 新增分支（仅 Windows） |
+| `regclsid` | 注册表 `HKCU\Software\Classes\CLSID\{大写 dir_uuid(regclsid)}`（如 `…\CLSID\{71445FAC-…}`，UUID 由 `dir_uuid("regclsid")` 动态派生后转大写并加花括号，**大写 + 花括号**，Windows CLSID 惯例） | `Data` | 新增分支（仅 Windows） |
 | `regmain` | 注册表 `HKCU\Software\{uuid}` | `LicenseBlob` | AES-256-GCM 加密的导出格式（供 `--license` 显示，**保持无 tag**） |
 
-> **注册表 UUID 格式差异**：`regmain` 子键用小写、无花括号的 UUID（`Software\{uuid}`，此处 `{uuid}` 仅为占位）；`regclsid` 单独用**大写 + 花括号**的 CLSID 风格 UUID（`Software\Classes\CLSID\{大写UUID}`，如 `…\{71445FAC-…}`），符合 Windows CLSID 命名惯例、更像合法 COM 条目。两者由 `fingerprint::registry_uuid()` / `registry_uuid_clsid()` 分别派生；UUID 格式只决定**注册表路径**，不影响加密密钥（密钥由 tag 派生，故 `--license` 解密不受影响）。
+> **注册表 UUID 格式差异**：`regmain` 子键用小写、无花括号的 UUID（`Software\{uuid}`，此处 `{uuid}` 仅为占位）；`regclsid` 单独用**大写 + 花括号**的 CLSID 风格 UUID（`Software\Classes\CLSID\{大写UUID}`，如 `…\{71445FAC-…}`），符合 Windows CLSID 命名惯例、更像合法 COM 条目。两者分别由 `fingerprint::registry_uuid()`（regmain）与 `fingerprint::registry_uuid_clsid()`（regclsid）派生——其中 regclsid 的 UUID 生成策略与 `config` / `local` 一致：先以本点前缀调用 `dir_uuid("regclsid")` 动态派生每点不同的 UUID（**非**直接复用 `registry_uuid()`），再转大写并加花括号成 CLSID 风格。UUID 格式只决定**注册表路径**，不影响加密密钥（密钥由 tag 派生，故 `--license` 解密不受影响）。
 
 **目录名混淆（config / local）**：这两点的目录名不再用固定的 `MyExcel`，而是按存储位置前缀派生一个**每机确定、每点不同**的 UUID 目录名 `{dir_uuid(prefix)}`。生成规则：以机器派生 UUID `registry_uuid()`（见 §9.4）为基，将位置前缀字符串与该 UUID **拼接后计算**得到最终目录名——
 

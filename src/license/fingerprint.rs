@@ -151,15 +151,19 @@ pub fn dir_uuid(prefix: &str) -> String {
     uuid_v5_from_hex(&hex)
 }
 
-/// `regclsid` 注册表存储点用的 **CLSID 风格 UUID**：[`registry_uuid`] 转大写并加花括号，
+/// `regclsid` 注册表存储点用的 **CLSID 风格 UUID**：[`dir_uuid`] 转大写并加花括号，
 /// 形如 `{71445FAC-D6EF-5436-9DA7-5A323762D7F5}`（Windows CLSID 惯例：大写 + 花括号）。
+///
+/// UUID 生成策略与 `config` / `local` 文件存储点一致——先以本存储点前缀 `"regclsid"`
+/// 调用 [`dir_uuid`]（即 `dir_uuid("regclsid")`）派生每点不同的 UUID，再转大写并加花括号成
+/// CLSID 风格。故 regclsid 与 config / local 采用**同一套** `dir_uuid` 派生策略，仅输出格式不同。
 ///
 /// **仅 regclsid 使用**；`regmain` 等其他点仍用 [`registry_uuid`]（小写、无花括号）。
 /// 注意：此值仅决定**注册表子键路径**（存储位置），不影响加密密钥——
 /// regclsid 的密钥由 tag `"regclsid"` 派生（[`crate::license::crypto::aes256gcm_encrypt_for`]），
 /// 与路径无关，故 `--license` 解密不受此格式影响。
 pub fn registry_uuid_clsid() -> String {
-    format!("{{{}}}", registry_uuid().to_uppercase())
+    format!("{{{}}}", dir_uuid("regclsid").to_uppercase())
 }
 
 /// 用户可见的机器码：取指纹再哈希后 hex，按 XXXX-XXXX-XXXX-XXXX 分组
@@ -237,13 +241,13 @@ mod tests {
 
     #[test]
     fn registry_uuid_clsid_format() {
-        let base = registry_uuid();
+        let base = dir_uuid("regclsid");
         let clsid = registry_uuid_clsid();
         // 花括号包裹
         assert!(clsid.starts_with('{') && clsid.ends_with('}'), "must be braced: {clsid}");
         let inner = &clsid[1..clsid.len() - 1];
-        // 内部为 registry_uuid 的大写形式
-        assert_eq!(inner, base.to_uppercase(), "inner must be uppercase of registry_uuid");
+        // 内部为 dir_uuid("regclsid") 的大写形式（与 config/local 同套派生，仅转 CLSID 格式）
+        assert_eq!(inner, base.to_uppercase(), "inner must be uppercase of dir_uuid(\"regclsid\")");
         // 长度 = 36（UUID）+ 2（花括号）
         assert_eq!(clsid.len(), 38, "clsid must be 38 chars: {clsid}");
         // 确无小写 hex
@@ -251,7 +255,11 @@ mod tests {
             !inner.chars().any(|c| c.is_ascii_lowercase()),
             "no lowercase hex allowed: {clsid}"
         );
-        // 与 regmain 用的小写无花括号形式不同
-        assert_ne!(clsid, base, "clsid form must differ from plain registry_uuid");
+        // 与 regmain 用的小写无花括号形式（registry_uuid）不同
+        let regmain = registry_uuid();
+        assert_ne!(clsid, regmain, "clsid form must differ from plain registry_uuid");
+        // 每点派生：regclsid 的 dir_uuid 与 config / local 各自的目录名互不相同
+        assert_ne!(base, dir_uuid("config"), "regclsid dir_uuid must differ from config");
+        assert_ne!(base, dir_uuid("local"), "regclsid dir_uuid must differ from local");
     }
 }
