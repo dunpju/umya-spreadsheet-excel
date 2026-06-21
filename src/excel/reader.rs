@@ -83,6 +83,19 @@ impl Default for CellBorders {
     }
 }
 
+/// 单元格批注（Comment）
+///
+/// 由 umya-spreadsheet 解析的经典批注（legacy `<comment>`）。
+/// 作者已由 OOXML 的 `authorId` 解析为作者名字符串；
+/// `text` 为完整文本（富文本各 run 已拼接）。
+#[derive(Debug, Clone)]
+pub struct CellComment {
+    /// 批注作者（读取时已由 authorId 解析）
+    pub author: String,
+    /// 批注全文（plain text + rich text 各 run 已拼接）
+    pub text: String,
+}
+
 /// 单元格数据结构，存储单元格的值和公式
 #[derive(Debug, Clone)]
 pub struct CellData {
@@ -108,6 +121,8 @@ pub struct CellData {
     pub bold: bool,
     /// 单元格边框：上/下/左/右边框样式和颜色
     pub borders: CellBorders,
+    /// 单元格批注（Comment），无批注时为 None
+    pub comment: Option<CellComment>,
 }
 
 /// CellData 的默认实现，创建空值和空公式的单元格
@@ -125,6 +140,7 @@ impl Default for CellData {
             number_format: None,
             bold: false,
             borders: CellBorders::default(),
+            comment: None,
         }
     }
 }
@@ -596,6 +612,7 @@ impl SheetData {
                     number_format: template.number_format.clone(),
                     bold: template.bold,
                     borders: template.borders.clone(),
+                    comment: None,
                 };
                 for offset in 0..n {
                     let new_row = insert_at + offset;
@@ -780,6 +797,7 @@ impl SheetData {
                     number_format: template.number_format.clone(),
                     bold: template.bold,
                     borders: template.borders.clone(),
+                    comment: None,
                 };
                 self.cells.insert((old_max_row + 1, col), styled);
             }
@@ -1128,6 +1146,7 @@ impl SheetData {
                         } else {
                             CellBorders::default()
                         },
+                        comment: None,
                     };
                     new_cells_to_insert.push(((row, new_col), new_cell));
                 }
@@ -1165,6 +1184,7 @@ impl SheetData {
                                 number_format: template.number_format.clone(),
                                 bold: template.bold,
                                 borders: template.borders.clone(),
+                                comment: None,
                             };
                             new_cells_to_insert.push(((row, new_col), styled));
                         }
@@ -1404,6 +1424,7 @@ impl ExcelData {
                                     number_format,
                                     bold,
                                     borders,
+                                    comment: None,
                                 });
                             }
                             local_cells
@@ -1468,6 +1489,7 @@ impl ExcelData {
                         number_format,
                         bold,
                         borders,
+                        comment: None,
                     });
                 }
             }
@@ -1649,6 +1671,17 @@ impl ExcelData {
                         });
                     }
                 }
+            }
+
+            // 读取单元格批注（Comment）：作者 + 富文本/纯文本
+            // 用 entry().or_insert_with() 兼容「仅有批注、无 <c> 记录」的空单元格
+            for comment in worksheet.comments() {
+                let col = comment.coordinate().col_num();
+                let row = comment.coordinate().row_num();
+                let author = comment.author().to_string();
+                let text = extract_comment_text(comment.text());
+                let cell = sheet.cells.entry((row, col)).or_insert_with(CellData::default);
+                cell.comment = Some(CellComment { author, text });
             }
 
             // 将工作表添加到列表中
@@ -2324,6 +2357,23 @@ fn extract_contains_text_from_formula(formula: &str) -> String {
     pub fn get_sheet(&self, index: usize) -> Option<&SheetData> {
         self.sheets.get(index)
     }
+}
+
+/// 从批注文本对象中提取完整字符串。
+///
+/// 批注文本可能是纯文本（`<t>`）或富文本（多个 `<r>` run，作者名通常为首段）。
+/// 两者都存在时拼接：纯文本 + 各富文本 run。
+fn extract_comment_text(ct: &umya_spreadsheet::structs::CommentText) -> String {
+    let mut s = String::new();
+    if let Some(t) = ct.text() {
+        s.push_str(t.value());
+    }
+    if let Some(rt) = ct.rich_text() {
+        for te in rt.rich_text_elements() {
+            s.push_str(te.text());
+        }
+    }
+    s
 }
 
 /// 将列号转换为 Excel 列名（如 1->A, 26->Z, 27->AA）

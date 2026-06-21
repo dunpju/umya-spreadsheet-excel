@@ -21,6 +21,21 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str> {
     Cow::Borrowed(&cell.value)
 }
 
+/// 在单元格右上角绘制红色批注指示三角（Comment indicator）
+fn draw_comment_indicator(painter: &egui::Painter, x: f32, y: f32, width: f32) {
+    const SIZE: f32 = 7.0;
+    let points = vec![
+        egui::Pos2::new(x + width - SIZE, y),
+        egui::Pos2::new(x + width, y),
+        egui::Pos2::new(x + width, y + SIZE),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        egui::Color32::from_rgb(217, 83, 25),
+        egui::Stroke::NONE,
+    ));
+}
+
 /// 绘制表格内容
 /// 
 /// 使用虚拟渲染技术，只绘制可见区域的单元格，提高性能
@@ -1123,6 +1138,32 @@ pub fn draw_table_content(
             }
         }
 
+        // ========== 批注指示器：有批注的单元格右上角画红三角（主网格非冻结区） ==========
+        for row in visible_rows_start..=visible_rows_end {
+            if row <= fr { continue; }
+            if row > 0 && hidden_rows.contains(&row) { continue; }
+            for col in visible_cols_start..=visible_cols_end {
+                if col <= fc { continue; }
+                if col > 0 && hidden_columns.contains(&col) { continue; }
+                // 合并非左上角单元格跳过（指示器只在合并左上角画）
+                if let Some(mr) = sheet.get_merged_range(col, row) {
+                    if !mr.is_top_left(col, row) { continue; }
+                }
+                // 批注挂在合并左上角；reader 解析时已为有批注的格创建 CellData
+                let has_comment = sheet.get_cell(row, col).map_or(false, |c| c.comment.is_some());
+                if !has_comment { continue; }
+                let x = tl_x + border_width + col_cumulative_width[col as usize];
+                let y = tl_y + border_width + row_cumulative_height[row as usize];
+                let w = match sheet.get_merged_range(col, row) {
+                    Some(mr) => col_cumulative_width[mr.end_col as usize + 1]
+                        - col_cumulative_width[mr.start_col as usize]
+                        - border_width,
+                    None => get_col_width(col),
+                };
+                draw_comment_indicator(&painter, x, y, w);
+            }
+        }
+
         // （编辑输入框已移至冻结覆盖层之后，防止覆盖层遮挡输入框）
         
         // ========== 冻结窗格：固定列标题、行标题和冻结数据区域 ==========
@@ -1254,6 +1295,24 @@ pub fn draw_table_content(
                         };
                         painter.text(text_pos, egui_align, &display, font_id, font_color);
                     }
+                }
+            }
+
+            // 批注指示器：有批注的冻结单元格右上角画红三角
+            if let Some(cell) = cell_data {
+                if cell.comment.is_some() {
+                    let w = if is_merged_top_left {
+                        if let Some(mr) = merged_range {
+                            col_cumulative_width[mr.end_col as usize + 1]
+                                - col_cumulative_width[mr.start_col as usize]
+                                - border_width
+                        } else {
+                            cell_width
+                        }
+                    } else {
+                        cell_width
+                    };
+                    draw_comment_indicator(painter, x, y, w);
                 }
             }
         };
@@ -1615,6 +1674,72 @@ pub fn draw_table_content(
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 112, 192, 120)),
                     egui::StrokeKind::Outside,
                 );
+            }
+        }
+
+        // ========== 批注悬停气泡：指针悬停在有批注的单元格上时显示作者+正文 ==========
+        if !validation_error_active && editing_cell.is_none() && response.hovered() && !response.dragged() {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                // 屏幕坐标 → 单元格（冻结区感知，复用与点击相同的坐标转换逻辑）
+                let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
+                let rel_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
+                let rel_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
+                let col_idx = col_cumulative_width.partition_point(|&w| w <= rel_x);
+                let row_idx = row_cumulative_height.partition_point(|&h| h <= rel_y);
+                if col_idx > 1 && row_idx > 0 {
+                    let c = col_idx as u32 - 1;
+                    let r = row_idx as u32 - 1;
+                    if c > 0 && r > 0 {
+                        // 合并单元格：取左上角（批注挂在左上角）
+                        let (tr, tc) = match sheet.get_merged_range(c, r) {
+                            Some(mr) => (mr.start_row, mr.start_col),
+                            None => (r, c),
+                        };
+                        if let Some(cell) = sheet.get_cell(tr, tc) {
+                            if let Some(comment) = &cell.comment {
+                                // 作者（小号灰）+ 正文（黑色），各自动换行
+                                let author_galley = painter.layout_job(
+                                    egui::text::LayoutJob::simple(
+                                        comment.author.clone(),
+                                        egui::FontId::proportional(11.0),
+                                        egui::Color32::from_rgb(120, 120, 120),
+                                        300.0,
+                                    ),
+                                );
+                                let body_galley = painter.layout_job(
+                                    egui::text::LayoutJob::simple(
+                                        if comment.text.is_empty() { "（空批注）".to_string() } else { comment.text.clone() },
+                                        egui::FontId::proportional(13.0),
+                                        egui::Color32::BLACK,
+                                        300.0,
+                                    ),
+                                );
+                                let author_h = author_galley.size().y;
+                                let pad = 8.0;
+                                let gap = 3.0;
+                                let inner_w = author_galley.size().x.max(body_galley.size().x);
+                                let inner_h = author_h + gap + body_galley.size().y;
+                                let box_w = inner_w + pad * 2.0;
+                                let box_h = inner_h + pad * 2.0;
+                                // 定位：指针右下方；越界则向左/上翻转，并夹紧到视口
+                                let clip = ui.clip_rect();
+                                let mut bx = pos.x + 14.0;
+                                let mut by = pos.y + 14.0;
+                                if bx + box_w > clip.max.x { bx = pos.x - 14.0 - box_w; }
+                                if by + box_h > clip.max.y { by = pos.y - 14.0 - box_h; }
+                                let bx = bx.max(clip.min.x);
+                                let by = by.max(clip.min.y);
+                                let rect = egui::Rect::from_min_size(egui::Pos2::new(bx, by), egui::vec2(box_w, box_h));
+                                // 淡黄背景（Excel 批注配色）+ 边框
+                                painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(255, 255, 224));
+                                painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(190, 190, 120)), egui::StrokeKind::Outside);
+                                painter.galley(egui::Pos2::new(bx + pad, by + pad), author_galley, egui::Color32::from_rgb(120, 120, 120));
+                                painter.galley(egui::Pos2::new(bx + pad, by + pad + author_h + gap), body_galley, egui::Color32::BLACK);
+                            }
+                        }
+                    }
+                }
             }
         }
 

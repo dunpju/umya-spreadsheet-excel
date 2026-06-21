@@ -71,7 +71,8 @@
 4. 读取合并区域（剔除越界范围）、列宽行高（仅 > 0）、冻结窗格（`PaneStateValues::Frozen/FrozenSplit`，注意 umya 命名与 OOXML 的 xSplit/ySplit 对照）。
 5. 读取数据有效性（仅 `show_input` 或 `show_error` 启用的规则）。
 6. 读取条件格式（`CellIs` 等）的 dxf 样式，组装 `CondFormatRule`。
-7. 工作表非空校验后，对每个 sheet `rebuild_merge_index` + `formula::evaluate_sheet` + `apply_conditional_formatting`。
+7. 读取单元格批注：遍历 `worksheet.comments()`，解析作者 + 富文本/纯文本，挂载到 `CellData.comment`（详见 [批注专题](./comments.md)）。
+8. 工作表非空校验后，对每个 sheet `rebuild_merge_index` + `formula::evaluate_sheet` + `apply_conditional_formatting`。
 
 **样式解析 `parse_style`**：从 `umya_spreadsheet::Style` 提取对齐、背景色（`argb_with_theme` 自动解析主题色与 tint）、字体大小/颜色/加粗、四边边框、数字格式，返回七元组。颜色统一经 `parse_hex_color` 转 RGB（容错处理非标准长度与 tint 溢出）。
 
@@ -255,7 +256,8 @@ flowchart LR
 | `CellAlignment` | horizontal, vertical, indent, text_wrap | 单元格对齐方式 |
 | `CellBorder` | style, color | 单边边框 |
 | `CellBorders` | left/right/top/bottom | 单元格四边边框 |
-| `CellData` | value, raw_number, formula, alignment, background_color/original_bg, font_size/color, bold, number_format, borders | 单元格完整数据 |
+| `CellData` | value, raw_number, formula, alignment, background_color/original_bg, font_size/color, bold, number_format, borders, comment | 单元格完整数据 |
+| `CellComment` | author, text | 单元格批注（作者 + 富文本/纯文本全文） |
 | `CellRange` | start_row/col, end_row/col | 合并/有效性区域，1-based |
 | `DataValidationInfo` | dv_type, dv_operator, formula1/2, ranges, prompt/error 等 | 一条有效性规则 |
 | `ColumnCopyOptions` | copy_merge, copy_formula, copy_style, copy_value | 插入列时的复制选项 |
@@ -293,5 +295,6 @@ flowchart LR
 | `ExcelData::parse_date_string` | impl ExcelData | 日期串→序列号 |
 | `ExcelData::get_sheet` | impl ExcelData | 按索引取工作表 |
 | `validate_number` | 模块级（私有） | 数据有效性数值比较辅助 |
+| `extract_comment_text` | 模块级（私有） | 从 `CommentText` 提取完整批注文本（plain + rich run 拼接） |
 
 > 说明：标记"私有"的函数虽非 `pub`，但属于文件内部逻辑的关键环节，一并列出以便理解数据流。

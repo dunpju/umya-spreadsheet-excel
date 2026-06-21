@@ -169,6 +169,16 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 ---
 
+### 2.14 批注指示器与悬停气泡（Comment）
+
+集成自 `CellData.comment`（见 [excel/comments.md](../../excel/comments.md)），采用 Excel 风格：
+
+- **红色三角指示器**：模块级函数 `draw_comment_indicator(painter, x, y, width)`，用 `egui::Shape::convex_polygon` 在单元格右上角画 ~7px 红色实心三角。
+  - **主网格非冻结区**：第二遍内容绘制之后的独立遍历，合并非左上角跳过（只在合并左上角画）。
+  - **冻结区**：在 `draw_frozen_cell` 闭包末尾调用。
+- **悬停气泡**：所有单元格绘制完成后（编辑框之前）一次性指针检测。`response.hovered() && !dragged && editing_cell.is_none() && !validation_error_active` 时，用冻结区感知坐标转换（复用 `partition_point` 二分）定位到单元格，合并单元格自动取左上角；命中带批注单元格则用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 作者（小号灰）+ 正文（黑色），定位在指针右下方、越界自动翻转并夹紧到视口。
+- 指示器与气泡均**只在可见单元格**绘制，与隐藏行/列跳过逻辑一致。
+
 ## 3. 视觉结构图
 
 ### 3.1 从 ExcelData 到 egui UI 的完整数据流
@@ -303,6 +313,7 @@ flowchart LR
 | 函数 | 签名 | 功能 |
 |------|------|------|
 | `cell_display_text` | `<'a>(cell: &'a CellData) -> Cow<'a, str>` | 提取单元格显示文本；日期格式单元格把序列号转为日期字符串，否则借用 `cell.value`。用 `Cow` 避免克隆 |
+| `draw_comment_indicator` | `(painter: &egui::Painter, x: f32, y: f32, width: f32)` | 在单元格右上角绘制 ~7px 红色批注指示三角 |
 
 ### 4.3 内联闭包（定义于 `draw_table_content` 内）
 
@@ -330,3 +341,4 @@ flowchart LR
 | `header_width` | `60.0` | 行号列宽度（像素） |
 | `border_width` | `1.0` | 边框宽度（像素） |
 | `margin` | `100.0` | 虚拟渲染可见范围边距（像素） |
+| `SIZE`（`draw_comment_indicator` 内） | `7.0` | 批注指示三角边长（像素） |
