@@ -29,6 +29,16 @@ getrandom = "0.2"                                              # 生成 AES-GCM 
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }  # 解码付款二维码 PNG + 窗口图标 ICO
 winreg = "0.52"                                               # Windows 注册表（机器指纹 + 冗余存储）
 
+# —— 诊断 CLI 特性门控（diagnostic feature，默认关闭）——
+# `--uuid` / `--stores` / `--license` 三个诊断子命令（连同 console_print / format_store_paths）
+# 受此 feature 门控。它们会暴露本机存储路径 / UUID / 授权状态明文，逆向者 `strings` 一下即可
+# 看到 "--stores" 等字面量并借此一次性枚举全部存储点（削弱 docs/License.md §6.1 的分散混淆）。
+# 公开发布版（build.bat → `cargo build --release`）默认不含此 feature；内部 / 技术支持诊断构建启用：
+#     cargo build --release --features diagnostic      # 带诊断命令的版本
+# 详见 docs/main.md §6。
+[features]
+diagnostic = []
+
 # release 构建配置：strip 去符号（主要防逆向手段）。
 # 注意：lto=true + codegen-units=1 会导致 wgpu/naga 依赖栈在 Windows 上
 # 触发 STATUS_STACK_BUFFER_OVERRUN 编译崩溃，故不启用。

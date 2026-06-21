@@ -33,7 +33,7 @@ src/
 │   └── time.rs        ← today_epoch_day()（复用 epoch 天数）
 ├── gui/widgets/
 │   └── license_popup.rs  ← 付款二维码 + 激活码输入弹窗
-└── main.rs            ← 增加 `mod util; mod license;`，启动时 gate；支持 `--uuid` 查看本机注册表路径
+└── main.rs            ← 增加 `mod util; mod license;`，启动时 gate；支持 `--uuid` 查看本机注册表路径（诊断构建，见 §13.1）
 ```
 
 依赖方向（单向、无环）：
@@ -1149,8 +1149,8 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 5. 实现 `license_popup` 并接入 `viewer.rs`。
 6. `Cargo.toml` 加入依赖（含 `aes-gcm`、`getrandom`），`--release` 编译验证。
 7. 测试：试用倒计时、到期拦截、激活、回拨检测、删文件后注册表兜底。
-8. 查看本机注册表路径：`umya-spreadsheet-excel.exe --uuid`。
-9. 导出授权状态：`umya-spreadsheet-excel.exe --license "<LicenseBlob值>"`。
+8. 查看本机注册表路径：`umya-spreadsheet-excel.exe --uuid`（需 `diagnostic` 内部诊断构建，见 §6 / `docs/main.md` §6）。
+9. 导出授权状态：`umya-spreadsheet-excel.exe --license "<LicenseBlob值>"`（同上）。
 
 ---
 
@@ -1159,6 +1159,8 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 ### 13.1 用途
 
 用于技术支持场景：用户把一段加密字符串发给开发者，开发者用本机 `--license` 解密查看授权状态。
+
+> **构建前提**：`--license`（以及 §13.2 的 `--uuid`、`--stores`）受 `diagnostic` feature 门控，公开发布版**不含**——需用内部诊断构建：`cargo build --release --features diagnostic`（见 `docs/main.md` §6）。
 加密字符串由程序在每次调用 `store::save()`（激活、每日 checkpoint、自愈补写）时**自动生成**并分散写入多处存储，无需用户手动操作。
 
 > **兼容任意存储来源**：`--license` 不绑定具体存储位置——无论该串来自注册表 `LicenseBlob` 导出，还是任一存储点（`license.dat` / `state.dat` / `cache.bin` / 注册表 `Data`）的内部密文，都能解密。详见 13.4。
@@ -1180,7 +1182,7 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 获取加密字符串的几种方式（任选其一，PowerShell；将 `{uuid}` / `{dir_uuid(...)}` 替换为本机实际值）：
 
-> **一键查看本机全部存储点路径**：跑 `.\umya-spreadsheet-excel.exe --stores` 即可一次性打印 5 个存储点（`home` / `config` / `local` / `regmain` / `regclsid`）解析后的实际路径——无需手动替换下面的 `{uuid}` / `{dir_uuid(...)}` 占位符。详见 `docs/main.md` §6.2。
+> **一键查看本机全部存储点路径**（需 `diagnostic` 内部诊断构建：`cargo build --release --features diagnostic`；公开发布版不含此命令，见 `docs/main.md` §6）：跑 `.\umya-spreadsheet-excel.exe --stores` 即可一次性打印 5 个存储点（`home` / `config` / `local` / `regmain` / `regclsid`）解析后的实际路径——无需手动替换下面的 `{uuid}` / `{dir_uuid(...)` 占位符。详见 `docs/main.md` §6.2。
 
 ```powershell
 # 1) 查看本机注册表路径 UUID（用于下面的 {uuid}）

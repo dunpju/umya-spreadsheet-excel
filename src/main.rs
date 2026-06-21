@@ -116,12 +116,12 @@ fn chrono_free_timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
 }
 
-/// 输出一段文本到控制台。
+/// 输出一段文本到控制台（仅 `diagnostic` feature 构建编译，与 §6 的三个诊断子命令同进退）。
 ///
 /// GUI 子系统下程序默认没有控制台，println! 不会显示。这里先尝试附加到
-/// 父进程的控制台（从终端运行 --uuid / --license 时有效），再写入 CONOUT$。
+/// 父进程的控制台（从终端运行 --uuid / --stores / --license 时有效），再写入 CONOUT$。
 /// 附加失败（如双击运行）则静默忽略。输出均为 ASCII，无控制台编码问题。
-#[cfg(windows)]
+#[cfg(all(windows, feature = "diagnostic"))]
 fn console_print(msg: &str) {
     use std::io::Write;
     extern "system" {
@@ -135,12 +135,13 @@ fn console_print(msg: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "diagnostic"))]
 fn console_print(msg: &str) {
     use std::io::Write;
     let _ = std::io::stdout().write_all(msg.as_bytes());
 }
 
+#[cfg(feature = "diagnostic")]
 /// 构建 `--stores` 输出：列出本机实际解析后的全部存储点路径。
 ///
 /// 对应 `docs/License.md` §6.1「存储位置」的全部 5 个存储点（home / config / local /
@@ -148,6 +149,7 @@ fn console_print(msg: &str) {
 /// `{uuid}` / `{dir_uuid(...)}`）解析为当前系统的实际绝对路径后输出（非占位符字面量）。
 /// 路径派生原语与 `license::store::all_stores()` 一致，故输出即程序实际读写的路径。
 /// 标签沿用 doc 中的 tag 名（ASCII，避开控制台编码问题），统一 `{:<9}` 左对齐路径列。
+#[cfg(feature = "diagnostic")]
 fn format_store_paths() -> String {
     let mut out = String::new();
 
@@ -207,38 +209,44 @@ fn format_store_paths() -> String {
 }
 
 fn main() -> eframe::Result<()> {
-    // CLI: --uuid 打印本机注册表路径 UUID 后退出
-    if std::env::args().any(|a| a == "--uuid") {
-        console_print(&format!("{}\n", license::fingerprint::registry_uuid()));
-        std::process::exit(0);
-    }
-    // CLI: --stores 打印本机实际解析后的全部存储点路径（home / config / local / regmain / regclsid）后退出
-    if std::env::args().any(|a| a == "--stores") {
-        console_print(&format_store_paths());
-        std::process::exit(0);
-    }
-    // CLI: --license 'encrypted_string' 解密并输出授权状态信息后退出
+    // 诊断 CLI 子命令（--uuid / --stores / --license）：仅 `diagnostic` feature 构建编译。
+    // 这些命令会暴露本机存储路径 / UUID / 授权状态，公开发布版（build.bat）默认不带此 feature，
+    // 以免逆向者 `strings` 出 "--stores" 等字面量并借其一次性枚举全部存储点（见 docs/main.md §6）。
+    #[cfg(feature = "diagnostic")]
     {
-        let args: Vec<String> = std::env::args().collect();
-        if let Some(pos) = args.iter().position(|a| a == "--license") {
-            if pos + 1 < args.len() {
-                let encrypted = &args[pos + 1];
-                let machine_fp = license::fingerprint::fingerprint_bytes();
-                // 兼容多种来源：LicenseBlob 导出（无 tag）或任一存储点的分位置密文
-                // （home/config/local/regmain/regclsid）。详见 store::decrypt_for_display。
-                match license::store::decrypt_for_display(encrypted, &machine_fp) {
-                    Some(text) => {
-                        console_print(&format!("{}\n", text));
-                        std::process::exit(0);
+        // CLI: --uuid 打印本机注册表路径 UUID 后退出
+        if std::env::args().any(|a| a == "--uuid") {
+            console_print(&format!("{}\n", license::fingerprint::registry_uuid()));
+            std::process::exit(0);
+        }
+        // CLI: --stores 打印本机实际解析后的全部存储点路径（home / config / local / regmain / regclsid）后退出
+        if std::env::args().any(|a| a == "--stores") {
+            console_print(&format_store_paths());
+            std::process::exit(0);
+        }
+        // CLI: --license 'encrypted_string' 解密并输出授权状态信息后退出
+        {
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(pos) = args.iter().position(|a| a == "--license") {
+                if pos + 1 < args.len() {
+                    let encrypted = &args[pos + 1];
+                    let machine_fp = license::fingerprint::fingerprint_bytes();
+                    // 兼容多种来源：LicenseBlob 导出（无 tag）或任一存储点的分位置密文
+                    // （home/config/local/regmain/regclsid）。详见 store::decrypt_for_display。
+                    match license::store::decrypt_for_display(encrypted, &machine_fp) {
+                        Some(text) => {
+                            console_print(&format!("{}\n", text));
+                            std::process::exit(0);
+                        }
+                        None => {
+                            console_print("Error: invalid or tampered license string, or wrong machine\n");
+                            std::process::exit(1);
+                        }
                     }
-                    None => {
-                        console_print("Error: invalid or tampered license string, or wrong machine\n");
-                        std::process::exit(1);
-                    }
+                } else {
+                    console_print("Error: --license requires an argument\n");
+                    std::process::exit(1);
                 }
-            } else {
-                console_print("Error: --license requires an argument\n");
-                std::process::exit(1);
             }
         }
     }
@@ -276,6 +284,7 @@ mod tests {
     /// `--stores` 必须把占位符（`~` / `{config_dir}` / `{data_local_dir}` / `{uuid}` /
     /// `{dir_uuid(...)}`）解析为当前系统的**实际绝对路径**，而非输出占位符字面量
     ///（5 个存储点：home / config / local / regmain / regclsid，见 docs/License.md §6.1）。
+    #[cfg(feature = "diagnostic")]
     #[test]
     fn format_store_paths_resolves_real_paths() {
         let out = format_store_paths();

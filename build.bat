@@ -14,6 +14,11 @@ rem    Notes:
 rem      - Uses pushd (not cd /d) because %~dp0 ends with a backslash that silently breaks `cd /d`.
 rem      - Keep this file ASCII-only: cmd.exe reads .bat under the OEM codepage, so non-ASCII
 rem        comments get corrupted on non-UTF8 consoles.
+rem      - This is the PUBLIC/distribution build: no `diagnostic` feature => CLI --uuid/--stores/--license
+rem        are compiled out by default (reverse-engineering hardening). For an internal/support
+rem        DIAGNOSTIC build run separately:
+rem            cargo build --release --features diagnostic
+rem        (see docs/main.md section 6)
 rem ============================================================
 
 pushd "%~dp0"

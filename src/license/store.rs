@@ -391,6 +391,7 @@ pub fn read_export_blob() -> Option<String> {
 /// 重新格式化为导出格式，使输出与来源无关。
 ///
 /// 返回 `None` 表示所有密钥都解不开（串损坏 / 非本机生成 / 格式错误）。
+#[allow(dead_code)] // 仅 --license 诊断路径调用；诊断 feature 关闭时不可达、不编入二进制
 pub fn decrypt_for_display(encoded: &str, machine_fp: &[u8]) -> Option<String> {
     let trimmed = encoded.trim();
 
@@ -407,6 +408,7 @@ pub fn decrypt_for_display(encoded: &str, machine_fp: &[u8]) -> Option<String> {
 
 /// 把解密后的明文统一为导出格式：能解析成内部 trial + license 就用 [`build_export_blob`]
 /// 重新格式化（存储点密文的情况）；否则（已是导出格式或无法解析）原样返回。
+#[allow(dead_code)] // 仅 decrypt_for_display（--license 诊断路径）调用；诊断 feature 关闭时同不可达
 fn normalize_for_display(text: &str, machine_fp: &[u8]) -> String {
     let rec = parse_record(text, machine_fp);
     if let Some(t) = rec.trial {
