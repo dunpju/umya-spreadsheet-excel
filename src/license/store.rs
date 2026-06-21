@@ -193,7 +193,12 @@ fn all_stores() -> Vec<Box<dyn Store>> {
         }));
         stores.push(Box::new(RegStore {
             tag: "regclsid",
-            subkey: format!("Software\\Classes\\CLSID\\{uuid}"),
+            // CLSID 惯例：大写 + 花括号（如 …\CLSID\{71445FAC-…}）。仅此点用 clsid 形式，
+            // regmain 仍用小写无花括号的 {uuid}。路径不影响加密密钥（密钥由 tag 派生）。
+            subkey: format!(
+                "Software\\Classes\\CLSID\\{}",
+                crate::license::fingerprint::registry_uuid_clsid()
+            ),
         }));
     }
 
@@ -998,5 +1003,29 @@ mod tests {
         )
         .expect("encrypt_for");
         assert!(decrypt_for_display(&enc, fp).is_none(), "wrong-machine blob must fail");
+    }
+
+    /// 真实注册表往返：用 CLSID 风格子键（大写 + 花括号，与生产 regclsid 同格式）验证
+    /// 「写入的密文能从同一路径读回」——即改 UUID 格式后 regclsid 读密文功能正常。
+    #[cfg(windows)]
+    #[test]
+    fn regstore_roundtrip_under_clsid_subkey() {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let sub = format!(
+            "Software\\Classes\\CLSID\\{}__rt_test",
+            crate::license::fingerprint::registry_uuid_clsid()
+        );
+        let store = RegStore { tag: "regclsid", subkey: sub.clone() };
+        let payload = "Y2lwaGVydGV4dA=="; // 任意密文形态
+        store.write(payload);
+        let back = store.read();
+        // 清理临时键（无论断言是否通过都先清理）
+        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey(&sub);
+        assert_eq!(
+            back.as_deref(),
+            Some(payload),
+            "RegStore must round-trip (read==write) under CLSID-style subkey"
+        );
     }
 }
