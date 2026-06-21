@@ -176,7 +176,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 - **红色三角指示器**：模块级函数 `draw_comment_indicator(painter, x, y, width)`，用 `egui::Shape::convex_polygon` 在单元格右上角画 ~7px 红色实心三角。
   - **主网格非冻结区**：第二遍内容绘制之后的独立遍历，合并非左上角跳过（只在合并左上角画）。
   - **冻结区**：在 `draw_frozen_cell` 闭包末尾调用。
-- **悬停气泡**：所有单元格绘制完成后（编辑框之前）一次性指针检测。`response.hovered() && !dragged && editing_cell.is_none() && !validation_error_active` 时，用冻结区感知坐标转换（复用 `partition_point` 二分）定位到单元格，合并单元格自动取左上角；命中带批注单元格则用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 作者（小号灰）+ 正文（黑色），定位在指针右下方、越界自动翻转并夹紧到视口。
+- **悬停气泡**：所有单元格绘制完成后（编辑框之前）一次性指针检测。`response.hovered() && !dragged && editing_cell.is_none() && !validation_error_active` 时，用冻结区感知坐标转换（复用 `partition_point` 二分）定位到单元格，合并单元格自动取左上角；命中带批注单元格则用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 正文（黑色）。**作者头仅当正文未以「作者:」开头时单独显示**（灰色小字）：Excel 把作者名嵌入正文首行（如 `"s:\n..."`），重复显示会产生多余作者行。气泡定位在指针右下方、越界自动翻转并夹紧到视口。
 - 指示器与气泡均**只在可见单元格**绘制，与隐藏行/列跳过逻辑一致。
 
 ## 3. 视觉结构图

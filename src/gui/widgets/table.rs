@@ -1698,28 +1698,50 @@ pub fn draw_table_content(
                         };
                         if let Some(cell) = sheet.get_cell(tr, tc) {
                             if let Some(comment) = &cell.comment {
-                                // 作者（小号灰）+ 正文（黑色），各自动换行
-                                let author_galley = painter.layout_job(
-                                    egui::text::LayoutJob::simple(
-                                        comment.author.clone(),
-                                        egui::FontId::proportional(11.0),
-                                        egui::Color32::from_rgb(120, 120, 120),
-                                        300.0,
-                                    ),
-                                );
+                                // 正文（黑色，自动换行）；空批注占位
+                                let body_text = if comment.text.is_empty() {
+                                    "（空批注）".to_string()
+                                } else {
+                                    comment.text.clone()
+                                };
                                 let body_galley = painter.layout_job(
                                     egui::text::LayoutJob::simple(
-                                        if comment.text.is_empty() { "（空批注）".to_string() } else { comment.text.clone() },
+                                        body_text,
                                         egui::FontId::proportional(13.0),
                                         egui::Color32::BLACK,
                                         300.0,
                                     ),
                                 );
-                                let author_h = author_galley.size().y;
+                                // 作者头：仅当正文未以「作者:」开头时才单独显示一行。
+                                // Excel 会把作者名作为正文首行嵌入（如 "s:\n..."），重复显示会产生多余的作者行。
+                                let author_prefix = format!("{}:", comment.author);
+                                let author_galley = if !comment.author.is_empty()
+                                    && !comment.text.starts_with(&author_prefix)
+                                {
+                                    Some(painter.layout_job(
+                                        egui::text::LayoutJob::simple(
+                                            comment.author.clone(),
+                                            egui::FontId::proportional(11.0),
+                                            egui::Color32::from_rgb(120, 120, 120),
+                                            300.0,
+                                        ),
+                                    ))
+                                } else {
+                                    None
+                                };
                                 let pad = 8.0;
                                 let gap = 3.0;
-                                let inner_w = author_galley.size().x.max(body_galley.size().x);
-                                let inner_h = author_h + gap + body_galley.size().y;
+                                let author_h = author_galley.as_ref().map_or(0.0, |g| g.size().y);
+                                let inner_w = author_galley
+                                    .as_ref()
+                                    .map_or(0.0, |g| g.size().x)
+                                    .max(body_galley.size().x);
+                                let inner_h = author_h
+                                    + if author_galley.is_some() {
+                                        gap + body_galley.size().y
+                                    } else {
+                                        body_galley.size().y
+                                    };
                                 let box_w = inner_w + pad * 2.0;
                                 let box_h = inner_h + pad * 2.0;
                                 // 定位：指针右下方；越界则向左/上翻转，并夹紧到视口
@@ -1734,8 +1756,12 @@ pub fn draw_table_content(
                                 // 淡黄背景（Excel 批注配色）+ 边框
                                 painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(255, 255, 224));
                                 painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(190, 190, 120)), egui::StrokeKind::Outside);
-                                painter.galley(egui::Pos2::new(bx + pad, by + pad), author_galley, egui::Color32::from_rgb(120, 120, 120));
-                                painter.galley(egui::Pos2::new(bx + pad, by + pad + author_h + gap), body_galley, egui::Color32::BLACK);
+                                let mut text_y = by + pad;
+                                if let Some(ag) = author_galley {
+                                    painter.galley(egui::Pos2::new(bx + pad, text_y), ag, egui::Color32::from_rgb(120, 120, 120));
+                                    text_y += author_h + gap;
+                                }
+                                painter.galley(egui::Pos2::new(bx + pad, text_y), body_galley, egui::Color32::BLACK);
                             }
                         }
                     }

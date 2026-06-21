@@ -125,7 +125,7 @@ fn extract_comment_text(ct: &umya_spreadsheet::structs::CommentText) -> String {
 
 1. `response.hovered() && !response.dragged() && editing_cell.is_none() && !validation_error_active`
 2. 屏幕坐标 → 单元格：复用与点击相同的冻结区感知坐标转换（`partition_point` 二分查找累积数组）。
-3. 命中带批注的单元格（合并单元格自动取左上角）→ 用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行的 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 作者（小号灰）+ 正文（黑色）。
+3. 命中带批注的单元格（合并单元格自动取左上角）→ 用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行的 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 正文（黑色）。**作者头仅当正文未以「作者:」开头时才单独显示一行**（灰色小字）：Excel 会把作者名作为正文首行嵌入（如 `"s:\n..."`），若再单独画作者行会与正文首行重复。
 4. 定位在指针右下方，越界自动向左/上翻转并夹紧到视口。
 
 ```rust
