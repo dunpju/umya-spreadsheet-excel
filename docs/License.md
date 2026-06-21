@@ -1180,6 +1180,8 @@ keygen.exe ABCD-1234-EF89-5678 365 "客户公司名"
 
 获取加密字符串的几种方式（任选其一，PowerShell；将 `{uuid}` / `{dir_uuid(...)}` 替换为本机实际值）：
 
+> **一键查看本机全部存储点路径**：跑 `.\umya-spreadsheet-excel.exe --stores` 即可一次性打印 5 个存储点（`home` / `config` / `local` / `regmain` / `regclsid`）解析后的实际路径——无需手动替换下面的 `{uuid}` / `{dir_uuid(...)}` 占位符。详见 `docs/main.md` §6.2。
+
 ```powershell
 # 1) 查看本机注册表路径 UUID（用于下面的 {uuid}）
 .\umya-spreadsheet-excel.exe --uuid

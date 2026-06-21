@@ -141,10 +141,80 @@ fn console_print(msg: &str) {
     let _ = std::io::stdout().write_all(msg.as_bytes());
 }
 
+/// 构建 `--stores` 输出：列出本机实际解析后的全部存储点路径。
+///
+/// 对应 `docs/License.md` §6.1「存储位置」的全部 5 个存储点（home / config / local /
+/// regmain / regclsid），把文档占位符（`~` / `{config_dir}` / `{data_local_dir}` /
+/// `{uuid}` / `{dir_uuid(...)}`）解析为当前系统的实际绝对路径后输出（非占位符字面量）。
+/// 路径派生原语与 `license::store::all_stores()` 一致，故输出即程序实际读写的路径。
+/// 标签沿用 doc 中的 tag 名（ASCII，避开控制台编码问题），统一 `{:<9}` 左对齐路径列。
+fn format_store_paths() -> String {
+    let mut out = String::new();
+
+    // —— 文件存储点（best-effort；dirs 返回 None 时打印兜底文案）——
+    // home：用户主目录下的 license 文件（~/.MyExcel/license.dat）
+    match dirs::home_dir() {
+        Some(home) => {
+            let path = home.join(".MyExcel").join("license.dat");
+            out.push_str(&format!("{:<9} {}\n", "home:", path.display()));
+        }
+        None => out.push_str(&format!("{:<9} (unavailable: home directory not found)\n", "home:")),
+    }
+    // config：配置目录下的分散点（{config_dir}/{dir_uuid(config)}/state.dat）
+    match dirs::config_dir() {
+        Some(cfg) => {
+            let path = cfg
+                .join(license::fingerprint::dir_uuid("config"))
+                .join("state.dat");
+            out.push_str(&format!("{:<9} {}\n", "config:", path.display()));
+        }
+        None => out.push_str(&format!("{:<9} (unavailable: config directory not found)\n", "config:")),
+    }
+    // local：本地应用数据缓存（{data_local_dir}/{dir_uuid(local)}/cache.bin）
+    match dirs::data_local_dir() {
+        Some(loc) => {
+            let path = loc
+                .join(license::fingerprint::dir_uuid("local"))
+                .join("cache.bin");
+            out.push_str(&format!("{:<9} {}\n", "local:", path.display()));
+        }
+        None => out.push_str(&format!("{:<9} (unavailable: local data directory not found)\n", "local:")),
+    }
+
+    // —— 注册表存储点（仅 Windows；非 Windows 无此两点）——
+    #[cfg(windows)]
+    {
+        // regmain：HKCU\Software\{uuid}
+        out.push_str(&format!(
+            "{:<9} HKCU\\Software\\{}\n",
+            "regmain:",
+            license::fingerprint::registry_uuid()
+        ));
+        // regclsid：HKCU\Software\Classes\CLSID\{大写UUID}（CLSID 惯例：大写 + 花括号）
+        out.push_str(&format!(
+            "{:<9} HKCU\\Software\\Classes\\CLSID\\{}\n",
+            "regclsid:",
+            license::fingerprint::registry_uuid_clsid()
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        out.push_str(&format!("{:<9} (N/A on non-Windows)\n", "regmain:"));
+        out.push_str(&format!("{:<9} (N/A on non-Windows)\n", "regclsid:"));
+    }
+
+    out
+}
+
 fn main() -> eframe::Result<()> {
     // CLI: --uuid 打印本机注册表路径 UUID 后退出
     if std::env::args().any(|a| a == "--uuid") {
         console_print(&format!("{}\n", license::fingerprint::registry_uuid()));
+        std::process::exit(0);
+    }
+    // CLI: --stores 打印本机实际解析后的全部存储点路径（home / config / local / regmain / regclsid）后退出
+    if std::env::args().any(|a| a == "--stores") {
+        console_print(&format_store_paths());
         std::process::exit(0);
     }
     // CLI: --license 'encrypted_string' 解密并输出授权状态信息后退出
@@ -197,4 +267,89 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|_cc| Ok(Box::new(ExcelViewer::new()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--stores` 必须把占位符（`~` / `{config_dir}` / `{data_local_dir}` / `{uuid}` /
+    /// `{dir_uuid(...)}`）解析为当前系统的**实际绝对路径**，而非输出占位符字面量
+    ///（5 个存储点：home / config / local / regmain / regclsid，见 docs/License.md §6.1）。
+    #[test]
+    fn format_store_paths_resolves_real_paths() {
+        let out = format_store_paths();
+
+        // 文件存储点行均存在
+        let home_line = out.lines().find(|l| l.starts_with("home:"));
+        let config_line = out.lines().find(|l| l.starts_with("config:"));
+        let local_line = out.lines().find(|l| l.starts_with("local:"));
+        assert!(home_line.is_some(), "home line present:\n{out}");
+        assert!(config_line.is_some(), "config line present:\n{out}");
+        assert!(local_line.is_some(), "local line present:\n{out}");
+
+        // home 行：解析为实际主目录（非 `~` 占位符）
+        if let Some(home) = dirs::home_dir() {
+            let line = home_line.unwrap();
+            assert!(
+                line.contains(&home.display().to_string()),
+                "home resolves to real home dir, not placeholder: {line}"
+            );
+            assert!(!line.contains('~'), "no literal ~ placeholder: {line}");
+        }
+
+        // config 行：嵌入实际的 dir_uuid(config)，解析为实际 config 目录，以 state.dat 结尾
+        if let Some(cfg) = dirs::config_dir() {
+            let line = config_line.unwrap();
+            assert!(
+                line.contains(&cfg.display().to_string()),
+                "config resolves to real config dir, not placeholder: {line}"
+            );
+            assert!(
+                line.contains(&license::fingerprint::dir_uuid("config")),
+                "config embeds real dir_uuid(\"config\"): {line}"
+            );
+            assert!(line.ends_with("state.dat"), "config ends with state.dat: {line}");
+            assert!(!line.contains("{dir_uuid"), "no literal {{dir_uuid}} placeholder: {line}");
+        }
+
+        // local 行：嵌入实际的 dir_uuid(local)，以 cache.bin 结尾（非占位符字面量）
+        let line = local_line.unwrap();
+        assert!(
+            line.contains(&license::fingerprint::dir_uuid("local")),
+            "local embeds real dir_uuid(\"local\"): {line}"
+        );
+        assert!(line.ends_with("cache.bin"), "local ends with cache.bin: {line}");
+        assert!(
+            !line.contains("{dir_uuid"),
+            "no literal {{dir_uuid(...)}} placeholder: {line}"
+        );
+
+        // 注册表存储点（仅 Windows）：regmain / regclsid 均嵌入实际派生 UUID
+        #[cfg(windows)]
+        {
+            // regmain：HKCU\Software\{registry_uuid()}
+            let line = out.lines().find(|l| l.starts_with("regmain:")).unwrap();
+            assert!(
+                line.contains(&license::fingerprint::registry_uuid()),
+                "regmain embeds real registry_uuid: {line}"
+            );
+            assert!(
+                line.contains("HKCU\\Software\\"),
+                "regmain has HKCU\\Software\\ prefix: {line}"
+            );
+            assert!(!line.contains("{uuid}"), "no literal {{uuid}} placeholder: {line}");
+
+            // regclsid：HKCU\Software\Classes\CLSID\{registry_uuid_clsid()}
+            let line = out.lines().find(|l| l.starts_with("regclsid:")).unwrap();
+            assert!(
+                line.contains(&license::fingerprint::registry_uuid_clsid()),
+                "regclsid embeds real registry_uuid_clsid: {line}"
+            );
+            assert!(
+                line.contains("HKCU\\Software\\Classes\\CLSID\\"),
+                "regclsid has HKCU\\Software\\Classes\\CLSID\\ prefix: {line}"
+            );
+        }
+    }
 }

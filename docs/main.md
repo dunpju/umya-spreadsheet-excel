@@ -1,7 +1,7 @@
 # `src/main.rs` 实现文档
 
 > 本文件是 `umya-spreadsheet-excel`（可执行名 `my-excel`）的程序入口。
-> 它本身代码量很小（约 200 行），但承担了三件关键职责：**CLI 诊断子命令**、**崩溃捕获与日志**、**GUI 主窗口的装配与启动**。本文从设计意图出发，逐块解释其实现逻辑。
+> 它本身代码量很小（约 300 行），但承担了三件关键职责：**CLI 诊断子命令**、**崩溃捕获与日志**、**GUI 主窗口的装配与启动**。本文从设计意图出发，逐块解释其实现逻辑。
 
 ---
 
@@ -19,7 +19,7 @@ mod shortcut; // 桌面快捷方式（Windows：启动时确保桌面存在 my-e
 
 `main.rs` 自身**不实现业务逻辑**，只做四件事：
 
-1. **CLI 分支**：`--uuid` / `--license` 两个诊断子命令，命中即处理后 `exit`，绝不进入 GUI。
+1. **CLI 分支**：`--uuid` / `--stores` / `--license` 三个诊断子命令，命中即处理后 `exit`，绝不进入 GUI。
 2. **崩溃兜底**：注册 panic hook，把崩溃信息 + 调用栈落盘并弹窗提示。
 3. **桌面快捷方式**：启动时确保 Windows 桌面存在指向本程序的 `my-excel.lnk`（缺失才创建）。
 4. **GUI 装配**：构建 `Viewport`（尺寸 + 图标），交给 `eframe::run_native` 启动 `ExcelViewer`。
@@ -111,7 +111,7 @@ fn console_print(msg: &str) { /* 直接写 stdout */ }
 ```
 
 ### 5.1 解决的问题
-§2 的副作用：GUI 子系统程序没有自己的控制台，`println!` 无效。但 `--uuid`/`--license` 这两个 CLI 子命令又**必须**把结果打印出来。
+§2 的副作用：GUI 子系统程序没有自己的控制台，`println!` 无效。但 `--uuid` / `--stores` / `--license` 这三个 CLI 子命令又**必须**把结果打印出来。
 
 ### 5.2 Windows 实现（三步）
 1. FFI 声明并调用 `AttachConsole(ATTACH_PARENT_PROCESS = u32::MAX)`：**附加到父进程（即调用它的终端）的控制台**。
@@ -145,7 +145,31 @@ if std::env::args().any(|a| a == "--uuid") {
 
 > 该 UUID 由 `fingerprint::registry_uuid()` 生成：仅取**稳定硬件标识**（主板序列号/型号、CPU）经 SHA-256 → UUID v5 风格。重装系统不变，仅更换主板/CPU 才变（见 `license/fingerprint.rs`）。
 
-### 6.2 CLI 分支二：`--license <encrypted>`
+### 6.2 CLI 分支二：`--stores`
+```rust
+if std::env::args().any(|a| a == "--stores") {
+    console_print(&format_store_paths());
+    std::process::exit(0);
+}
+```
+打印本机**实际解析后**的全部存储点路径后 `exit(0)`，**不进入 GUI**。对应 `docs/License.md` §6.1「存储位置」的全部 5 个存储点（home / config / local / regmain / regclsid），把文档占位符解析为当前系统的真实绝对路径：
+
+| 行 | 占位符（doc 写法） | 实际解析 |
+|---|---|---|
+| `home:` | `~/.MyExcel/license.dat` | `dirs::home_dir()` → 真实主目录 |
+| `config:` | `{config_dir}/{dir_uuid(config)}/state.dat` | `dirs::config_dir()` + `fingerprint::dir_uuid("config")` |
+| `local:` | `{data_local_dir}/{dir_uuid(local)}/cache.bin` | `dirs::data_local_dir()` + `fingerprint::dir_uuid("local")` |
+| `regmain:` | `HKCU\Software\{uuid}` | `fingerprint::registry_uuid()` → 真实 UUID（仅 Windows） |
+| `regclsid:` | `HKCU\Software\Classes\CLSID\{大写UUID}` | `fingerprint::registry_uuid_clsid()` → 真实 CLSID UUID（仅 Windows） |
+
+- **用途**：技术支持让用户跑此命令，一次性看到本机授权数据实际写到哪些文件 / 注册表键，便于排障时定位与清理。
+- **与 `--uuid` 的区别**：`--uuid` 只给注册表路径 UUID（一个值）；`--stores` 给出全部 5 个存储点的**完整解析路径**（3 个文件 + 2 个注册表分支）。
+- **路径派生原语与 `license::store::all_stores()` 完全一致**：`--stores` 输出的路径即程序实际读写的路径，不会漂移。
+- **标签为 ASCII**（`home`/`config`/`local`/`regmain`/`regclsid`，沿用 doc 的 tag 名），呼应 §5.3 的控制台编码规避；`dirs` 返回 `None` 的极端环境打印兜底文案，非 Windows 的 `regmain` / `regclsid` 标注 `(N/A on non-Windows)`。
+
+> 解析逻辑封装在 `format_store_paths()`（main.rs 内的纯函数，返回 `String`），便于单测验证占位符确已解析为真实路径。
+
+### 6.3 CLI 分支三：`--license <encrypted>`
 ```rust
 if let Some(pos) = args.iter().position(|a| a == "--license") {
     if pos + 1 < args.len() {
@@ -167,9 +191,9 @@ if let Some(pos) = args.iter().position(|a| a == "--license") {
   `decrypt_for_display` 依次尝试“无 tag 导出密钥 → 各存储点分位置密钥”，**任一成功即解密**，并经 `normalize_for_display` 规范化为导出格式，使**输出与来源位置无关**。详见 `license/store.rs` 文档。
 - **绑机**：用本机 `fingerprint_bytes()` 当 AES-GCM 密钥派生输入，换机器或被篡改的串都解不开，返回 `None` → 打印错误并 `exit(1)`。
 
-> 这两个 CLI 分支共享一个设计原则：**诊断能力必须脱离 GUI**。GUI 子系统下没有控制台，但客服远程排查时恰恰需要纯命令行的、确定性的输出，因此把这两条路径放在 `main()` 最前面、早于 panic hook 注册、早于 GUI 创建。
+> 这三个 CLI 分支共享一个设计原则：**诊断能力必须脱离 GUI**。GUI 子系统下没有控制台，但客服远程排查时恰恰需要纯命令行的、确定性的输出，因此把这三条路径放在 `main()` 最前面、早于 panic hook 注册、早于 GUI 创建。
 
-### 6.3 崩溃兜底装配
+### 6.4 崩溃兜底装配
 ```rust
 std::panic::set_hook(Box::new(handle_panic));
 std::env::set_var("RUST_BACKTRACE", "1");
@@ -177,7 +201,7 @@ std::env::set_var("RUST_BACKTRACE", "1");
 - 仅在确认**不是 CLI 调用**后才注册 hook（CLI 路径已 `exit`，不会走到这里）。
 - `RUST_BACKTRACE=1`：release 模式下默认不捕获 backtrace，显式开启才能让 §4 的 `Backtrace::capture()` 拿到真实调用栈。
 
-### 6.4 桌面快捷方式
+### 6.5 桌面快捷方式
 ```rust
 shortcut::ensure_desktop_shortcut();
 ```
@@ -188,7 +212,7 @@ shortcut::ensure_desktop_shortcut();
 - **实现**：原始 COM FFI（`IShellLinkW` + `IPersistFile`），零新增依赖，与 `console_print` 的 FFI 风格一致；非 Windows 平台 `#[cfg]` 门控为空操作。详见 `src/shortcut.rs`。
 - **图标**：不显式 `SetIconLocation`——`build.rs` 嵌入的 ICO 资源自动成为 `.lnk` 默认图标。
 
-### 6.5 GUI 装配与启动
+### 6.6 GUI 装配与启动
 ```rust
 let mut viewport = egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]);
 if let Some(icon) = load_window_icon() {
@@ -226,7 +250,7 @@ fn chrono_free_timestamp() -> String {
    `windows_subsystem = "windows"` 解决双击静默；`console_print` 解决命令行输出；二者通过“附加父进程控制台”桥接。CLI 子命令全部用 `console_print` 而非 `println!`，输出全部 ASCII 以规避 Windows 控制台编码问题。
 
 2. **诊断与 GUI 彻底分离**
-   `--uuid` / `--license` 在 `main()` 最前面短路 `exit`，**不创建任何 GUI 资源、不注册 panic hook**。这意味着即使 GUI/eframe 出问题，授权诊断命令依旧可用——这是离线授权场景下客服远程排障的底线。
+   `--uuid` / `--stores` / `--license` 在 `main()` 最前面短路 `exit`，**不创建任何 GUI 资源、不注册 panic hook**。这意味着即使 GUI/eframe 出问题，授权诊断命令依旧可用——这是离线授权场景下客服远程排障的底线。
 
 3. **崩溃可追溯**
    GUI 程序的 panic 用户看不到，故 hook 落盘 + 弹窗；开启 `RUST_BACKTRACE=1` 让 release 也能拿到调用栈；日志按天 append、写 exe 同目录，用户最容易找到。
@@ -249,7 +273,9 @@ fn chrono_free_timestamp() -> String {
 | `gui::viewer::ExcelViewer` | GUI 主结构，构造期完成授权加载与 UI 状态初始化 | `src/gui/viewer.rs` |
 | `shortcut::ensure_desktop_shortcut` | 启动时确保桌面存在指向本程序的 `my-excel.lnk`（缺失才创建） | `src/shortcut.rs` |
 | `util::date::days_to_ymd` | Unix 天数 → (年, 月, 日)，崩溃日志与时间戳复用 | `src/util/date.rs` |
-| `license::fingerprint::registry_uuid` | `--uuid` 输出的稳定硬件派生 UUID（注册表路径） | `src/license/fingerprint.rs` |
+| `license::fingerprint::registry_uuid` | `--uuid` 输出、`--stores` 的 regmain 行所用稳定硬件派生 UUID（注册表路径） | `src/license/fingerprint.rs` |
+| `license::fingerprint::registry_uuid_clsid` | `--stores` 的 regclsid 行所用 CLSID 风格 UUID（大写 + 花括号） | `src/license/fingerprint.rs` |
+| `license::fingerprint::dir_uuid` | `--stores` 的 config / local 目录名派生（`dir_uuid("config")` / `dir_uuid("local")`，与 `store::all_stores` 一致） | `src/license/fingerprint.rs` |
 | `license::fingerprint::fingerprint_bytes` | `--license` 解密用的机器指纹（HMAC/AES 密钥派生） | `src/license/fingerprint.rs` |
 | `license::store::decrypt_for_display` | `--license` 多位置兼容解密 + 统一导出格式化 | `src/license/store.rs` |
 | `build.rs`（间接） | 编译期把 ICO 嵌入 exe 资源，与运行时图标互补 | `build.rs` |
@@ -263,6 +289,9 @@ fn chrono_free_timestamp() -> String {
             │                                          │
             ▼                                          │
    参数含 --uuid？  ── 是 ──► console_print(registry_uuid) ──► exit(0)
+            │ 否
+            ▼
+   参数含 --stores？ ─ 是 ──► console_print(全部 5 存储点实际路径) ──► exit(0)
             │ 否
             ▼
    参数含 --license？ ─ 是 ──► 解密(指纹) ┬─ 成功 ► console_print(导出格式) ► exit(0)
