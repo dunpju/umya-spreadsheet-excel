@@ -82,6 +82,7 @@ parse_comparison  ( = <> < <= > >= )   最低
 
 - `evaluate_sheet(sheet)` —— **全量求值**：构建依赖图后对所有公式单元格拓扑求值。用于初始加载或公式本身变更。
 - `evaluate_dependents(sheet, changed_row, changed_col)` —— **增量求值**：从变更单元格出发，沿 `reverse_deps` 做 BFS 收集所有受影响公式，再对该子集拓扑求值。避免每帧全量重算。
+- **副作用**：上述两者求值时都会置位 `sheet.cf_dirty = true`，作为**条件格式事件驱动刷新**的唯一触发信号（值变化 → 公式求值 → 标脏 → viewer 仅对当前表、仅在脏时重算条件格式）。详见 [reader.md §2.7 事件驱动刷新机制](./reader.md#27-条件格式求值)。
 
 ### 2.9 测试
 
@@ -178,8 +179,8 @@ flowchart LR
 | `adjust_formula_columns` | `(formula, threshold_col, shift) -> String` | 调整列引用（插入/删除列） |
 | `adjust_formula_rows` | `(formula, threshold_row, shift) -> String` | 调整行引用（插入/删除行） |
 | `adjust_formula_by_mapping` | `(formula, mapping, fb_col, fb_row) -> String` | 按映射表调整引用（迁移） |
-| `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式 |
-| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式 |
+| `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式；并置位 `cf_dirty` |
+| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式；并置位 `cf_dirty` |
 
 ### 4.3 关键内部函数（私有 fn）
 

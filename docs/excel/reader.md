@@ -43,7 +43,7 @@
 
 ### 2.5 `SheetData` —— 工作表模型
 
-`SheetData` 是工作表的内存表示，字段包括：单元格表 `cells: HashMap<(row,col), CellData>`、合并列表 `merged_cells` 与**合并索引 `merge_index`**（O(1) 查找替代 O(n) 扫描）、`max_row`/`max_col`、`column_widths`/`row_heights`、`frozen_rows`/`frozen_cols`、`data_validations`、`conditional_rules`。
+`SheetData` 是工作表的内存表示，字段包括：单元格表 `cells: HashMap<(row,col), CellData>`、合并列表 `merged_cells` 与**合并索引 `merge_index`**（O(1) 查找替代 O(n) 扫描）、`max_row`/`max_col`、`column_widths`/`row_heights`、`frozen_rows`/`frozen_cols`、`data_validations`、`conditional_rules`，以及条件格式脏标志 `cf_dirty`（见 [2.7 事件驱动刷新机制](#27-条件格式求值)）。
 
 核心方法分组：
 
@@ -80,8 +80,29 @@
 
 - `apply_conditional_formatting(sheet)`：克隆规则后，对每个范围逐格取值并用 `evaluate_rule` 判定，命中则覆盖背景/字色/加粗。
 - `evaluate_rule(rule, cell_value)`：按 `rule_type`/`operator` 分支，支持 `ContainsText`（含 `extract_contains_text_from_formula` 从 `SEARCH("...")` 提取文本）、`Greater/Less/Equal/NotEqual/Between` 等比较。
-- `reapply_conditional_formatting(sheet)`：每帧重算——先恢复范围内原始样式（`original_bg`），再重新求值。
+- `reapply_conditional_formatting(sheet)`：重算入口——先恢复范围内原始样式（`original_bg`），再调用 `apply_conditional_formatting` 重新求值。**何时调用由 viewer 的事件驱动逻辑决定（见下）**，不再每帧无条件执行。
 - `apply_user_cond_format_rules(sheet, rules)`：应用用户 YAML 规则（`UserCondFormatRule`）。先经 `resolve_dynamic_range` 解析动态引用（`~行号`→行尾列、`列字母~`→列尾行、纯 `~`→右下角），再逐格用 `compare_equal` 等求值并着色。
+
+#### 事件驱动刷新机制（`SheetData.cf_dirty`）
+
+条件格式（文件自带 + 用户规则）的重新求值是**较重的操作**（遍历每条规则 × 每个范围 × 每个单元格）。原先 viewer 每帧对所有工作表无条件重算，滚动/编辑间隙都在浪费。改为**事件驱动**：
+
+- **脏标志**：`SheetData.cf_dirty: bool`。置位表示"本表的条件格式需要重算（值或用户规则可能已变）"。
+- **置位方（值变化的唯一 chokepoint）**：`crate::excel::formula::evaluate_sheet` 与 `evaluate_dependents` 在求值时置位 `sheet.cf_dirty = true`。由于本应用**所有**单元格值变化（编辑、撤销/重做、插入/删除行列、粘贴、加载）都经过这两个函数，置位点集中、可靠。
+- **消费方（viewer.rs 每帧）**：仅对**当前表**检查；若 `cf_dirty` 为真则执行 `reapply_conditional_formatting` +（有用户规则时）`apply_user_cond_format_rules`，完成后清零标志。用户规则若本轮被编辑（快照对比检测），则把所有表标记为脏，切换到对应表时再重算。
+- **首帧/加载**：`load_from_file` 内部对每个表调用 `evaluate_sheet`，已将各表置脏，故加载后首帧会自动应用（含启动时从配置加载的用户规则）。
+
+| 场景 | 是否重算 CF | 说明 |
+|------|------------|------|
+| 编辑单元格 | 是（下一帧） | evaluate → cf_dirty |
+| 撤销 / 重做 | 是 | undo 内部调 evaluate |
+| 插入 / 删除行列 | 是 | 调用方调 evaluate |
+| 加载文件 | 首帧是 | load 内部 evaluate 置脏 |
+| 增删用户 CF 规则 | 是 | 快照对比 → 标记所有表脏 |
+| 切换工作表 | 目标表若脏则重算 | 仅当前表被处理 |
+| 滚动 / 闲置 | **否** | 无 evaluate，颜色保持（**主要收益**） |
+
+> 性能：对含条件格式的文件，滚动/闲置期间条件格式计算量下降约一个数量级；不含条件格式的表 `reapply_conditional_formatting` 本就走早返回快路径，收益较小。`cf_dirty` 是瞬时 UI 标志，不参与 xlsx 序列化。
 
 ### 2.8 日期处理
 
@@ -122,6 +143,7 @@ classDiagram
         +frozen_rows / frozen_cols
         +data_validations: Vec~DataValidationInfo~
         +conditional_rules: Vec~CondFormatRule~
+        +cf_dirty: bool
         +insert_rows() / insert_columns() / append_row()
         +validate_cell() / get_cell()
     }
@@ -222,18 +244,27 @@ flowchart TD
 
 ```mermaid
 flowchart LR
+    subgraph 值变化置位
+        E["编辑/撤销/插入删除/加载<br/>→ evaluate_sheet / evaluate_dependents"] -.->|置位| F["sheet.cf_dirty = true"]
+    end
     subgraph 文件自带规则
-        A1[conditional_rules<br/>来自 OOXML dxf] --> A2["reapply_conditional_formatting<br/>每帧重算"]
+        A1[conditional_rules<br/>来自 OOXML dxf] --> G{"viewer 每帧检查<br/>当前表 cf_dirty?"}
+        G -->|是| A2["reapply_conditional_formatting"]
         A2 --> A3["先恢复 original_bg<br/>再 apply_conditional_formatting"]
         A3 --> A4["evaluate_rule 判定<br/>覆盖 bg/font/bold"]
     end
     subgraph 用户YAML规则
-        B1[UserCondFormatRule<br/>来自配置] --> B2["apply_user_cond_format_rules"]
+        B1[UserCondFormatRule<br/>来自配置] --> B2["apply_user_cond_format_rules<br/>(cf_dirty 时一并调用)"]
         B2 --> B3["resolve_dynamic_range<br/>解析 ~ 行尾/列尾引用"]
         B3 --> B4["逐格求值 + compare_equal"]
         B4 --> B5["命中则覆盖 bg"]
     end
 
+    F -.-> G
+    A2 -.->|完成后| C["cf_dirty = false"]
+
+    style F fill:#fff9c4,stroke:#f9a825
+    style G fill:#fff9c4,stroke:#f9a825
     style A2 fill:#e8f5e9,stroke:#43a047
     style B2 fill:#fce4ec,stroke:#c2185b
 ```
@@ -261,7 +292,7 @@ flowchart LR
 | `CellRange` | start_row/col, end_row/col | 合并/有效性区域，1-based |
 | `DataValidationInfo` | dv_type, dv_operator, formula1/2, ranges, prompt/error 等 | 一条有效性规则 |
 | `ColumnCopyOptions` | copy_merge, copy_formula, copy_style, copy_value | 插入列时的复制选项 |
-| `SheetData` | cells, merged_cells, merge_index, column_widths, row_heights, frozen_*, data_validations, conditional_rules | 工作表模型 |
+| `SheetData` | cells, merged_cells, merge_index, column_widths, row_heights, frozen_*, data_validations, conditional_rules, cf_dirty | 工作表模型 |
 | `UserCondFormatRule` | operator, value, color, range | 用户 YAML 条件格式规则 |
 | `CondFormatRule` | ranges, operator, formula_text, text, bg_color, font_color, bold | 文件自带条件格式规则 |
 | `ExcelData` | sheets | 工作簿模型 |
@@ -287,7 +318,7 @@ flowchart LR
 | `ExcelData::load_from_file` | impl ExcelData | **核心入口**：解析 xlsx 为内存结构 |
 | `ExcelData::parse_style` | impl ExcelData（私有） | 提取样式为七元组 |
 | `ExcelData::parse_hex_color` | impl ExcelData（私有） | 十六进制色→RGB |
-| `ExcelData::reapply_conditional_formatting` | impl ExcelData | 每帧重算文件条件格式 |
+| `ExcelData::reapply_conditional_formatting` | impl ExcelData | 条件格式重算入口（viewer 仅在 `cf_dirty` 时对当前表调用） |
 | `ExcelData::apply_user_cond_format_rules` | impl ExcelData | 应用用户 YAML 条件格式 |
 | `ExcelData::is_date_format` | impl ExcelData | 判断是否日期格式 |
 | `ExcelData::format_date` | impl ExcelData | 序列号→格式化日期串 |

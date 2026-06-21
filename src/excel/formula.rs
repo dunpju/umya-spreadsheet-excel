@@ -1549,6 +1549,8 @@ fn topo_eval(
 /// 求值工作表中的所有公式，将结果写入 cell.value
 /// 用于初始加载或公式本身发生变更时
 pub fn evaluate_sheet(sheet: &mut SheetData) {
+    // 求值意味着单元格值发生变化 → 标记条件格式需重算（事件驱动，替代每帧重算）
+    sheet.cf_dirty = true;
     let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
     if formula_cells.is_empty() { return; }
 
@@ -1564,6 +1566,8 @@ pub fn evaluate_sheet(sheet: &mut SheetData) {
 /// * `changed_row` - 发生变化的单元格行号
 /// * `changed_col` - 发生变化的单元格列号
 pub fn evaluate_dependents(sheet: &mut SheetData, changed_row: u32, changed_col: u32) {
+    // 单元格值变化 → 标记条件格式需重算（事件驱动，替代每帧重算）
+    sheet.cf_dirty = true;
     let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
     if formula_cells.is_empty() { return; }
 

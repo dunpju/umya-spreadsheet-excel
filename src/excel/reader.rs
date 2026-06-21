@@ -310,10 +310,12 @@ pub struct SheetData {
     pub merge_index: HashMap<(u32, u32), usize>,
     /// 条件格式规则（来自原表的 conditional formatting → dxf）
     pub conditional_rules: Vec<CondFormatRule>,
+    /// 条件格式脏标志：单元格值变化（公式求值）后置位，viewer 仅在置位时重算条件格式
+    pub cf_dirty: bool,
 }
 
 /// 用户自定义的条件格式规则（YAML 持久化）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserCondFormatRule {
     pub operator: String,   // ">", "<", "=", ">=", "<=", "!="
     pub value: String,      // 阈值 "60"
@@ -374,6 +376,7 @@ impl SheetData {
             data_validations: Vec::new(),
             merge_index: HashMap::new(),
             conditional_rules: Vec::new(),
+            cf_dirty: false,
         }
     }
 

@@ -209,9 +209,9 @@ pub fn draw_menu_bar(
 ```
 
 - **设计意图**：打开自定义条件格式弹窗（`cond_format_popup`）。
-- **当前状态**：停用。原因是应用改为**直接使用 Excel 文件自带的条件格式**（`viewer.rs` 每帧
-  `reapply_conditional_formatting`），自定义编辑入口不再需要。参数 `_cond_format_popup` 仍保留在签名中
-  （前缀 `_` 表示未使用），以维持调用点签名稳定。
+- **当前状态**：停用。原因是应用改为**直接使用 Excel 文件自带的条件格式**（`viewer.rs`
+  事件驱动 `reapply_conditional_formatting`，仅在 `cf_dirty` 时对当前表执行），自定义编辑入口不再需要。
+  参数 `_cond_format_popup` 仍保留在签名中（前缀 `_` 表示未使用），以维持调用点签名稳定。
 
 > 此外「行配置」页签在 `config.rs` 中也仅显示"功能开发中..."占位，与「插入配置」整体未完成一致。
 

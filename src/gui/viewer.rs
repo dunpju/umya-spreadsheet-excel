@@ -635,16 +635,29 @@ impl eframe::App for ExcelViewer {
             self.excel_data.as_ref().and_then(|ed| ed.get_sheet(self.current_sheet)),
         );
 
+        // 快照用户条件格式规则，用于检测本轮是否被编辑（弹窗内增删/修改）
+        let user_rules_before = self.cond_format_popup.rules.clone();
+
         // 绘制条件格式弹窗
         draw_cond_format_popup(&ctx, &mut self.cond_format_popup);
 
-        // 每帧应用条件格式（文件自带 + 用户自定义），确保单元格编辑后自动更新
+        // 条件格式事件驱动：仅在「当前表标记为脏」或「用户规则变化」时重算，
+        // 替代原先每帧对所有表重算。cf_dirty 由公式求值（单元格值变化）置位；
+        // 加载时 load_from_file 内部调用 evaluate_sheet 已将各表置为脏，首帧会应用用户规则。
         if let Some(ref mut excel) = self.excel_data {
-            for sheet in &mut excel.sheets {
-                ExcelData::reapply_conditional_formatting(sheet);
-                let user_rules = self.cond_format_popup.rules.clone();
-                if !user_rules.is_empty() {
-                    ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
+            if self.cond_format_popup.rules != user_rules_before {
+                for sheet in &mut excel.sheets {
+                    sheet.cf_dirty = true;
+                }
+            }
+            if let Some(sheet) = excel.sheets.get_mut(self.current_sheet) {
+                if sheet.cf_dirty {
+                    ExcelData::reapply_conditional_formatting(sheet);
+                    if !self.cond_format_popup.rules.is_empty() {
+                        let user_rules = self.cond_format_popup.rules.clone();
+                        ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
+                    }
+                    sheet.cf_dirty = false;
                 }
             }
         }
