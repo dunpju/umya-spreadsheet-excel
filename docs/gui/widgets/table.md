@@ -12,8 +12,8 @@
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
-- **交互**：点击选中、双击编辑、右键上下文菜单、拖拽选择范围、键盘导航（Tab/方向键/Enter）。
-- **编辑与重算**：编辑输入框、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算。
+- **交互**：点击选中、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、键盘导航（Tab/方向键/Enter）。
+- **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
 ### 依赖
@@ -79,11 +79,12 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 **冻结区坐标参考系**：冻结区域在视口上位置固定（不随滚动变化），用 `viewport_rect.min` 作原点；非冻结区域随滚动，用表格内容坐标 `tl_x/tl_y`。`screen_to_cell` 与点击处理据此切换参考系。
 
-### 2.4 键盘导航（Tab / 方向键 / Enter）
+### 2.4 键盘导航（Tab / 方向键 / Enter / 键入即编辑）
 
 - **Tab / Shift+Tab**：编辑模式下保存并退出；非编辑模式下水平切换单元格，行末/行首自动换行。
 - **方向键**：上下左右移动选中单元格。
 - **Enter**：非编辑模式下进入编辑模式（设置 `just_entered_edit_mode` 标志，忽略同帧的 Enter，避免"进又出"）。
+- **键入即编辑（type-to-edit）**：选中单元格后**直接键入**即进入编辑模式，并以输入字符**替换**原内容（Excel 行为）。检测条件：`editing_cell.is_none() && selected_cell.is_some() && !validation_error_active && !context_menu.visible`，**且焦点在表格本身或无焦点**（`focused_id.is_none() || focused_id == Some(Id::new("table_interaction"))`）。表格交互区点击单元格后会 `request_focus`（见 §2.x interact），此时焦点持有者是表格交互区而非 TextEdit——它**不消费 `Event::Text`**，故可安全捕获；而公式栏/名称框/搜索框聚焦时焦点 id 不同则不触发（避免重复处理：egui 的 TextEdit 不会从事件流移除已处理的 `Event::Text`）。字符来源用 `Event::Text`（`input.events`），正确支持 IME/中文；触发后立即 `events.retain` 消费本帧所有 Text 事件，防止同帧新建的 TextEdit 获焦后二次插入。`Backspace`/`Delete` 走 `Event::Key`，不触发本逻辑（Delete 维持 viewer.rs 既有"清空"行为）。
 
 所有方向切换都**感知合并单元格**：进入合并区域时跳到其 `start_col/start_row`（或离开时用 `end_col`），实现"合并区域整体跳格"。
 
@@ -101,6 +102,10 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 6. **撤销信号**：写入成功后置 `*committed_edit = Some((edit_row, edit_col))`。本函数不直接接触私有的 `undo_stack`（见 [`viewer.md`](../../viewer.md) §2.5），而由调用方在返回后据此信号、配合 `original_cell_data` 重建编辑前快照入撤销栈。仅保存路径置位，Esc 取消/校验失败均不置位——天然区分「保存 vs 取消」。
 
 编辑过程中还有**实时重算**（`editing_cell.is_some() && edit_value != prev_display` 时），边输入边更新依赖公式，提供所见即所得体验。
+
+> **原位编辑（与 Excel 一致）**：编辑态不再叠加额外的输入框控件，而是用透明无边框的 `TextEdit` 直接在单元格原位置编辑（详见 §2.12）。为保证透明输入框下方不透出旧值造成"双重文字"，内容绘制遍会**跳过正在编辑的单元格**（`*editing_cell == Some((col, row))` 时 `continue`）；单元格背景（填充色）照常绘制并透过透明输入框显示。
+
+
 
 > **实时重算的副作用与撤销/取消的旧值来源**：实时重算会逐帧把 `edit_value` 写入 `cell.value`，因此到「提交时」`cell` 里已是新值——撤销与 Esc 取消的「编辑前旧值」**不能**取自提交时的当前 cell，而必须取自**进入编辑时**捕获的 `original_cell_data`（值/公式，编辑只改这两项）。据此：
 > - **Esc 取消**（TextEdit 路径，`!save_cell`）：用 `original_cell_data` 还原 `cell.value`/`formula` 并重算，否则会残留半成品。
@@ -152,15 +157,22 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 - **选中单元格**（`selected_cell`）：2px 蓝色 `rect_stroke`（`StrokeKind::Outside`）。合并单元格自动扩展到完整区域。冻结区/非冻结区用不同坐标参考系定位。保存屏幕矩形到 `selected_cell_rect` 返回（供数据有效性弹窗定位）。
 - **选中范围**（`selected_range`）：半透明蓝色背景 + 边框。由拖拽选择产生。
 
-### 2.12 编辑输入框
+### 2.12 原位编辑器（无缝编辑）
 
-`editing_cell` 非空且在可见范围内时，用 `ui.scope_builder(UiBuilder::new().max_rect(edit_rect), ...)` 在单元格位置叠加一个 `egui::TextEdit::singleline`：
+`editing_cell` 非空且在可见范围内时，用 `ui.scope_builder(UiBuilder::new().max_rect(edit_rect), ...)` 在单元格**整格矩形**上放一个 `egui::TextEdit::singleline`。编辑态视觉上**与 Excel 一致——无额外输入框/边框**，直接在单元格内显示文本与闪烁光标：
 
+- **透明无边框**：`.frame(egui::Frame::NONE.inner_margin(Margin { left: 4, right: 4, top: vpad, bottom: vpad }))`——去掉默认背景+边框，左右 4px 对齐常规 `painter.text` 的 4.0 偏移。单元格自身背景（填充色）透过透明输入框正常显示。
+- **字体/颜色/对齐与单元格一致**：从编辑单元格读出 `font_size`→`FontId`、`font_color`→`text_color`、`alignment`→经 `align2_to_hv` 拆成 `horizontal_align`/`vertical_align`，使编辑态文本与未编辑时位置/样式完全一致。
+- **垂直居中 + 撑满行高**：egui 的 `TextEdit` 单行高度恒为"一行文本高度"（**忽略 `min_size.y`**），默认会贴在单元格顶部。这里用对称垂直内边距 `vpad = (cell_height − line_height) / 2`（`line_height = ui.text_style_height(Body)`，clamp 进 `i8`）把单行文本在整格内**垂直居中**，并使 frame 高度 = `line_height + 2·vpad = cell_height`，即**输入框高度与单元格行高一致**。
+- **整格占位**：`edit_rect = (x, y, cell_width, cell_height)`（合并单元格时为合并尺寸），`.min_size(整格)` + `.clip_text(false)` 允许编辑时长文本右溢出（贴近 Excel）。
+- **避免双重文字**：因输入框透明，编辑期间内容绘制遍会跳过该单元格（见 §2.5），仅由 TextEdit 渲染 `edit_value`。
 - 自动聚焦、Ctrl+A 全选（通过 `TextEdit::load_state/store_state` 操纵光标）。
 - Enter 保存退出、Escape 取消、点击外部保存退出。
 - **Escape 取消会还原编辑前值**：因实时重算已把半成品写入 `cell.value`，Esc 路径（`!save_cell`）用 `original_cell_data` 回填 `value`/`formula` 并重算，避免残留；同时与保存路径区分——仅保存才置 `committed_edit` 触发撤销入栈。
 - **编辑模式下不触发单元格级 `Ctrl+Z`**：该守卫在 [`viewer.md`](../../viewer.md) §2.5 的全局 `Ctrl+Z` 处理处（`editing_cell.is_none()`），把 `Ctrl+Z` 留给输入框做文本内撤销，并避免弹出栈中无关动作。
 - 输入框在冻结覆盖层**之后**绘制，防止覆盖层遮挡。
+
+> 之所以仍使用 `TextEdit` widget（而非手写 painter 编辑器）：egui 中光标、文本选区、剪贴板、CJK IME 均由 `TextEdit` 提供，手写会丢失这些能力。把它做透明无边框并占满整格，即可达到"直接在单元格里编辑"的视觉效果，同时保留全部编辑能力。
 
 ### 2.13 性能相关处理汇总
 
@@ -321,6 +333,7 @@ flowchart LR
 | 函数 | 签名 | 功能 |
 |------|------|------|
 | `cell_display_text` | `<'a>(cell: &'a CellData) -> Cow<'a, str>` | 提取单元格显示文本；日期格式单元格把序列号转为日期字符串，否则借用 `cell.value`。用 `Cow` 避免克隆 |
+| `align2_to_hv` | `(a: egui::Align2) -> (egui::Align, egui::Align)` | 把单元格 `Align2` 拆成（水平, 垂直）两个 `Align`，供原位编辑器 `horizontal_align`/`vertical_align` 与 `painter.text` 对齐一致 |
 | `draw_comment_indicator` | `(painter: &egui::Painter, x: f32, y: f32, width: f32)` | 在单元格右上角绘制 ~7px 红色批注指示三角 |
 
 ### 4.3 内联闭包（定义于 `draw_table_content` 内）

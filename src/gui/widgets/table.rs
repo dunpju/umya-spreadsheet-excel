@@ -21,6 +21,24 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str> {
     Cow::Borrowed(&cell.value)
 }
 
+/// 把单元格对齐 `egui::Align2` 拆成 (水平, 垂直) 两个 `egui::Align`，
+/// 供原位编辑器（TextEdit）的 `horizontal_align`/`vertical_align` 与常规 `painter.text` 渲染保持一致。
+fn align2_to_hv(a: egui::Align2) -> (egui::Align, egui::Align) {
+    use egui::{Align, Align2};
+    match a {
+        Align2::LEFT_TOP      => (Align::Min,    Align::Min),
+        Align2::LEFT_CENTER   => (Align::Min,    Align::Center),
+        Align2::LEFT_BOTTOM   => (Align::Min,    Align::Max),
+        Align2::CENTER_TOP    => (Align::Center, Align::Min),
+        Align2::CENTER_CENTER => (Align::Center, Align::Center),
+        Align2::CENTER_BOTTOM => (Align::Center, Align::Max),
+        Align2::RIGHT_TOP     => (Align::Max,    Align::Min),
+        Align2::RIGHT_CENTER  => (Align::Max,    Align::Center),
+        Align2::RIGHT_BOTTOM  => (Align::Max,    Align::Max),
+    }
+}
+
+
 /// 在单元格右上角绘制红色批注指示三角（Comment indicator）
 fn draw_comment_indicator(painter: &egui::Painter, x: f32, y: f32, width: f32) {
     const SIZE: f32 = 7.0;
@@ -235,6 +253,8 @@ pub fn draw_table_content(
     let mut save_current_edit = false;
     let mut clear_current_edit = false;
     let mut enter_edit_mode = false;
+    // 键入即编辑（type-to-edit）：选中单元格后直接键入可进入编辑，并以输入文本替换原值
+    let mut type_to_edit_seed: Option<String> = None;
     let mut new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
 
@@ -503,6 +523,30 @@ pub fn draw_table_content(
             ui.input_mut(|i| i.consume_key(input.modifiers, egui::Key::Enter));
         }
     }
+
+    // 键入即编辑（type-to-edit）：选中单元格后直接键入字符即进入编辑，并以输入字符替换原内容。
+    // 仅当：非编辑态、有选中格、无数据有效性/右键弹窗，且焦点在表格本身（或无焦点）时触发。
+    // 表格交互区在点击单元格时会 request_focus（见下方 interact "table_interaction"），此时焦点持有者
+    // 是表格交互区而非 TextEdit（不消费 Event::Text），故可安全捕获；公式栏/名称框/搜索框聚焦时不触发
+    // ——它们会处理文本输入，且 egui 的 TextEdit 不会从事件流移除已处理的 Event::Text，放行会导致重复处理。
+    let focused_id = ui.ctx().memory(|m| m.focused());
+    let focus_allows_type_edit = focused_id.is_none()
+        || focused_id == Some(egui::Id::new("table_interaction"));
+    if editing_cell.is_none() && selected_cell.is_some() && !validation_error_active && !context_menu.visible
+        && focus_allows_type_edit
+    {
+        // 用 Event::Text（而非 Key）检测字符输入，正确支持 IME/中文。
+        let typed = input.events.iter().find_map(|ev| match ev {
+            egui::Event::Text(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        });
+        if let Some(s) = typed {
+            type_to_edit_seed = Some(s);
+            enter_edit_mode = true;
+            // 消费本帧所有 Text 事件：否则同一帧新建的 TextEdit 获焦后会再次插入该字符（重复输入）
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+        }
+    }
     
     // 执行状态更新（在借用之前完成）
     if save_current_edit {
@@ -575,22 +619,28 @@ pub fn draw_table_content(
                 };
                 
                 *editing_cell = Some((edit_col, edit_row));
-                *edit_value = sheet.get_cell(edit_row, edit_col)
-                    .map(|cell| {
-                        if !cell.formula.is_empty() {
-                            // 确保公式以 = 开头，使保存逻辑正确识别为公式
-                            let f = &cell.formula;
-                            if f.starts_with('=') {
-                                f.clone()
+                if let Some(seed) = type_to_edit_seed.take() {
+                    // 键入即编辑（type-to-edit）：以输入字符替换原内容
+                    *edit_value = seed;
+                } else {
+                    // Enter / 双击进入：保留原内容供编辑（有公式显示公式，否则显示值）
+                    *edit_value = sheet.get_cell(edit_row, edit_col)
+                        .map(|cell| {
+                            if !cell.formula.is_empty() {
+                                // 确保公式以 = 开头，使保存逻辑正确识别为公式
+                                let f = &cell.formula;
+                                if f.starts_with('=') {
+                                    f.clone()
+                                } else {
+                                    format!("={}", f)
+                                }
                             } else {
-                                format!("={}", f)
+                                cell_display_text(cell).into_owned()
                             }
-                        } else {
-                            cell_display_text(cell).into_owned()
-                        }
-                    })
-                    .unwrap_or_default();
-                // 保存原始单元格数据，用于校验失败时恢复
+                        })
+                        .unwrap_or_default();
+                }
+                // 保存原始单元格数据，用于校验失败/Esc 取消恢复与撤销快照重建
                 let orig = sheet.get_cell(edit_row, edit_col)
                     .map(|c| (c.value.clone(), c.formula.clone()))
                     .unwrap_or_default();
@@ -1073,6 +1123,12 @@ pub fn draw_table_content(
 
                     // 如果是合并单元格的非左上角部分，跳过绘制
                     if is_merged_part {
+                        continue;
+                    }
+
+                    // 编辑中的单元格：其内容由透明原位 TextEdit 负责渲染，
+                    // 跳过常规文本绘制，避免透出旧值造成"双重文字"（背景填充照常绘制）
+                    if *editing_cell == Some((col, row)) {
                         continue;
                     }
 
@@ -1811,25 +1867,45 @@ pub fn draw_table_content(
                     (get_col_width(edit_col), get_row_height(edit_row))
                 };
 
-                // 限制输入框尺寸，避免超出单元格
-                let input_width = (cell_width - 4.0).max(10.0);
-                let input_height = (cell_height - 6.0).max(16.0);
+                // 读取编辑单元格的字体/颜色/对齐，使原位编辑器与常规 painter.text 渲染一致
+                let (font_id, font_color, h_align, v_align) = match sheet.get_cell(edit_row, edit_col) {
+                    Some(c) => {
+                        let (h, v) = align2_to_hv(alignment_to_egui(&c.alignment));
+                        (
+                            c.font_size.map(|s| egui::FontId::proportional(s as f32)).unwrap_or_default(),
+                            c.font_color.map(|(r, g, b)| egui::Color32::from_rgb(r, g, b)).unwrap_or(egui::Color32::BLACK),
+                            h,
+                            v,
+                        )
+                    }
+                    None => (egui::FontId::default(), egui::Color32::BLACK, egui::Align::Min, egui::Align::Center),
+                };
 
                 // 保存编辑状态用于闭包
                 let mut save_cell = false;
                 let mut clear_edit = false;
 
-                // 创建输入框响应区域
+                // 原位编辑器：占满整格矩形，由 TextEdit 透明无边框地直接在单元格内编辑。
+                // egui 的 TextEdit 单行高度恒为"一行文本高度"（忽略 min_size.y），默认会贴在单元格顶部。
+                // 这里用对称的垂直内边距（vpad）把单行文本在整格内垂直居中，并使输入框高度撑满行高。
+                let line_height = ui.text_style_height(&egui::TextStyle::Body);
+                let vpad = (((cell_height - line_height) / 2.0).round() as i32).clamp(0, 127) as i8;
                 let edit_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x + 2.0, y + 2.0),
-                    egui::vec2(input_width, input_height)
+                    egui::Pos2::new(x, y),
+                    egui::vec2(cell_width, cell_height)
                 );
                 let builder = egui::UiBuilder::new().max_rect(edit_rect);
                 ui.scope_builder(builder, |ui| {
                         let text_edit = egui::TextEdit::singleline(edit_value)
-                            .font(egui::FontId::default())
-                            .desired_width(input_width)
-                            .min_size(egui::vec2(input_width, input_height));
+                            // 无框透明：去掉默认背景+边框；左右 4px 对齐 painter.text 偏移，上下 vpad 垂直居中并撑满行高
+                            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 4, right: 4, top: vpad, bottom: vpad }))
+                            .font(font_id)
+                            .text_color(font_color)
+                            .horizontal_align(h_align)
+                            .vertical_align(v_align)
+                            .desired_width(cell_width)
+                            .min_size(egui::vec2(cell_width, cell_height))
+                            .clip_text(false); // 编辑时长文本可右溢出，贴近 Excel
 
                         let response = ui.add(text_edit);
 
