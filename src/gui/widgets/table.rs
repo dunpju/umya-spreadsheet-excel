@@ -48,6 +48,8 @@ fn draw_comment_indicator(painter: &egui::Painter, x: f32, y: f32, width: f32) {
 /// * `editing_cell` - 当前正在编辑的单元格（可变引用）
 /// * `edit_value` - 当前编辑的值（可变引用）
 /// * `just_entered_edit_mode` - 是否刚进入编辑模式（用于忽略进入编辑时的Enter键）
+/// * `committed_edit` - 本帧成功提交（保存）的编辑单元格 `(row, col)`，仅保存路径写入；
+///   调用方据此把编辑入撤销栈（无值表示本帧无提交，或为取消/校验失败）
 /// 
 /// # 返回值
 /// 返回需要滚动到的目标矩形（用于键盘导航时自动滚动），如果没有则返回 None
@@ -62,6 +64,7 @@ pub fn draw_table_content(
     just_entered_edit_mode: &mut bool,
     validation_error: &mut Option<(String, String)>,
     original_cell_data: &mut Option<((u32, u32), String, String)>,
+    committed_edit: &mut Option<(u32, u32)>,
     context_menu: &mut crate::gui::viewer::ContextMenuState,
     dirty: &mut bool,
     drag_anchor: &mut Option<(u32, u32)>,
@@ -548,6 +551,8 @@ pub fn draw_table_content(
                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
                 }
                 *dirty = true;
+                // 标记本帧有一次成功提交，调用方据此把编辑入撤销栈
+                *committed_edit = Some((edit_row, edit_col));
             }
         }
     }
@@ -1911,8 +1916,31 @@ pub fn draw_table_content(
                         crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
                     }
                     *dirty = true;
+                    // 标记本帧有一次成功提交，调用方据此把编辑入撤销栈
+                    *committed_edit = Some((edit_row, edit_col));
                 }
                 if clear_edit {
+                    // Esc 取消（非保存）：编辑中的实时重算已把半成品写入 cell，
+                    // 用编辑入口捕获的 original_cell_data 还原编辑前的 value/formula
+                    if !save_cell {
+                        if let Some(((oc, or), orig_val, orig_fml)) = original_cell_data.clone() {
+                            let row = or;
+                            let col = oc;
+                            if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                                let cell = sheet.cells.entry((row, col))
+                                    .or_insert_with(CellData::default);
+                                cell.value = orig_val;
+                                cell.formula = orig_fml.clone();
+                                *dirty = true;
+                                if orig_fml.is_empty() {
+                                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], row, col);
+                                } else {
+                                    crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+                                }
+                            }
+                            *original_cell_data = None;
+                        }
+                    }
                     *editing_cell = None;
                     edit_value.clear();
                     *just_entered_edit_mode = false;

@@ -98,8 +98,13 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 3. **日期转换**：若单元格是日期格式，保存值经 `ExcelData::parse_date_string` 转回序列号字符串。
 4. **公式重算**：公式变更 → `evaluate_sheet`（全量）；值变更 → `evaluate_dependents(row, col)`（增量）。
 5. 置 `*dirty = true` 标记文件已修改。
+6. **撤销信号**：写入成功后置 `*committed_edit = Some((edit_row, edit_col))`。本函数不直接接触私有的 `undo_stack`（见 [`viewer.md`](../../viewer.md) §2.5），而由调用方在返回后据此信号、配合 `original_cell_data` 重建编辑前快照入撤销栈。仅保存路径置位，Esc 取消/校验失败均不置位——天然区分「保存 vs 取消」。
 
 编辑过程中还有**实时重算**（`editing_cell.is_some() && edit_value != prev_display` 时），边输入边更新依赖公式，提供所见即所得体验。
+
+> **实时重算的副作用与撤销/取消的旧值来源**：实时重算会逐帧把 `edit_value` 写入 `cell.value`，因此到「提交时」`cell` 里已是新值——撤销与 Esc 取消的「编辑前旧值」**不能**取自提交时的当前 cell，而必须取自**进入编辑时**捕获的 `original_cell_data`（值/公式，编辑只改这两项）。据此：
+> - **Esc 取消**（TextEdit 路径，`!save_cell`）：用 `original_cell_data` 还原 `cell.value`/`formula` 并重算，否则会残留半成品。
+> - **撤销快照**：调用方用「当前 cell 克隆 + 回填 `original_cell_data` 的 value/formula」重建编辑前 `CellData`。
 
 ### 2.6 视口虚拟渲染
 
@@ -153,6 +158,8 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 - 自动聚焦、Ctrl+A 全选（通过 `TextEdit::load_state/store_state` 操纵光标）。
 - Enter 保存退出、Escape 取消、点击外部保存退出。
+- **Escape 取消会还原编辑前值**：因实时重算已把半成品写入 `cell.value`，Esc 路径（`!save_cell`）用 `original_cell_data` 回填 `value`/`formula` 并重算，避免残留；同时与保存路径区分——仅保存才置 `committed_edit` 触发撤销入栈。
+- **编辑模式下不触发单元格级 `Ctrl+Z`**：该守卫在 [`viewer.md`](../../viewer.md) §2.5 的全局 `Ctrl+Z` 处理处（`editing_cell.is_none()`），把 `Ctrl+Z` 留给输入框做文本内撤销，并避免弹出栈中无关动作。
 - 输入框在冻结覆盖层**之后**绘制，防止覆盖层遮挡。
 
 ### 2.13 性能相关处理汇总
@@ -286,7 +293,7 @@ flowchart LR
 
 | 函数 | 签名 | 功能 | 参数 | 返回值 |
 |------|------|------|------|--------|
-| `draw_table_content` | `(ui, excel_data, current_sheet, selected_cell, selected_range, editing_cell, edit_value, just_entered_edit_mode, validation_error, original_cell_data, context_menu, dirty, drag_anchor, hidden_columns, hidden_rows) -> (Option<egui::Rect>, Option<egui::Rect>)` | 表格渲染与交互的**唯一公开入口**：处理键盘导航、点击/拖拽选择、编辑保存、虚拟渲染、冻结窗格、选中高亮，并返回滚动目标矩形与选中单元格屏幕矩形 | 见下方参数表 | `(scroll_to_rect, selected_cell_rect)` |
+| `draw_table_content` | `(ui, excel_data, current_sheet, selected_cell, selected_range, editing_cell, edit_value, just_entered_edit_mode, validation_error, original_cell_data, committed_edit, context_menu, dirty, drag_anchor, hidden_columns, hidden_rows) -> (Option<egui::Rect>, Option<egui::Rect>)` | 表格渲染与交互的**唯一公开入口**：处理键盘导航、点击/拖拽选择、编辑保存、虚拟渲染、冻结窗格、选中高亮，并返回滚动目标矩形与选中单元格屏幕矩形 | 见下方参数表 | `(scroll_to_rect, selected_cell_rect)` |
 
 #### `draw_table_content` 参数说明
 
@@ -301,7 +308,8 @@ flowchart LR
 | `edit_value` | `&mut String` | 编辑输入值 |
 | `just_entered_edit_mode` | `&mut bool` | 刚进入编辑模式标志（忽略同帧 Enter） |
 | `validation_error` | `&mut Option<(String, String)>` | 数据有效性错误 `(title, msg)`，存在时锁定交互 |
-| `original_cell_data` | `&mut Option<((u32,u32), String, String)>` | 编辑前原始数据（校验失败恢复用） |
+| `original_cell_data` | `&mut Option<((u32,u32), String, String)>` | 编辑前原始数据（校验失败恢复、Esc 取消还原、撤销快照重建共用） |
+| `committed_edit` | `&mut Option<(u32, u32)>` | 本帧成功提交（保存）的编辑单元格 `(row, col)`。仅两条保存路径在写入成功后置位；调用方据此把编辑入撤销栈。无值＝本帧无提交/取消/校验失败 |
 | `context_menu` | `&mut crate::gui::viewer::ContextMenuState` | 右键菜单状态 |
 | `dirty` | `&mut bool` | 文件已修改标记 |
 | `drag_anchor` | `&mut Option<(u32, u32)>` | 拖拽选择锚点 |

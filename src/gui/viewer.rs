@@ -856,7 +856,10 @@ impl eframe::App for ExcelViewer {
         // 主内容区域
         egui::CentralPanel::default().show_inside(ui, |ui| {
             // Ctrl+Z 撤销：在借用 excel_data 之前取出 undo action
-            let pending_undo = ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift)
+            // 编辑模式下不触发单元格级撤销：把 Ctrl+Z 留给输入框做文本内撤销，
+            // 并避免编辑时弹出栈中无关的撤销动作（如上一次清空）干扰当前编辑
+            let pending_undo = (ui.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift)
+                && self.editing_cell.is_none())
                 .then(|| self.take_undo()).flatten();
 
             if let Some(excel_data) = &mut self.excel_data {
@@ -1015,6 +1018,9 @@ impl eframe::App for ExcelViewer {
 
                 // 记录调用前的选中单元格，用于检测变化后清除选中范围
                 let prev_selected = self.selected_cell;
+                // 本帧成功提交（保存）的编辑单元格 (row, col)：由 draw_table_content 写入，
+                // 此处据此把编辑入撤销栈（无值＝本帧无提交 / 取消 / 校验失败）
+                let mut committed_edit: Option<(u32, u32)> = None;
 
                 // 冻结窗格布局：列标题固定顶部，行标题固定左侧
                 // 双向滚动区域（垂直+水平），替代嵌套 ScrollArea
@@ -1033,6 +1039,7 @@ impl eframe::App for ExcelViewer {
                             &mut self.just_entered_edit_mode,
                             &mut self.validation_error,
                             &mut self.original_cell_data,
+                            &mut committed_edit,
                             &mut self.context_menu,
                             &mut self.dirty,
                             &mut self.drag_anchor,
@@ -1162,6 +1169,34 @@ impl eframe::App for ExcelViewer {
                             }
                         }
                     });
+
+                    // 单元格编辑提交 → 入撤销栈（draw_table_content 经 committed_edit 通知本帧有一次成功保存）
+                    // 复用编辑入口捕获的 original_cell_data：编辑只改 value/formula，
+                    // 故"当前 cell 克隆 + 回填编辑前的 value/formula"即等价于编辑前快照（规避实时重算对 cell.value 的污染）
+                    if let Some(((oc, or), orig_val, orig_fml)) = committed_edit.and_then(|_| self.original_cell_data.clone()) {
+                        let row = or;
+                        let col = oc;
+                        if let Some(mut old) = excel_data.sheets.get(self.current_sheet)
+                            .and_then(|s| s.cells.get(&(row, col)))
+                            .cloned()
+                        {
+                            // 仅当 value/formula 确有变化才入栈，避免无操作占据撤销位
+                            if old.value != orig_val || old.formula != orig_fml {
+                                old.value = orig_val;
+                                old.formula = orig_fml;
+                                if self.undo_stack.len() >= MAX_UNDO_DEPTH {
+                                    self.undo_stack.remove(0);
+                                }
+                                self.undo_stack.push(UndoAction::CellChange {
+                                    sheet_index: self.current_sheet,
+                                    row,
+                                    col,
+                                    old_cell: Some(old),
+                                    old_selected: self.selected_cell,
+                                });
+                            }
+                        }
+                    }
 
                     // 绘制右键上下文菜单
                     if self.context_menu.visible {
