@@ -66,6 +66,19 @@ enum UndoAction {
     },
 }
 
+/// 填充柄（Fill Handle）拖拽提交信号：由 `draw_table_content` 在一次成功填充后写入出参 `committed_fill`，
+/// 调用方据此把填充入撤销栈（构造为 `UndoAction::RangeClear`，复用其回放：恢复 old_cells + 选区）。
+#[derive(Clone, Default)]
+pub struct FillCommit {
+    /// 被覆盖目标格的原始数据 `(row, col, 旧值)`
+    pub old_cells: Vec<(u32, u32, Option<crate::excel::reader::CellData>)>,
+    /// 填充前的活动单元格
+    pub old_selected: Option<(u32, u32)>,
+    /// 填充前的选中范围
+    pub old_range: Option<(u32, u32, u32, u32)>,
+}
+
+
 /// 右键菜单状态
 #[derive(Debug)]
 pub struct ContextMenuState {
@@ -194,6 +207,8 @@ pub struct ExcelViewer {
     add_column_pending: bool,
     /// 拖拽选择锚点（鼠标按下时的单元格），None 表示未在拖拽
     pub drag_anchor: Option<(u32, u32)>,
+    /// 填充柄拖拽源锚点（按下填充柄时的选区右下角格），None 表示未在填充拖拽
+    pub fill_drag_source: Option<(u32, u32)>,
     /// 插入完成后滚动到最右列，使新列出现在可视区域
     scroll_to_last_col: bool,
     /// 菜单栏触发的"添加行"操作标志
@@ -277,6 +292,7 @@ impl ExcelViewer {
             pending_save_path: None,
             save_failed: None,
             drag_anchor: None,
+            fill_drag_source: None,
             search_window: SearchWindowState::default(),
             convert_popup: ConvertPopupState::default(),
             alert_popup: AlertPopupState::load_from_file(),
@@ -1021,6 +1037,8 @@ impl eframe::App for ExcelViewer {
                 // 本帧成功提交（保存）的编辑单元格 (row, col)：由 draw_table_content 写入，
                 // 此处据此把编辑入撤销栈（无值＝本帧无提交 / 取消 / 校验失败）
                 let mut committed_edit: Option<(u32, u32)> = None;
+                // 填充柄提交信号：由 draw_table_content 在一次成功填充后写入
+                let mut committed_fill: Option<FillCommit> = None;
 
                 // 冻结窗格布局：列标题固定顶部，行标题固定左侧
                 // 双向滚动区域（垂直+水平），替代嵌套 ScrollArea
@@ -1043,6 +1061,8 @@ impl eframe::App for ExcelViewer {
                             &mut self.context_menu,
                             &mut self.dirty,
                             &mut self.drag_anchor,
+                            &mut self.fill_drag_source,
+                            &mut committed_fill,
                             &self.hidden_columns,
                             &self.hidden_rows,
                         );
@@ -1196,6 +1216,19 @@ impl eframe::App for ExcelViewer {
                                 });
                             }
                         }
+                    }
+
+                    // 填充柄提交 → 入撤销栈（复用 RangeClear：回放时恢复 old_cells + 选区 + 全表重算）
+                    if let Some(fc) = committed_fill {
+                        if self.undo_stack.len() >= MAX_UNDO_DEPTH {
+                            self.undo_stack.remove(0);
+                        }
+                        self.undo_stack.push(UndoAction::RangeClear {
+                            sheet_index: self.current_sheet,
+                            old_cells: fc.old_cells,
+                            old_selected: fc.old_selected,
+                            old_range: fc.old_range,
+                        });
                     }
 
                     // 绘制右键上下文菜单

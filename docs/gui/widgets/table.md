@@ -12,8 +12,8 @@
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
-- **交互**：点击选中、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、键盘导航（Tab/方向键/Enter）。
-- **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算。
+- **交互**：点击选中（绿色边框）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、键盘导航（Tab/方向键/Enter）。
+- **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.13）。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
 ### 依赖
@@ -154,8 +154,19 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 ### 2.11 选中高亮与选中范围
 
-- **选中单元格**（`selected_cell`）：2px 蓝色 `rect_stroke`（`StrokeKind::Outside`）。合并单元格自动扩展到完整区域。冻结区/非冻结区用不同坐标参考系定位。保存屏幕矩形到 `selected_cell_rect` 返回（供数据有效性弹窗定位）。
-- **选中范围**（`selected_range`）：半透明蓝色背景 + 边框。由拖拽选择产生。
+- **选中边框**：2px **绿色** `rect_stroke`（`Color32::from_rgb(0,176,80)`，`StrokeKind::Outside`）覆盖**整段选区**——优先取 `selected_range` 的包围盒，否则退化为 `selected_cell`（单格时展开到所在合并区域）。与 Excel 一致：填充/框选后绿框覆盖整段选区（含目标格），而非仅活动格。冻结区/非冻结区用不同坐标参考系定位。绿框矩形同时存入 `selected_cell_rect` 返回（供数据有效性弹窗定位）。
+- **选中范围内部柔光**（`selected_range`）：半透明蓝色背景（`0,112,192`，α=40）。仅作选区内部提示，外缘边框已统一由绿色选中框绘制（不再单独描边，避免双重边框）。由拖拽选择/填充产生。
+- **填充柄（Fill Handle）**：选区右下角 5×5px 深灰方块（`Color32::from_rgb(80,80,80)`，外缘紧贴绿色边框内沿），独立 `ui.interact`（`Id::new("fill_handle")`，`Sense::click_and_drag()`）+ `on_hover_cursor(CursorIcon::Crosshair)`。位置取**整段选区右下角**：`selected_range` 优先，否则 `selected_cell` 并展开到所在合并区域（故水平合并 `D9:E9` 的柄落在末端格 `E9` 右下角，而非锚点 `D9`）。拖拽它向相邻区域填充（见 §2.13）。
+
+### 2.13 填充柄与填充（Fill Handle）
+
+填充柄拖拽与表格主体的框选拖拽（`table_interaction`）用**独立 interact 分流**——egui 把一次拖拽路由到指针按下时命中的那个 interact，命中柄则走填充、否则走框选。
+
+- **状态**：`fill_drag_source: &mut Option<(u32,u32)>`（持久化在 viewer，跨帧）。`drag_started`（命中柄）时置选区右下角格；`drag_stopped` 时清空。
+- **预览**：拖拽中由指针→单元格（`cell_at`，冻结感知）算目标格，结合选区算预览范围（沿单轴：下/上/右/左），蓝色半透明（α=60/160）实时绘制。
+- **提交**：`drag_stopped` 写局部 `fill_request = Some((源选区, 目标格))`。**实际写 cell 在函数末尾**（`&mut excel_data` 可用区，仿实时重算块），避免与渲染段 `&sheet` 借用冲突：调 `crate::excel::fill::apply_fill` 写入（含格式复制 + 公式相对引用平移），按是否含公式选 `evaluate_sheet`/`evaluate_dependents` 重算，置 `dirty`，选区设为「源 ∪ 目标」（保持目标选中），并经出参 `committed_fill: &mut Option<FillCommit>` 通知调用方入撤销栈。
+- **撤销**：调用方（viewer）据 `committed_fill` 构造 `UndoAction::RangeClear`（恢复 `old_cells` + 选区 + 全表重算），Ctrl+Z 即撤销填充。
+
 
 ### 2.12 原位编辑器（无缝编辑）
 
@@ -325,6 +336,8 @@ flowchart LR
 | `context_menu` | `&mut crate::gui::viewer::ContextMenuState` | 右键菜单状态 |
 | `dirty` | `&mut bool` | 文件已修改标记 |
 | `drag_anchor` | `&mut Option<(u32, u32)>` | 拖拽选择锚点 |
+| `fill_drag_source` | `&mut Option<(u32, u32)>` | 填充柄拖拽源锚点（按下柄时的选区右下角格）；`None`＝非填充拖拽 |
+| `committed_fill` | `&mut Option<crate::gui::viewer::FillCommit>` | 填充柄提交信号：一次成功填充后写入，调用方据此构造 `UndoAction::RangeClear` 入撤销栈 |
 | `hidden_columns` | `&HashSet<u32>` | 隐藏列集合 |
 | `hidden_rows` | `&HashSet<u32>` | 隐藏行集合 |
 

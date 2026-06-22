@@ -2273,7 +2273,7 @@ fn extract_contains_text_from_formula(formula: &str) -> String {
     }
 
     /// Excel 序列号转公历日期 (year, month, day)
-    fn serial_to_date(serial: f64) -> (u32, u32, u32) {
+    pub fn serial_to_date(serial: f64) -> (u32, u32, u32) {
         // Excel serial 1 = 1900-01-01, 但 Excel 错误地认为 1900-02-29 存在 (serial=60)
         // Unix epoch 1970-01-01 = Excel serial 25569
         let unix_days = (serial as i64) - 25569;

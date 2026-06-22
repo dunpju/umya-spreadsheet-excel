@@ -863,6 +863,144 @@ pub fn adjust_formula_rows(formula: &str, threshold_row: u32, shift: i32) -> Str
     result
 }
 
+/// 按相对引用语义平移公式中的单元格引用（填充柄"复制公式"语义）。
+///
+/// 与 [`adjust_formula_columns`] / [`adjust_formula_rows`]（插入语义——绝对引用也随结构性移动）不同，
+/// 本函数用于**复制**公式：仅平移**相对**引用部分（无 `$` 前缀），绝对引用（`$A` / `$1`）保持不变。
+/// 字符串字面量内的内容原样跳过。
+///
+/// # 参数
+/// * `formula` - 公式字符串（可含前导 `=` / `@`）
+/// * `col_shift` - 列偏移（正数右移，负数左移）；仅作用于相对列
+/// * `row_shift` - 行偏移（正数下移，负数上移）；仅作用于相对行
+pub fn shift_formula_relative(formula: &str, col_shift: i32, row_shift: i32) -> String {
+    if formula.is_empty() || (col_shift == 0 && row_shift == 0) {
+        return formula.to_string();
+    }
+    let chars: Vec<char> = formula.chars().collect();
+    let mut result = String::with_capacity(formula.len());
+    let mut i = 0;
+
+    if i < chars.len() && chars[i] == '=' {
+        result.push('=');
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '@' {
+        result.push('@');
+        i += 1;
+    }
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // 字符串字面量：原样输出
+        if ch == '"' {
+            result.push(ch);
+            i += 1;
+            while i < chars.len() {
+                result.push(chars[i]);
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // 尝试匹配单元格引用：[$]?[A-Za-z]+[$]?[0-9]+
+        if ch == '$' || ch.is_ascii_alphabetic() {
+            let start = i;
+            let mut pos = i;
+            let mut col_abs = false;
+            let mut col_letters = String::new();
+            let mut row_abs = false;
+            let mut row_digits = String::new();
+
+            if pos < chars.len() && chars[pos] == '$' {
+                col_abs = true;
+                pos += 1;
+            }
+            let col_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
+                col_letters.push(chars[pos].to_ascii_uppercase());
+                pos += 1;
+            }
+            if pos == col_start || col_letters.is_empty() {
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            if pos < chars.len() && chars[pos] == '$' {
+                row_abs = true;
+                pos += 1;
+            }
+            let row_start = pos;
+            while pos < chars.len() && chars[pos].is_ascii_digit() {
+                row_digits.push(chars[pos]);
+                pos += 1;
+            }
+            if pos == row_start || row_digits.is_empty() {
+                for c in &chars[start..pos] {
+                    result.push(*c);
+                }
+                i = pos;
+                continue;
+            }
+
+            let col_num = match letter_to_col(&col_letters) {
+                Ok(c) => c,
+                Err(_) => {
+                    for c in &chars[start..pos] {
+                        result.push(*c);
+                    }
+                    i = pos;
+                    continue;
+                }
+            };
+            let row_num: u32 = match row_digits.parse() {
+                Ok(r) => r,
+                Err(_) => {
+                    for c in &chars[start..pos] {
+                        result.push(*c);
+                    }
+                    i = pos;
+                    continue;
+                }
+            };
+
+            // 仅相对部分平移：绝对（$）保持原值
+            let new_col = if col_abs {
+                col_num
+            } else {
+                ((col_num as i32) + col_shift).max(1) as u32
+            };
+            let new_row = if row_abs {
+                row_num
+            } else {
+                ((row_num as i32) + row_shift).max(1) as u32
+            };
+            let new_letters = crate::excel::reader::col_to_letter(new_col);
+
+            if col_abs {
+                result.push('$');
+            }
+            result.push_str(&new_letters);
+            if row_abs {
+                result.push('$');
+            }
+            result.push_str(&new_row.to_string());
+            i = pos;
+            continue;
+        }
+
+        result.push(ch);
+        i += 1;
+    }
+
+    result
+}
+
 // ========== 公式映射调整 ==========
 
 

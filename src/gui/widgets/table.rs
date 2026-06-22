@@ -86,6 +86,8 @@ pub fn draw_table_content(
     context_menu: &mut crate::gui::viewer::ContextMenuState,
     dirty: &mut bool,
     drag_anchor: &mut Option<(u32, u32)>,
+    fill_drag_source: &mut Option<(u32, u32)>,
+    committed_fill: &mut Option<crate::gui::viewer::FillCommit>,
     hidden_columns: &HashSet<u32>,
     hidden_rows: &HashSet<u32>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
@@ -257,6 +259,8 @@ pub fn draw_table_content(
     let mut type_to_edit_seed: Option<String> = None;
     let mut new_selected_cell: Option<(u32, u32)> = None;
     let editing_cell_for_save = editing_cell.clone();
+    // 填充柄拖拽意图：渲染段检测 drag_stopped 时写入 (源选区, 目标格)，末尾执行段消费
+    let mut fill_request: Option<((u32, u32, u32, u32), (u32, u32))> = None;
 
     // 用于存储滚动目标矩形
     let mut scroll_to_rect: Option<egui::Rect> = None;
@@ -1644,10 +1648,15 @@ pub fn draw_table_content(
             );
         }
 
-        // ========== 选中单元格高亮边框（最后绘制，确保在所有单元格之上） ==========
+        // ========== 选中高亮边框（最后绘制，确保在所有单元格之上） ==========
         if let Some((sel_col, sel_row)) = *selected_cell {
-            // 确定选中单元格的实际矩形（处理合并单元格）
-            let (start_col, start_row, end_col, end_row) = if let Some(merged_range) = sheet.get_merged_range(sel_col, sel_row) {
+            // 确定选中边框范围：优先 selected_range（整段选区，含填充/框选后的范围），
+            // 否则退化为 selected_cell（单格，展开到所在合并区域）。
+            // 关键：边框须覆盖整段选区，否则填充后目标格（如 E21）不会被绿框纳入。
+            let sr = *selected_range;
+            let (start_col, start_row, end_col, end_row) = if let Some((a, b, c, d)) = sr {
+                (a.min(c), b.min(d), a.max(c), b.max(d))
+            } else if let Some(merged_range) = sheet.get_merged_range(sel_col, sel_row) {
                 (merged_range.start_col, merged_range.start_row, merged_range.end_col, merged_range.end_row)
             } else {
                 (sel_col, sel_row, sel_col, sel_row)
@@ -1678,11 +1687,11 @@ pub fn draw_table_content(
             let sel_h = row_cumulative_height[end_row_idx]
                 - row_cumulative_height[(start_row as usize).min(row_cumulative_height.len() - 1)] - border_width;
 
-            // 绘制2px蓝色选中边框
+            // 绘制2px绿色选中边框：覆盖整段选区（selected_range）或单格（与 Excel 一致）
             painter.rect_stroke(
                 egui::Rect::from_min_size(egui::Pos2::new(sel_x, sel_y), egui::vec2(sel_w, sel_h)),
                 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 112, 192)),
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 176, 80)),
                 egui::StrokeKind::Outside,
             );
 
@@ -1722,19 +1731,127 @@ pub fn draw_table_content(
                 let end_row_idx = ((r_end_row as usize).saturating_add(1)).min(row_cumulative_height.len() - 1);
                 let rh = row_cumulative_height[end_row_idx]
                     - row_cumulative_height[(r_start_row as usize).min(row_cumulative_height.len() - 1)] - border_width;
-                // 绘制半透明蓝色背景
+                // 绘制半透明蓝色背景（仅作选区内部柔光；外缘边框已由上方绿色选中框统一绘制，避免双重描边）
                 painter.rect_filled(
                     egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
                     0.0,
                     egui::Color32::from_rgba_unmultiplied(0, 112, 192, 40),
                 );
-                // 绘制范围边框
-                painter.rect_stroke(
-                    egui::Rect::from_min_size(egui::Pos2::new(rx, ry), egui::vec2(rw, rh)),
-                    0.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 112, 192, 120)),
-                    egui::StrokeKind::Outside,
+            }
+        }
+
+        // ========== 填充柄（Fill Handle）：选中区右下角方块，拖拽填充 ==========
+        // 仅在选中单元格、非编辑、无弹窗时显示。填充拖拽用独立 interact（Id="fill_handle"），
+        // 与表格主体框选拖拽（Id="table_interaction"）分流——按下命中柄时走填充，否则走框选。
+        if selected_cell.is_some() && editing_cell.is_none() && !validation_error_active && !context_menu.visible {
+            // 选区范围（selected_range 优先；否则 selected_cell 当 1×1，并展开到所在合并区域，
+            // 使水平合并单元格的填充柄落在合并区域末端格的右下角——如 D9:E9 落在 E9 而非 D9）
+            let sr = *selected_range; // Option<(u32,u32,u32,u32)>（Copy）
+            let (es_c0, es_r0, es_c1, es_r1) = if let Some((a, b, c, d)) = sr {
+                (a.min(c), b.min(d), a.max(c), b.max(d))
+            } else {
+                let (c, r) = (*selected_cell).unwrap();
+                if let Some(mr) = sheet.get_merged_range(c, r) {
+                    (mr.start_col, mr.start_row, mr.end_col, mr.end_row)
+                } else {
+                    (c, r, c, r)
+                }
+            };
+
+            // 单元格范围 → 屏幕矩形（冻结感知，复用选中范围的坐标算法）
+            let range_rect = |c0: u32, r0: u32, c1: u32, r1: u32| -> Option<egui::Rect> {
+                let cwi = |c: u32| (c as usize).min(col_cumulative_width.len() - 1);
+                let rhi = |r: u32| (r as usize).min(row_cumulative_height.len() - 1);
+                let x = if c0 <= fc {
+                    viewport_rect.min.x + col_cumulative_width[cwi(c0)]
+                } else {
+                    tl_x + border_width + col_cumulative_width[cwi(c0)]
+                };
+                let y = if r0 <= fr {
+                    viewport_rect.min.y + row_cumulative_height[rhi(r0)]
+                } else {
+                    tl_y + border_width + row_cumulative_height[rhi(r0)]
+                };
+                let c1i = ((c1 as usize).saturating_add(1)).min(col_cumulative_width.len() - 1);
+                let r1i = ((r1 as usize).saturating_add(1)).min(row_cumulative_height.len() - 1);
+                let w = col_cumulative_width[c1i] - col_cumulative_width[cwi(c0)] - border_width;
+                let h = row_cumulative_height[r1i] - row_cumulative_height[rhi(r0)] - border_width;
+                if w <= 0.0 || h <= 0.0 {
+                    None
+                } else {
+                    Some(egui::Rect::from_min_size(egui::Pos2::new(x, y), egui::vec2(w, h)))
+                }
+            };
+
+            // 指针 → 单元格（冻结感知）
+            let cell_at = |pos: egui::Pos2| -> Option<(u32, u32)> {
+                let in_fl = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_ft = pos.y < viewport_rect.min.y + frozen_top_height;
+                let rel_x = if in_fl { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
+                let rel_y = if in_ft { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
+                let ci = col_cumulative_width.partition_point(|&w| w <= rel_x);
+                let ri = row_cumulative_height.partition_point(|&h| h <= rel_y);
+                let col = if ci > 1 { ci as u32 - 1 } else { return None };
+                let row = if ri > 0 { ri as u32 - 1 } else { return None };
+                if col > 0 && row > 0 { Some((col, row)) } else { None }
+            };
+
+            // 填充柄矩形：贴在选区右下角内侧
+            if let Some(sel_rect) = range_rect(es_c0, es_r0, es_c1, es_r1) {
+                let hs = 5.0; // 柄边长（5×5px）
+                let handle_rect = egui::Rect::from_min_size(
+                    egui::Pos2::new(sel_rect.max.x - hs, sel_rect.max.y - hs),
+                    egui::vec2(hs, hs),
                 );
+                let handle_resp =
+                    ui.interact(handle_rect, egui::Id::new("fill_handle"), egui::Sense::click_and_drag());
+                let handle_resp = handle_resp.on_hover_cursor(egui::CursorIcon::Crosshair);
+                // 深灰填充柄（盖在绿色边框右下角）
+                painter.rect_filled(handle_rect, 1.0, egui::Color32::from_rgb(80, 80, 80));
+
+                if handle_resp.drag_started() {
+                    *fill_drag_source = Some((es_c1, es_r1));
+                }
+
+                // 填充拖拽中：算预览范围并绘制蓝色半透明
+                if fill_drag_source.is_some() && (handle_resp.dragged() || handle_resp.drag_started()) {
+                    if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if let Some((tcol, trow)) = cell_at(pos) {
+                            let (pc0, pr0, pc1, pr1) = if trow > es_r1 {
+                                (es_c0, es_r1 + 1, es_c1, trow)
+                            } else if trow < es_r0 {
+                                (es_c0, trow, es_c1, es_r0.saturating_sub(1))
+                            } else if tcol > es_c1 {
+                                (es_c1 + 1, es_r0, tcol, es_r1)
+                            } else if tcol < es_c0 {
+                                (tcol, es_r0, es_c0.saturating_sub(1), es_r1)
+                            } else {
+                                (0, 0, 0, 0) // 目标在源内：无预览
+                            };
+                            if pc0 <= pc1 && pr0 <= pr1 {
+                                if let Some(pr_rect) = range_rect(pc0, pr0, pc1, pr1) {
+                                    painter.rect_filled(pr_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 112, 192, 60));
+                                    painter.rect_stroke(
+                                        pr_rect,
+                                        0.0,
+                                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 112, 192, 160)),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 拖拽结束：记录填充意图（实际写 cell 在函数末尾 &mut excel_data 段执行）
+                if handle_resp.drag_stopped() && fill_drag_source.is_some() {
+                    if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if let Some((tcol, trow)) = cell_at(pos) {
+                            fill_request = Some(((es_c0, es_r0, es_c1, es_r1), (tcol, trow)));
+                        }
+                    }
+                    *fill_drag_source = None;
+                }
             }
         }
 
@@ -2077,6 +2194,36 @@ pub fn draw_table_content(
         }
     }
     
+    // 填充柄拖拽提交：执行填充（写 cell + 复制格式）、重算、保持目标区域选中、通知撤销
+    if let Some(((sc0, sr0, sc1, sr1), (tcol, trow))) = fill_request {
+        let prev_selected = *selected_cell;
+        let prev_range = *selected_range;
+        let (old_cells, has_formula) = if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+            crate::excel::fill::apply_fill(sheet, (sc0, sr0, sc1, sr1), (tcol, trow))
+        } else {
+            (Vec::new(), false)
+        };
+        if !old_cells.is_empty() {
+            if has_formula {
+                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+            } else {
+                for (r, c, _) in &old_cells {
+                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], *r, *c);
+                }
+            }
+            *dirty = true;
+            // 填充后选区 = 源 ∪ 目标（保持目标区域选中，活动格为源左上）
+            *selected_cell = Some((sc0, sr0));
+            *selected_range = Some((sc0.min(tcol), sr0.min(trow), sc1.max(tcol), sr1.max(trow)));
+            // 撤销信号：调用方据此构造 RangeClear 入栈（恢复 old_cells + 选区）
+            *committed_fill = Some(crate::gui::viewer::FillCommit {
+                old_cells,
+                old_selected: prev_selected,
+                old_range: prev_range,
+            });
+        }
+    }
+
     // 返回（滚动目标矩形, 选中单元格屏幕矩形）
     (scroll_to_rect, selected_cell_rect)
 }
