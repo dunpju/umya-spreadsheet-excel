@@ -1799,8 +1799,11 @@ pub fn draw_table_content(
             // 填充柄矩形：贴在选区右下角内侧
             if let Some(sel_rect) = range_rect(es_c0, es_r0, es_c1, es_r1) {
                 let hs = 5.0; // 柄边长（5×5px）
+                // 绿框为 2px + StrokeKind::Outside（画在选区外侧 [max, max+2]）。
+                // 柄外移 2px（=绿框厚度），外缘与绿框外拐角(max+2)对齐——横跨绿框线（[max-3,max+2]：
+                // 3px 在格内、2px 压住绿框），呈 Excel 式"压在拐角"。
                 let handle_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(sel_rect.max.x - hs, sel_rect.max.y - hs),
+                    egui::Pos2::new(sel_rect.max.x - hs + 2.0, sel_rect.max.y - hs + 2.0),
                     egui::vec2(hs, hs),
                 );
                 let handle_resp =
