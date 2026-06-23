@@ -294,7 +294,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 |------|------|----------|----------|
 | 设置面板「插入配置」 | 配置 → 插入配置 | `Window`（无标题栏，420 宽，居中） | 列配置/行配置两个页签 |
 | 搜索配置 | 配置 → 搜索配置 | `Window`（420 宽） | 列筛选/行筛选页签，保存写 yaml |
-| 搜索窗口 | 搜索 → 搜索 | 非模态 `Window`（520 宽，可折叠） | 详见 `search.md` |
+| 搜索窗口 | 搜索 → 搜索 | 非模态 `Window`（520 宽，可折叠） | 详见 [`search.md`](gui/widgets/search.md) |
 | 右键菜单 | 表格右键 | `Area`（Foreground） | 220 宽，外部点击/Escape 关闭 |
 | 保存失败提示框 | 保存 `Err`（按钮 / Ctrl+S） | `Window`（Foreground，居中） | 红底红边，文案"保存失败!请检查{路径}文件是否被占用打开"，"知道了"关闭 |
 | 确认弹窗 | 插入列/清空 | `Window`（Foreground，fixed_pos） | 首帧 established 后才检测外部点击 |
@@ -476,7 +476,7 @@ Ctrl+S（dirty&&!saving&&有数据）/ 名称框"💾 保存" ──► save_req
 ### 5.5 搜索 / 筛选流（隐藏集合驱动渲染）
 
 ```
-搜索窗口（draw_search_window，详见 search.md）
+搜索窗口（draw_search_window，详见 gui/widgets/search.md）
    ├─ execute_multi_column_search ──► hidden_columns   // 列筛选
    └─ execute_row_search           ──► hidden_rows     // 行筛选
         │
