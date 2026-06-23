@@ -2,7 +2,7 @@
 
 > 本文档基于 `viewer.rs`（约 2148 行）源码梳理，系统阐述 GUI 主模块的定位与依赖、
 > 核心类型与控制流、视觉布局、事件交互，以及关键数据流转路径。配套阅读：
-> 搜索组件见 [`search.md`](./search.md)。
+> 搜索组件见 [`search.md`](gui/widgets/search.md)。
 
 ---
 
@@ -53,7 +53,7 @@
 
 > `viewer.rs` 仍被其它 GUI 文件**反向依赖**（共享状态类型）：`ContextMenuState` 在此定义并被
 > `table.rs` 引用。**配置相关类型（`SettingsPanelState` / `SettingsPage` / `SearchPage`）及其 UI 已
-> 迁移至独立模块 [`gui/widgets/config.rs`](./config.md)**，`menu_bar.rs` 经 `config` 模块引用它们。
+> 迁移至独立模块 [`gui/widgets/config.rs`](gui/widgets/config.md)**，`menu_bar.rs` 经 `config` 模块引用它们。
 
 ---
 
@@ -65,10 +65,10 @@
 |------|------|------|
 | `ExcelViewer` | struct（`App` 实现者） | 应用全部状态的"上帝对象"，实现 `eframe::App` |
 | `ContextMenuState` | struct | 右键菜单 + 插入/清空确认弹窗的状态（位置、计数、复制选项、确认动作） |
-| `SettingsPanelState` | struct | **已迁移至 [`config.rs`](./config.md)**（插入配置 + 搜索配置 + YAML 持久化） |
+| `SettingsPanelState` | struct | **已迁移至 [`config.rs`](gui/widgets/config.md)**（插入配置 + 搜索配置 + YAML 持久化） |
 | `UndoAction` | enum（私有） | 撤销操作的三粒度：`FullSnapshot` / `CellChange` / `RangeClear` |
 | `ContextAction` | enum | 右键菜单动作：插行/插列（上下左右）/ 清空 / 向四方选中 |
-| `SettingsPage` / `SearchPage` | enum | **已迁移至 [`config.rs`](./config.md)**：设置面板 / 搜索配置弹窗页签 |
+| `SettingsPage` / `SearchPage` | enum | **已迁移至 [`config.rs`](gui/widgets/config.md)**：设置面板 / 搜索配置弹窗页签 |
 | `LoadState` | enum（`gui::state`） | `Idle` / `Loading` / `Success(ExcelData)` / `Failed(String)` |
 
 ### 2.2 状态容器 `ExcelViewer`
@@ -107,7 +107,7 @@
 
 ### 2.4 配置面板 —— 已迁移至 `config.rs`
 
-> **配置相关代码已抽离到独立模块 [`gui/widgets/config.rs`](./config.md)：**
+> **配置相关代码已抽离到独立模块 [`gui/widgets/config.rs`](gui/widgets/config.md)：**
 > `SettingsPanelState` / `SettingsPage` / `SearchPage`（结构与枚举）、插入配置 / 搜索配置弹窗的**全部
 > UI 渲染**（选项卡切换、列/行配置、保存功能、保存成功提示）、以及 YAML 持久化（`load_from_file` /
 > `save_to_file` / `save_search_column`，读写 `~/.MyExcel/my-excel.yaml`）。
@@ -115,7 +115,7 @@
 > `viewer.rs` 现仅：① 持有 `ExcelViewer.settings_panel: SettingsPanelState` 字段（类型来自 `config` 模块，
 > 通过 `use crate::gui::widgets::...SettingsPanelState` 引入）；② 在 `ui()` 中以一行调用
 > `draw_settings_panel(&ctx, &mut self.settings_panel)` / `draw_search_config_dialog(...)` 渲染。
-> 类型定义、字段、持久化方法、UI 布局与交互详见 [`config.md`](./config.md)。
+> 类型定义、字段、持久化方法、UI 布局与交互详见 [`config.md`](gui/widgets/config.md)。
 
 > 与 `search.rs` 的衔接：`search.rs` 读取 `search.column`/`search.row` 解析为筛选项；`config` 模块的搜索
 > 配置弹窗负责**编辑并落盘**这两个键。二者通过同一份 yaml 文件解耦。
@@ -286,7 +286,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 - 公式栏：选中格变化时自动回填；用户回车写入 `pending_formula_save`（见 §5.3）。
 - 保存按钮：`dirty` 时蓝色高亮、可点击，**悬停显示 `Ctrl+S` 快捷键提示**（`on_hover_text`）；点击或按 `Ctrl+S` 均触发保存（见 §5.4）。
 
-> 名称框组件的完整结构、状态字段、交互逻辑与视觉布局详见 [`names_box.md`](./names_box.md)。
+> 名称框组件的完整结构、状态字段、交互逻辑与视觉布局详见 [`names_box.md`](gui/widgets/names_box.md)。
 
 ### 3.3 浮层窗口清单
 
@@ -518,4 +518,4 @@ Ctrl+S（dirty&&!saving&&有数据）/ 名称框"💾 保存" ──► save_req
 
 *文档基于 `src/gui/viewer.rs`（截至当前 master）及其直接依赖（`widgets/table.rs`、`names_box.rs`、
 `menu_bar.rs`、`gui::state`、`license`）整理。表格内部渲染、搜索/筛选、预警、转换、条件格式的细节
-分别见 `table.rs` / [`search.md`](./search.md) / 各组件源码注释。*
+分别见 `table.rs` / [`search.md`](gui/widgets/search.md) / 各组件源码注释。*

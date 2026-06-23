@@ -276,7 +276,7 @@ impl LicenseManager {
 
 ### 6.1 存储位置（多点分散 + 差异化加密 + 交叉校验，防删文件 / 防批量定位绕过）
 
-试用状态 + 授权码分散写入 **5 个存储点**（文件 + 注册表），每点用**分位置密钥**加密 → 各点密文互不相同，单点删除无法绕过，按内容批量定位也失效。实现见 [`src/license/store.rs`](../src/license/store.rs) 与 [`src/license/crypto.rs`](../src/license/crypto.rs)。
+试用状态 + 授权码分散写入 **5 个存储点**（文件 + 注册表），每点用**分位置密钥**加密 → 各点密文互不相同，单点删除无法绕过，按内容批量定位也失效。实现见 [`src/license/store.rs`](../../../src/license/store.rs) 与 [`src/license/crypto.rs`](../../../src/license/crypto.rs)。
 
 | tag | 位置 | 值名 | 说明 |
 |---|---|---|---|

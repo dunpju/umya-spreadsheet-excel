@@ -1,8 +1,8 @@
 # 菜单栏组件分析（`src/gui/widgets/menu_bar.rs`）
 
 > 本文档基于 `menu_bar.rs`（约 153 行）源码梳理，阐述顶部菜单栏的职责、函数结构、菜单层级、
-> 状态管理、已注释功能与改进建议。配套阅读：主模块 [`viewer.md`](./viewer.md)、
-> 配置模块 [`config.md`](./config.md)。
+> 状态管理、已注释功能与改进建议。配套阅读：主模块 [`viewer.md`](../../viewer.md)、
+> 配置模块 [`config.md`](config.md)。
 
 ---
 
@@ -195,7 +195,7 @@ pub fn draw_menu_bar(
 - **设计意图**：打开「插入配置」面板并定位到列配置/行配置页签（编辑合并参数与复制选项）。
 - **当前状态**：停用。根因是底层的合并配置功能**未完成**——`SettingsPanelState` 的合并参数
   （`merge_col_*`/`merge_row_*`）虽有 UI 与 yaml 持久化，但**无任何消费者**（详见
-  [`config.md`](./config.md) 及前序分析）。配套地，导入已收窄为只引入 `SettingsPanelState`
+  [`config.md`](config.md) 及前序分析）。配套地，导入已收窄为只引入 `SettingsPanelState`
   （`SettingsPage` 被移除，恢复时需加回，已在源码注释中标注）。
 
 ### 5.2 「条件格式」菜单项
@@ -244,4 +244,4 @@ pub fn draw_menu_bar(
 ---
 
 *文档基于 `src/gui/widgets/menu_bar.rs`（截至当前，含「插入配置」「条件格式」已注释的状态）整理。
-各菜单项实际触发的浮层渲染与命令消费逻辑见 [`viewer.md`](./viewer.md) §2.7 控制流。*
+各菜单项实际触发的浮层渲染与命令消费逻辑见 [`viewer.md`](../../viewer.md) §2.7 控制流。*

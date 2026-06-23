@@ -1,7 +1,7 @@
 # 名称框组件分析（`src/gui/widgets/names_box.rs`）
 
 > 本文档基于 `names_box.rs`（约 303 行）源码梳理，阐述名称框 + 公式栏组件的架构设计、类型/函数分工、
-> 与外部的交互、视觉布局与交互逻辑。配套阅读：主模块 [`viewer.md`](./viewer.md)。
+> 与外部的交互、视觉布局与交互逻辑。配套阅读：主模块 [`viewer.md`](../../viewer.md)。
 >
 > **术语说明**：本组件是 **egui 立即模式（immediate-mode）** 实现，**不存在** `NamesBox` /
 > `NamesBoxBuilder` 这类保留式 Widget 结构，也不直接持有 `Spreadsheet` / `Worksheet` 对象。下文按
@@ -212,7 +212,7 @@ egui 是立即模式 GUI：**没有跨帧存活的 Widget 对象**，每帧由 `
 
 > **重要澄清（请先读这段）**：`names_box.rs` 中的"保存"按钮**本身几乎不含业务逻辑**——点击只置一个布尔
 > 标志 `save_clicked=true` 并随返回值传出。真正的保存流程（路径生成、授权校验、异步落盘、错误回收、
-> 状态更新）**全部位于 [`viewer.rs`](../../src/gui/viewer.rs)**，详见 [`viewer.md`](./viewer.md) §5.4
+> 状态更新）**全部位于 [`viewer.rs`](../../src/gui/viewer.rs)**，详见 [`viewer.md`](../../viewer.md) §5.4
 > 保存流。此外，该按钮保存的是**整个工作簿文件**，与"Excel 名称管理器"**没有任何交互**——名称管理在本
 > 项目中是未实现的占位功能（见 §3.6）。下文按「触发 / 校验 / 保存流程 / 界面状态 / 异常处理 / 名称管理
 > 交互」逐项**如实**说明，对代码中并不存在的部分会明确标注，避免误导。
@@ -345,8 +345,8 @@ save_requested = true ──（excel_data 借用释放后）──► start_asyn
                           （"保存失败!请检查{output}文件是否被占用打开"，"知道了"关闭）
 ```
 
-> 与 [`viewer.md`](./viewer.md) 的关系：本节只刻画按钮侧的"发信号"；授权门面、日期后缀路径、异步通道、
-> 状态栏反馈的完整实现均在 `viewer.rs`，详见 [`viewer.md`](./viewer.md) §2.6（方法表）与 §5.4（保存流）。
+> 与 [`viewer.md`](../../viewer.md) 的关系：本节只刻画按钮侧的"发信号"；授权门面、日期后缀路径、异步通道、
+> 状态栏反馈的完整实现均在 `viewer.rs`，详见 [`viewer.md`](../../viewer.md) §2.6（方法表）与 §5.4（保存流）。
 
 ---
 
@@ -373,4 +373,4 @@ save_requested = true ──（excel_data 借用释放后）──► start_asyn
 ---
 
 *文档基于 `src/gui/widgets/names_box.rs`（截至当前 master）整理。名称框的调用上下文（选中格、公式显示值、
-`dirty`、保存/跳转消费）见 [`viewer.md`](./viewer.md) §2.7 控制流与 §5 数据流。*
+`dirty`、保存/跳转消费）见 [`viewer.md`](../../viewer.md) §2.7 控制流与 §5 数据流。*
