@@ -163,7 +163,7 @@ if std::env::args().any(|a| a == "--stores") {
     std::process::exit(0);
 }
 ```
-打印本机**实际解析后**的全部存储点路径后 `exit(0)`，**不进入 GUI**。对应 `docs/License.md` §6.1「存储位置」的全部 5 个存储点（home / config / local / regmain / regclsid），把文档占位符解析为当前系统的真实绝对路径：
+打印本机**实际解析后**的全部存储点路径后 `exit(0)`，**不进入 GUI**。对应 `docs/gui/widgets/license.md` §6.1「存储位置」的全部 5 个存储点（home / config / local / regmain / regclsid），把文档占位符解析为当前系统的真实绝对路径：
 
 | 行 | 占位符（doc 写法） | 实际解析 |
 |---|---|---|
@@ -326,4 +326,4 @@ fn chrono_free_timestamp() -> String {
 
 ---
 
-*文档基于 `src/main.rs`（截至当前 master）及其直接依赖模块的实现整理。涉及授权存储/指纹的细节，请参阅 `docs/License.md` 与 `src/license/` 源码注释。*
+*文档基于 `src/main.rs`（截至当前 master）及其直接依赖模块的实现整理。涉及授权存储/指纹的细节，请参阅 `docs/gui/widgets/license.md` 与 `src/license/` 源码注释。*

@@ -144,7 +144,7 @@ fn console_print(msg: &str) {
 #[cfg(feature = "diagnostic")]
 /// 构建 `--stores` 输出：列出本机实际解析后的全部存储点路径。
 ///
-/// 对应 `docs/License.md` §6.1「存储位置」的全部 5 个存储点（home / config / local /
+/// 对应 `docs/gui/widgets/license.md` §6.1「存储位置」的全部 5 个存储点（home / config / local /
 /// regmain / regclsid），把文档占位符（`~` / `{config_dir}` / `{data_local_dir}` /
 /// `{uuid}` / `{dir_uuid(...)}`）解析为当前系统的实际绝对路径后输出（非占位符字面量）。
 /// 路径派生原语与 `license::store::all_stores()` 一致，故输出即程序实际读写的路径。
@@ -283,7 +283,7 @@ mod tests {
 
     /// `--stores` 必须把占位符（`~` / `{config_dir}` / `{data_local_dir}` / `{uuid}` /
     /// `{dir_uuid(...)}`）解析为当前系统的**实际绝对路径**，而非输出占位符字面量
-    ///（5 个存储点：home / config / local / regmain / regclsid，见 docs/License.md §6.1）。
+    ///（5 个存储点：home / config / local / regmain / regclsid，见 docs/gui/widgets/license.md §6.1）。
     #[cfg(feature = "diagnostic")]
     #[test]
     fn format_store_paths_resolves_real_paths() {
