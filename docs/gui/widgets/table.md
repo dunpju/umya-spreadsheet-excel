@@ -167,7 +167,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 - **状态**：`fill_drag_source: &mut Option<(u32,u32)>`（持久化在 viewer，跨帧）。`drag_started`（命中柄）时置选区右下角格；`drag_stopped` 时清空。
 - **预览**：拖拽中由指针→单元格（`cell_at`，冻结感知）算目标格，结合选区算预览范围（沿单轴：下/上/右/左），蓝色半透明（α=60/160）实时绘制。
-- **提交**：`drag_stopped` 写局部 `fill_request = Some((源选区, 目标格))`。**实际写 cell 在函数末尾**（`&mut excel_data` 可用区，仿实时重算块），避免与渲染段 `&sheet` 借用冲突：调 `crate::excel::fill::apply_fill` 写入（含格式复制 + 公式相对引用平移），按是否含公式选 `evaluate_sheet`/`evaluate_dependents` 重算，置 `dirty`，选区设为「源 ∪ 目标」（保持目标选中），并经出参 `committed_fill: &mut Option<FillCommit>` 通知调用方入撤销栈。
+- **提交**：`drag_stopped` 写局部 `fill_request = Some((源选区, 目标格))`。**实际写 cell 在函数末尾**（`&mut excel_data` 可用区，仿实时重算块），避免与渲染段 `&sheet` 借用冲突：调 `crate::excel::fill::apply_fill` 写入（含格式复制 + 公式相对引用平移），按是否含公式选 `evaluate_sheet`/`evaluate_dependents` 重算，置 `dirty`，选区设为「源 ∪ 目标」（保持目标选中），并经出参 `committed_fill: &mut Option<FillCommit>` 通知调用方入撤销栈。`apply_fill` 为**合并单元格感知**（源/目标序列折叠合并区域，避免合并体空格被当作 0 污染步长；详见 [`excel/fill`](../../excel/fill.md) §2「合并单元格感知」）——例如合并格 AJ1:AK1（值 18）向右填充会得到 19 而非错误地变成 -18。
 - **撤销**：调用方（viewer）据 `committed_fill` 构造 `UndoAction::RangeClear`（恢复 `old_cells` + 选区 + 全表重算），Ctrl+Z 即撤销填充。
 
 

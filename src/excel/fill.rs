@@ -35,6 +35,17 @@ fn cell_number(c: Option<&CellData>) -> Option<f64> {
     c.and_then(|cell| cell.raw_number.or_else(|| cell.value.trim().parse::<f64>().ok()))
 }
 
+/// 该格是否是某个合并区域的"非左上角"部分。
+///
+/// 合并区域的值只存于左上角；其余部分（非左上角）无独立数据。填充时必须跳过这些位置，
+/// 否则它们会被当作空/0 污染序列步长推断——例如 AJ1:AK1 合并值 18 水平填充时，
+/// AK1（非左上角）为空→0，使序列 [18,0] 步长算成 -18，结果错误地变成 -18。
+fn is_merged_part(sheet: &SheetData, col: u32, row: u32) -> bool {
+    sheet
+        .get_merged_range(col, row)
+        .map_or(false, |mr| !mr.is_top_left(col, row))
+}
+
 /// 清理浮点累加噪声（如 0.1+0.2 的尾数）并格式化为字符串。
 fn format_num(v: f64) -> String {
     if !v.is_finite() {
@@ -177,9 +188,17 @@ pub fn apply_fill(
 
     for lane in lanes {
         // 源格坐标（自然序：垂直=top→bottom，水平=left→right），元素为 (col, row)
-        let src_pos: Vec<(u32, u32)> = match axis {
-            Axis::Vertical => (sr0..=sr1).map(|r| (lane, r)).collect(),
-            Axis::Horizontal => (sc0..=sc1).map(|c| (c, lane)).collect(),
+        // 合并单元格感知：跳过合并区域的非左上角格（其值由左上角代表），使一个合并单元格
+        // 在源序列中只占一个元素——否则合并体内的空格会被当作 0，污染序列步长推断
+        // （如 AJ1:AK1 合并值 18 水平填充，AK1 空格→0 使步长算成 -18、结果变成 -18）。
+        let src_pos: Vec<(u32, u32)> = {
+            let raw: Vec<(u32, u32)> = match axis {
+                Axis::Vertical => (sr0..=sr1).map(|r| (lane, r)).collect(),
+                Axis::Horizontal => (sc0..=sc1).map(|c| (c, lane)).collect(),
+            };
+            raw.into_iter()
+                .filter(|&(c, r)| !is_merged_part(sheet, c, r))
+                .collect()
         };
         let n = src_pos.len();
         let src_data: Vec<Option<CellData>> = src_pos
@@ -203,11 +222,17 @@ pub fn apply_fill(
         }
 
         // 目标格坐标（从源边缘向外，j=0 最近源），元素为 (col, row)
-        let target_pos: Vec<(u32, u32)> = match (axis, forward) {
-            (Axis::Vertical, true) => ((sr1 + 1)..=trow).map(|r| (lane, r)).collect(),
-            (Axis::Vertical, false) => (trow..sr0).rev().map(|r| (lane, r)).collect(),
-            (Axis::Horizontal, true) => ((sc1 + 1)..=tcol).map(|c| (c, lane)).collect(),
-            (Axis::Horizontal, false) => (tcol..sc0).rev().map(|c| (c, lane)).collect(),
+        // 合并单元格感知：只在合并区域左上角写入，跳过非左上角（不向合并体内塞隐藏值）。
+        let target_pos: Vec<(u32, u32)> = {
+            let raw: Vec<(u32, u32)> = match (axis, forward) {
+                (Axis::Vertical, true) => ((sr1 + 1)..=trow).map(|r| (lane, r)).collect(),
+                (Axis::Vertical, false) => (trow..sr0).rev().map(|r| (lane, r)).collect(),
+                (Axis::Horizontal, true) => ((sc1 + 1)..=tcol).map(|c| (c, lane)).collect(),
+                (Axis::Horizontal, false) => (tcol..sc0).rev().map(|c| (c, lane)).collect(),
+            };
+            raw.into_iter()
+                .filter(|&(c, r)| !is_merged_part(sheet, c, r))
+                .collect()
         };
 
         // 数值序列（数字/日期用）
@@ -531,5 +556,36 @@ mod tests {
         let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 3));
         assert_eq!(val(&s, 1, 2), "hello");
         assert_eq!(val(&s, 1, 3), "hello");
+    }
+
+    #[test]
+    fn fill_merged_horizontal_not_polluted_by_empty_body() {
+        // 报修用例（等价缩小列号）：A1:B1 合并值 18，向右填充到 C1（C1:D1 合并）应为 19。
+        // 修复前：B1（合并非左上角）无数据→被当作 0，序列 [18,0] 步长算成 -18，结果 C1=-18。
+        let mut s = empty_sheet();
+        s.merged_cells
+            .push(crate::excel::reader::CellRange::new(1, 1, 1, 2)); // A1:B1
+        s.merged_cells
+            .push(crate::excel::reader::CellRange::new(1, 3, 1, 4)); // C1:D1
+        s.rebuild_merge_index();
+        put(&mut s, 1, 1, "18"); // A1（合并左上角）= 18
+        // 源选区 A1:B1，向右填到 C1
+        let _ = apply_fill(&mut s, (1, 1, 2, 1), (3, 1));
+        assert_eq!(val(&s, 3, 1), "19"); // C1 = 19（递增 +1）
+    }
+
+    #[test]
+    fn fill_merged_target_writes_only_top_left() {
+        // 拖到目标合并格的非左上角（D1，属 C1:D1 合并）时，只在左上角 C1 写入，D1 不被塞值。
+        let mut s = empty_sheet();
+        s.merged_cells
+            .push(crate::excel::reader::CellRange::new(1, 1, 1, 2)); // A1:B1
+        s.merged_cells
+            .push(crate::excel::reader::CellRange::new(1, 3, 1, 4)); // C1:D1
+        s.rebuild_merge_index();
+        put(&mut s, 1, 1, "18");
+        let _ = apply_fill(&mut s, (1, 1, 2, 1), (4, 1)); // 拖到 D1（C1:D1 的非左上角）
+        assert_eq!(val(&s, 3, 1), "19"); // C1（左上角）= 19
+        assert_eq!(val(&s, 4, 1), ""); // D1 不被写入
     }
 }
