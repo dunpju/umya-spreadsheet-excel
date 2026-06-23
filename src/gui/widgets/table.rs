@@ -39,7 +39,7 @@ fn align2_to_hv(a: egui::Align2) -> (egui::Align, egui::Align) {
 }
 
 
-/// 在单元格右上角绘制红色批注指示三角（Comment indicator）
+/// 在单元格右上角绘制橘红色批注指示三角（Comment indicator）
 fn draw_comment_indicator(painter: &egui::Painter, x: f32, y: f32, width: f32) {
     const SIZE: f32 = 7.0;
     let points = vec![
