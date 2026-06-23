@@ -2,7 +2,7 @@
 
 > 本文档基于 `viewer.rs`（约 2148 行）源码梳理，系统阐述 GUI 主模块的定位与依赖、
 > 核心类型与控制流、视觉布局、事件交互，以及关键数据流转路径。配套阅读：
-> 搜索组件见 [`search.md`](gui/widgets/search.md)。
+> 搜索组件见 [`search.md`](widgets/search.md)。
 
 ---
 
@@ -53,7 +53,7 @@
 
 > `viewer.rs` 仍被其它 GUI 文件**反向依赖**（共享状态类型）：`ContextMenuState` 在此定义并被
 > `table.rs` 引用。**配置相关类型（`SettingsPanelState` / `SettingsPage` / `SearchPage`）及其 UI 已
-> 迁移至独立模块 [`gui/widgets/config.rs`](gui/widgets/config.md)**，`menu_bar.rs` 经 `config` 模块引用它们。
+> 迁移至独立模块 [`gui/widgets/config.rs`](widgets/config.md)**，`menu_bar.rs` 经 `config` 模块引用它们。
 
 ---
 
@@ -67,10 +67,10 @@
 | `ContextMenuState` | struct | 右键菜单 + 插入/清空确认弹窗的状态（位置、计数、复制选项、确认动作） |
 | `FillCommit` | struct（pub） | 填充柄拖拽提交信号：`old_cells` + `old_selected` + `old_range`，由 `draw_table_content` 写入出参 |
 | `PasteCommit` | struct（pub） | 粘贴提交信号：`old_cells` + `old_selected` + `old_range`，由 `draw_table_content` 写入出参 |
-| `SettingsPanelState` | struct | **已迁移至 [`config.rs`](gui/widgets/config.md)**（插入配置 + 搜索配置 + YAML 持久化） |
+| `SettingsPanelState` | struct | **已迁移至 [`config.rs`](widgets/config.md)**（插入配置 + 搜索配置 + YAML 持久化） |
 | `UndoAction` | enum（私有） | 撤销操作的三粒度：`FullSnapshot` / `CellChange` / `RangeClear` |
 | `ContextAction` | enum | 右键菜单动作：插行/插列（上下左右）/ 清空 / 向四方选中 |
-| `SettingsPage` / `SearchPage` | enum | **已迁移至 [`config.rs`](gui/widgets/config.md)**：设置面板 / 搜索配置弹窗页签 |
+| `SettingsPage` / `SearchPage` | enum | **已迁移至 [`config.rs`](widgets/config.md)**：设置面板 / 搜索配置弹窗页签 |
 | `LoadState` | enum（`gui::state`） | `Idle` / `Loading` / `Success(ExcelData)` / `Failed(String)` |
 
 ### 2.2 状态容器 `ExcelViewer`
@@ -109,7 +109,7 @@
 
 ### 2.4 配置面板 —— 已迁移至 `config.rs`
 
-> **配置相关代码已抽离到独立模块 [`gui/widgets/config.rs`](gui/widgets/config.md)：**
+> **配置相关代码已抽离到独立模块 [`gui/widgets/config.rs`](widgets/config.md)：**
 > `SettingsPanelState` / `SettingsPage` / `SearchPage`（结构与枚举）、插入配置 / 搜索配置弹窗的**全部
 > UI 渲染**（选项卡切换、列/行配置、保存功能、保存成功提示）、以及 YAML 持久化（`load_from_file` /
 > `save_to_file` / `save_search_column`，读写 `~/.MyExcel/my-excel.yaml`）。
@@ -117,7 +117,7 @@
 > `viewer.rs` 现仅：① 持有 `ExcelViewer.settings_panel: SettingsPanelState` 字段（类型来自 `config` 模块，
 > 通过 `use crate::gui::widgets::...SettingsPanelState` 引入）；② 在 `ui()` 中以一行调用
 > `draw_settings_panel(&ctx, &mut self.settings_panel)` / `draw_search_config_dialog(...)` 渲染。
-> 类型定义、字段、持久化方法、UI 布局与交互详见 [`config.md`](gui/widgets/config.md)。
+> 类型定义、字段、持久化方法、UI 布局与交互详见 [`config.md`](widgets/config.md)。
 
 > 与 `search.rs` 的衔接：`search.rs` 读取 `search.column`/`search.row` 解析为筛选项；`config` 模块的搜索
 > 配置弹窗负责**编辑并落盘**这两个键。二者通过同一份 yaml 文件解耦。
@@ -290,7 +290,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 - 公式栏：选中格变化时自动回填；用户回车写入 `pending_formula_save`（见 §5.3）。
 - 保存按钮：`dirty` 时蓝色高亮、可点击，**悬停显示 `Ctrl+S` 快捷键提示**（`on_hover_text`）；点击或按 `Ctrl+S` 均触发保存（见 §5.4）。
 
-> 名称框组件的完整结构、状态字段、交互逻辑与视觉布局详见 [`names_box.md`](gui/widgets/names_box.md)。
+> 名称框组件的完整结构、状态字段、交互逻辑与视觉布局详见 [`names_box.md`](widgets/names_box.md)。
 
 ### 3.3 浮层窗口清单
 
@@ -298,7 +298,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 |------|------|----------|----------|
 | 设置面板「插入配置」 | 配置 → 插入配置 | `Window`（无标题栏，420 宽，居中） | 列配置/行配置两个页签 |
 | 搜索配置 | 配置 → 搜索配置 | `Window`（420 宽） | 列筛选/行筛选页签，保存写 yaml |
-| 搜索窗口 | 搜索 → 搜索 | 非模态 `Window`（520 宽，可折叠） | 详见 [`search.md`](gui/widgets/search.md) |
+| 搜索窗口 | 搜索 → 搜索 | 非模态 `Window`（520 宽，可折叠） | 详见 [`search.md`](widgets/search.md) |
 | 右键菜单 | 表格右键 | `Area`（Foreground） | 220 宽，外部点击/Escape 关闭 |
 | 保存失败提示框 | 保存 `Err`（按钮 / Ctrl+S） | `Window`（Foreground，居中） | 红底红边，文案"保存失败!请检查{路径}文件是否被占用打开"，"知道了"关闭 |
 | 确认弹窗 | 插入列/清空 | `Window`（Foreground，fixed_pos） | 首帧 established 后才检测外部点击 |
@@ -365,7 +365,7 @@ let col = col_cumulative_width.partition_point(|&w| w <= click_x) - 1;
 | `Tab` / `Shift+Tab` | 编辑态下提交并右/左移；非编辑态下右/左移选中；同步更新 `shift_click_anchor` |
 | `Enter` | 非编辑态进入编辑；编辑态提交 |
 | `Ctrl+C` | 非编辑态下复制选中单元格/范围 → TSV → 系统剪贴板（`ctx.copy_text()`） |
-| `Ctrl+V` | 非编辑态下粘贴（`Event::Paste`）→ 解析 TSV → 写入 cells → 重算 → 更新选区（详见 [`table.md`](gui/widgets/table.md) §2.17） |
+| `Ctrl+V` | 非编辑态下粘贴（`Event::Paste`）→ 解析 TSV → 写入 cells → 重算 → 更新选区（详见 [`table.md`](widgets/table.md) §2.17） |
 
 **全局快捷键**（`ui()` 顶层，`ui.input`）：
 
@@ -527,4 +527,4 @@ Ctrl+S（dirty&&!saving&&有数据）/ 名称框"💾 保存" ──► save_req
 
 *文档基于 `src/gui/viewer.rs`（截至当前 master）及其直接依赖（`widgets/table.rs`、`names_box.rs`、
 `menu_bar.rs`、`gui::state`、`license`）整理。表格内部渲染、搜索/筛选、预警、转换、条件格式的细节
-分别见 `table.rs` / [`search.md`](gui/widgets/search.md) / 各组件源码注释。*
+分别见 `table.rs` / [`search.md`](widgets/search.md) / 各组件源码注释。*

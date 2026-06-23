@@ -1,7 +1,7 @@
 # 菜单栏组件分析（`src/gui/widgets/menu_bar.rs`）
 
 > 本文档基于 `menu_bar.rs`（约 153 行）源码梳理，阐述顶部菜单栏的职责、函数结构、菜单层级、
-> 状态管理、已注释功能与改进建议。配套阅读：主模块 [`viewer.md`](../../viewer.md)、
+> 状态管理、已注释功能与改进建议。配套阅读：主模块 [`viewer.md`](../viewer.md)、
 > 配置模块 [`config.md`](config.md)。
 
 ---
@@ -244,4 +244,4 @@ pub fn draw_menu_bar(
 ---
 
 *文档基于 `src/gui/widgets/menu_bar.rs`（截至当前，含「插入配置」「条件格式」已注释的状态）整理。
-各菜单项实际触发的浮层渲染与命令消费逻辑见 [`viewer.md`](../../viewer.md) §2.7 控制流。*
+各菜单项实际触发的浮层渲染与命令消费逻辑见 [`viewer.md`](../viewer.md) §2.7 控制流。*

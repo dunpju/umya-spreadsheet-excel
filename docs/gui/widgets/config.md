@@ -1,7 +1,7 @@
 # 配置模块分析（`src/gui/widgets/config.rs`）
 
 > 本文档描述从 `viewer.rs` 抽离的配置模块：类型定义、YAML 持久化、两个配置弹窗的 UI 渲染。
-> 配套阅读：主模块见 [`viewer.md`](../../viewer.md)，搜索功能见 [`search.md`](search.md)。
+> 配套阅读：主模块见 [`viewer.md`](../viewer.md)，搜索功能见 [`search.md`](search.md)。
 
 ---
 
@@ -263,4 +263,4 @@ settings_panel.show_search_dialog = true;
 ---
 
 *文档基于 `src/gui/widgets/config.rs`（本次新增）及其调用方 `viewer.rs`、`menu_bar.rs` 整理。
-主界面整体布局与控制流见 [`viewer.md`](../../viewer.md)。*
+主界面整体布局与控制流见 [`viewer.md`](../viewer.md)。*
