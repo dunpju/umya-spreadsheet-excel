@@ -194,7 +194,7 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 - **锚点（`shift_click_anchor`）**：最后一次**非 Shift**点击或键盘导航（Tab/方向键）时的活动单元格。持久化在 viewer，跨帧保持。
 - **Shift+点击行为**：
   - 活动单元格（`selected_cell`）**保持不变**（与 Excel 一致）。
-  - `selected_range` 设为锚点与目标格的包围盒：`(min_col, min_row, max_col, max_row)`。
+  - 锚点和目标格**分别**通过 `sheet.get_merged_range` 展开到各自合并单元格的完整边界，再取包围盒——与拖拽选择的 `expand_to_merge` 逻辑一致（如横向两两合并场景下，选中 C7（属于 BC7 合并）后 Shift+点击 D9（属于 DE9 合并），选区自动扩展为 B7:E9）。
   - 若 Shift+点击锚点本身，清除 `selected_range`（退回单格选中）。
   - 若无锚点（首次操作），视为普通点击。
   - Shift+点击**不触发双击编辑**（仅普通点击才进入编辑模式）。

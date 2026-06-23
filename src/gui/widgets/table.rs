@@ -878,10 +878,23 @@ pub fn draw_table_content(
                                     // Shift+点击锚点本身：清除选区范围
                                     *selected_range = None;
                                 } else {
-                                    let sr_col = ac.min(col);
-                                    let sr_row = ar.min(row);
-                                    let er_col = ac.max(col);
-                                    let er_row = ar.max(row);
+                                    // 展开锚点和目标格到各自合并单元格的完整边界，取并集
+                                    // 与拖拽选择的 expand_to_merge 逻辑一致，确保合并单元格
+                                    // 不会被部分选中（如 BC7 + DE9 → B7:E9）
+                                    let (asc, asr, aec, aer) = if let Some(mr) = sheet.get_merged_range(ac, ar) {
+                                        (mr.start_col, mr.start_row, mr.end_col, mr.end_row)
+                                    } else {
+                                        (ac, ar, ac, ar)
+                                    };
+                                    let (csc, csr, cec, cer) = if let Some(mr) = sheet.get_merged_range(col, row) {
+                                        (mr.start_col, mr.start_row, mr.end_col, mr.end_row)
+                                    } else {
+                                        (col, row, col, row)
+                                    };
+                                    let sr_col = asc.min(csc);
+                                    let sr_row = asr.min(csr);
+                                    let er_col = aec.max(cec);
+                                    let er_row = aer.max(cer);
                                     *selected_range = Some((sr_col, sr_row, er_col, er_row));
                                 }
                             } else {
