@@ -76,7 +76,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 | `get_cell_global_rect(col, row)` | 返回单元格屏幕矩形；**合并单元格返回完整合并区域矩形**（用于滚动定位） |
 | `screen_to_cell(pos)` | 屏幕坐标 → (col, row)，冻结区感知坐标参考系切换 |
 | `expand_to_merge(col, row)` | 把单元格扩展到所在合并区域的 (start_col/row, end_col/row) 边界 |
-| `draw_frozen_cell(painter, col, row, x, y)` | 在指定位置绘制冻结区单元格（背景+内容+边框，复用一次 `get_cell`） |
+| `draw_frozen_cell(painter, col, row, x, y)` | 在指定位置绘制冻结区单元格（背景+内容+边框，复用一次 `get_cell`；编辑中的单元格跳过文本，见 §2.10） |
 
 **冻结区坐标参考系**：冻结区域在视口上位置固定（不随滚动变化），用 `viewport_rect.min` 作原点；非冻结区域随滚动，用表格内容坐标 `tl_x/tl_y`。`screen_to_cell` 与点击处理据此切换参考系。
 
@@ -104,7 +104,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 编辑过程中还有**实时重算**（`editing_cell.is_some() && edit_value != prev_display` 时），边输入边更新依赖公式，提供所见即所得体验。
 
-> **原位编辑（与 Excel 一致）**：编辑态不再叠加额外的输入框控件，而是用透明无边框的 `TextEdit` 直接在单元格原位置编辑（详见 §2.13）。为保证透明输入框下方不透出旧值造成"双重文字"，内容绘制遍会**跳过正在编辑的单元格**（`*editing_cell == Some((col, row))` 时 `continue`）；单元格背景（填充色）照常绘制并透过透明输入框显示。
+> **原位编辑（与 Excel 一致）**：编辑态不再叠加额外的输入框控件，而是用透明无边框的 `TextEdit` 直接在单元格原位置编辑（详见 §2.13）。为保证透明输入框下方不透出旧值造成"双重文字"，内容绘制遍会**跳过正在编辑的单元格的文本**：主网格 content pass 在 `*editing_cell == Some((col, row))` 时 `continue`；冻结区渲染器 `draw_frozen_cell` 同样以 `cell_data_for_text = None` 跳过文本（保留背景/边框/批注指示器）。两处都必须跳过——曾因 `draw_frozen_cell` 遗漏此跳过，导致**冻结行/列**单元格双击编辑时旧值与新编辑器叠加成重影，已修复。单元格背景（填充色）照常绘制并透过透明输入框显示。
 
 
 
@@ -153,6 +153,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 ```
 
 `draw_frozen_cell` 闭包复用：只调用一次 `get_merged_range`、一次 `get_cell`，避免重复 HashMap 查询。合并宽高同样用累积数组差值计算。
+**编辑中的单元格**：`draw_frozen_cell` 保留背景/边框/批注指示器绘制，但跳过文本（`let cell_data_for_text = if *editing_cell == Some((col,row)) { None } else { cell_data }`，文本块用 `cell_data_for_text`），由透明原位 TextEdit 渲染——避免冻结区单元格编辑时旧值与新编辑器叠加成重影（与主网格 content pass 的跳过一致；见 §2.5/§2.13）。
 
 ### 2.11 选中高亮与选中范围
 
@@ -178,7 +179,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 - **字体/颜色/对齐与单元格一致**：从编辑单元格读出 `font_size`→`FontId`、`font_color`→`text_color`、`alignment`→经 `align2_to_hv` 拆成 `horizontal_align`/`vertical_align`，使编辑态文本与未编辑时位置/样式完全一致。
 - **垂直居中 + 撑满行高**：egui 的 `TextEdit` 单行高度恒为"一行文本高度"（**忽略 `min_size.y`**），默认会贴在单元格顶部。这里用对称垂直内边距 `vpad = (cell_height − line_height) / 2`（`line_height = ui.text_style_height(Body)`，clamp 进 `i8`）把单行文本在整格内**垂直居中**，并使 frame 高度 = `line_height + 2·vpad = cell_height`，即**输入框高度与单元格行高一致**。
 - **整格占位**：`edit_rect = (x, y, cell_width, cell_height)`（合并单元格时为合并尺寸），`.min_size(整格)` + `.clip_text(false)` 允许编辑时长文本右溢出（贴近 Excel）。
-- **避免双重文字**：因输入框透明，编辑期间内容绘制遍会跳过该单元格（见 §2.5），仅由 TextEdit 渲染 `edit_value`。
+- **避免双重文字**：因输入框透明，编辑期间内容绘制遍（主网格 content pass 与冻结区 `draw_frozen_cell`）都会跳过该单元格的文本，仅由 TextEdit 渲染 `edit_value`；背景/边框照常绘制并透过透明输入框显示（详见 §2.5）。
 - 自动聚焦、Ctrl+A 全选（通过 `TextEdit::load_state/store_state` 操纵光标）。
 - Enter 保存退出、Escape 取消、点击外部保存退出。
 - **Escape 取消会还原编辑前值**：因实时重算已把半成品写入 `cell.value`，Esc 路径（`!save_cell`）用 `original_cell_data` 回填 `value`/`formula` 并重算，避免残留；同时与保存路径区分——仅保存才置 `committed_edit` 触发撤销入栈。
@@ -442,7 +443,7 @@ flowchart LR
 | `get_cell_global_rect` | `(col, row) -> egui::Rect` | 单元格屏幕矩形；合并单元格返回完整区域 |
 | `screen_to_cell` | `(pos: egui::Pos2) -> Option<(u32,u32)>` | 屏幕坐标 → (col,row)，冻结区感知 |
 | `expand_to_merge` | `(col, row) -> (u32,u32,u32,u32)` | 扩展到所在合并区域边界 |
-| `draw_frozen_cell` | `(painter, col, row, x, y)` | 在 (x,y) 绘制冻结区单元格（背景+内容+边框） |
+| `draw_frozen_cell` | `(painter, col, row, x, y)` | 在 (x,y) 绘制冻结区单元格（背景+内容+边框；编辑中的单元格跳过文本，避免重影） |
 
 ### 4.4 自定义类型
 

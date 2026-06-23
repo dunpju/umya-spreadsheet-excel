@@ -1392,6 +1392,12 @@ pub fn draw_table_content(
             // 获取单元格数据（只查一次，避免后续重复 get_cell）
             let cell_data = sheet.get_cell(row, col);
 
+            // 编辑中的单元格：背景/边框/批注指示器照常绘制，但跳过文本绘制——
+            // 文本由透明原位 TextEdit 渲染，若此处再画旧文本会与新编辑器叠加形成"重影"
+            // （与主网格 content pass 的 `*editing_cell == Some((col,row))` 跳过逻辑一致）。
+            let is_editing = *editing_cell == Some((col, row));
+            let cell_data_for_text = if is_editing { None } else { cell_data };
+
             // 获取背景色
             let bg_color = cell_data.and_then(|c| c.background_color)
                 .map(|(r, g, b)| egui::Color32::from_rgb(r, g, b))
@@ -1420,8 +1426,8 @@ pub fn draw_table_content(
                         egui::StrokeKind::Outside,
                     );
 
-                    // 绘制内容
-                    if let Some(cell) = cell_data {
+                    // 绘制内容（编辑中的单元格跳过文本，避免重影）
+                    if let Some(cell) = cell_data_for_text {
                         let display = cell_display_text(cell);
                         if !display.is_empty() {
                             let egui_align = alignment_to_egui(&cell.alignment);
@@ -1457,8 +1463,8 @@ pub fn draw_table_content(
                     egui::StrokeKind::Outside,
                 );
 
-                // 绘制内容（复用 cell_data 避免重复 get_cell 查询）
-                if let Some(cell) = cell_data {
+                // 绘制内容（复用 cell_data_for_text；编辑中的单元格跳过文本避免重影）
+                if let Some(cell) = cell_data_for_text {
                     let display = cell_display_text(cell);
                     if !display.is_empty() {
                         let egui_align = alignment_to_egui(&cell.alignment);
