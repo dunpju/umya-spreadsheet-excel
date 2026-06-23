@@ -92,7 +92,6 @@ pub fn draw_table_content(
     hidden_rows: &HashSet<u32>,
     shift_click_anchor: &mut Option<(u32, u32)>,
     committed_paste: &mut Option<crate::gui::viewer::PasteCommit>,
-    copied_cells: &mut Option<String>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -557,10 +556,16 @@ pub fn draw_table_content(
         }
     }
 
-    // ========== Ctrl+C: 复制选中单元格（非编辑模式） ==========
-    // 将选中单元格/范围的值序列化为 TSV 格式，写入系统剪贴板
-    if input.modifiers.ctrl && !input.modifiers.shift && input.key_pressed(egui::Key::C)
-        && editing_cell.is_none() && selected_cell.is_some() && !validation_error_active
+    // ========== Event::Copy: 复制选中单元格（非编辑模式、无文本框焦点）==========
+    // 关键：egui-winit 在 Ctrl+C 时会拦截该组合键并生成 Event::Copy（而非 Event::Key{C}），
+    // 因此 input.key_pressed(Key::C) 对 Ctrl+C 永远为 false，不能用它检测复制。
+    // 必须监听 Event::Copy。仅当无 TextEdit 获焦时处理（否则让公式栏/名称框自行复制选中文本）。
+    let copy_requested = input.events.iter().any(|ev| matches!(ev, egui::Event::Copy));
+    if copy_requested
+        && editing_cell.is_none()
+        && selected_cell.is_some()
+        && !validation_error_active
+        && !ui.ctx().text_edit_focused()
     {
         if let Some(sheet) = excel_data.get_sheet(current_sheet) {
             let (sc, sr, ec, er) = if let Some((c0, r0, c1, r1)) = *selected_range {
@@ -590,36 +595,27 @@ pub fn draw_table_content(
                     }
                     tsv.push('\n');
                 }
-                ui.ctx().copy_text(tsv.clone());
-                // 同步存储到内部剪贴板缓冲（解决 Event::Paste 在无文本焦点时不触发的问题）
-                *copied_cells = Some(tsv);
+                // 写入系统剪贴板。egui-winit 在 Ctrl+V 时读取系统剪贴板生成 Event::Paste，
+                // 从而构成「复制写剪贴板 → 粘贴读剪贴板」的完整闭环（支持跨应用复制粘贴）。
+                ui.ctx().copy_text(tsv);
             }
         }
-        ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::C));
+        // 消费 Event::Copy，防止后续控件二次处理
+        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Copy)));
     }
 
-    // ========== Ctrl+V / Event::Paste: 粘贴到选中单元格（非编辑模式） ==========
-    // 优先使用内部剪贴板缓冲（copied_cells），其次尝试 Event::Paste（编辑态下由 TextEdit 触发）。
-    // 根因：winit/egui 后端仅在存在活跃 TextEdit 焦点时才生成 Event::Paste，
-    // 普通表格交互区域有焦点但无 TextEdit 时按 Ctrl+V 不会产生 Paste 事件。
-    if editing_cell.is_none() && selected_cell.is_some() && !validation_error_active {
-        // 优先级 1：直接检测 Ctrl+V 按键，从内部缓冲读取
-        let ctrl_v_pressed = input.modifiers.ctrl && !input.modifiers.shift && input.key_pressed(egui::Key::V);
-        // 优先级 2：Event::Paste（编辑态内部粘贴，或某些后端会生成）
+    // ========== Event::Paste: 粘贴到选中单元格（非编辑模式、无文本框焦点）==========
+    // 关键：egui-winit 在 Ctrl+V 时拦截并直接读取系统剪贴板生成 Event::Paste（而非 Event::Key{V}），
+    // 因此 input.key_pressed(Key::V) 对 Ctrl+V 永远为 false。必须监听 Event::Paste。
+    // 编辑态或有 TextEdit 焦点时不拦截——让 TextEdit 自身粘贴文本（Excel 行为）。
+    if editing_cell.is_none() && selected_cell.is_some() && !validation_error_active
+        && !ui.ctx().text_edit_focused()
+    {
         let pasted = input.events.iter().find_map(|ev| match ev {
             egui::Event::Paste(s) if !s.is_empty() => Some(s.clone()),
             _ => None,
         });
-
-        let paste_text = if ctrl_v_pressed {
-            // Ctrl+V 按下：优先内部缓冲，其次 Event::Paste
-            copied_cells.clone().or(pasted)
-        } else {
-            // 无 Ctrl+V：仅在 Event::Paste 时触发（如编辑态 TextEdit 自身的粘贴）
-            pasted
-        };
-
-        if let Some(text) = paste_text {
+        if let Some(text) = pasted {
             if let Some((col, row)) = *selected_cell {
                 let rows: Vec<Vec<String>> = text.split('\n')
                     .filter(|line| !line.is_empty())
@@ -629,12 +625,8 @@ pub fn draw_table_content(
                     paste_request = Some((rows, (col, row)));
                 }
             }
-            // 消费粘贴事件，防止 TextEdit 等控件二次处理
+            // 消费 Event::Paste，防止 TextEdit 等控件二次处理
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
-        }
-        // 消费 Ctrl+V 按键，防止穿透到其他控件
-        if ctrl_v_pressed {
-            ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
         }
     }
 

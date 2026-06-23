@@ -204,25 +204,28 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 
 支持对单个单元格或矩形单元格区域执行 Ctrl+C 复制和 Ctrl+V 粘贴，与 Excel 交互行为一致。
 
-#### 复制（Ctrl+C）
+> **关键实现要点（曾经的失效根因）**：egui-winit 后端在 `on_keyboard_input` 中会**拦截** `Ctrl+C`/`Ctrl+V`/`Ctrl+X`，分别生成 `egui::Event::Copy`/`Event::Paste(String)`/`Event::Cut` 并**提前 `return`**——**不会**把这些组合键作为 `Event::Key { Key::C / Key::V }` 投递。而 `InputState::key_pressed(Key)` 是扫描 `Event::Key` 记录的（见 [`egui` 源 `input_state/mod.rs`](https://github.com/emilk/egui) `key_pressed`），因此 `input.key_pressed(Key::C)` / `key_pressed(Key::V)` **对 Ctrl+C / Ctrl+V 永远为 false**。
+>
+> 早期版本用 `key_pressed(Key::C)`/`key_pressed(Key::V)` 检测复制/粘贴，导致**复制完全不触发**（剪贴板从未被写入）、粘贴读到的只是系统剪贴板里残留的旧内容。**正确做法是监听 `Event::Copy` / `Event::Paste`**，二者由 egui-winit 直接生成（粘贴时它会自行读取系统剪贴板填充 `Event::Paste` 的内容）。
+>
+> 此外，复制/粘贴处理都加了**焦点守卫 `!ui.ctx().text_edit_focused()`**：仅当无 `TextEdit`（公式栏/名称框/原位编辑器）获焦时由表格处理剪贴板；否则放行给对应的 `TextEdit` 自行复制/粘贴其选中文本，避免抢占。
 
-- **触发条件**：`Ctrl+C`（不含 Shift）、非编辑模式、有选中单元格、无校验弹窗。
+#### 复制（Ctrl+C → Event::Copy）
+
+- **触发条件**：检测到 `Event::Copy`、非编辑模式、有选中单元格、无校验弹窗、**无 `TextEdit` 获焦**。
 - **序列化格式**：TSV（Tab-Separated Values）——列间用 `\t` 分隔，行间用 `\n` 分隔。
 - **内容**：
   - 有公式的单元格：复制公式文本（保证 `=` 前缀）。
   - 无公式的单元格：复制显示文本（经 `cell_display_text` 处理，日期格式转换为日期字符串）。
   - 空单元格：空字符串（TSV 中仍占据一个 tab 位置）。
 - **选区范围**：优先取 `selected_range` 的包围盒；否则为单格。
-- **剪贴板写入**：通过 `ui.ctx().copy_text(tsv)` 写入系统剪贴板，支持跨应用粘贴。
-- **内部缓冲同步**：同时存储到 `copied_cells: &mut Option<String>` 内部缓冲。这是粘贴时不依赖 `Event::Paste` 的关键——winit/egui 后端仅在活跃 `TextEdit` 焦点时才生成 `Event::Paste`，普通表格交互区域有焦点但无 TextEdit 时按 Ctrl+V 不会产生 Paste 事件。
-- **事件消费**：调用 `consume_key(CTRL, C)` 防止快捷键穿透到其他控件。
+- **剪贴板写入**：通过 `ui.ctx().copy_text(tsv)` 写入系统剪贴板，支持跨应用粘贴。egui-winit 在 `Ctrl+V` 时读取该系统剪贴板生成 `Event::Paste`，从而构成「复制写剪贴板 → 粘贴读剪贴板」的完整闭环，**无需任何内部缓冲**。
+- **事件消费**：`events.retain` 移除 `Event::Copy`，防止后续控件二次处理。
 
-#### 粘贴（Ctrl+V）
+#### 粘贴（Ctrl+V → Event::Paste）
 
-- **触发条件**：`Ctrl+V`（不含 Shift）或 `Event::Paste`、非编辑模式、有选中单元格、无校验弹窗。
-- **数据来源优先级**：
-  1. **Ctrl+V 按键** → 优先读取 `copied_cells` 内部缓冲（保证无文本焦点时粘贴可用）。
-  2. 若内部缓冲为空 → 尝试读取 `Event::Paste`（覆盖编辑态内部粘贴或某些后端补丁场景）。
+- **触发条件**：检测到 `Event::Paste`（egui-winit 在 `Ctrl+V` 时读取系统剪贴板生成）、非编辑模式、有选中单元格、无校验弹窗、**无 `TextEdit` 获焦**。
+- **数据来源**：`Event::Paste` 携带的文本，即系统剪贴板当前内容（egui-winit 已把 `\r\n` 归一为 `\n`，并丢弃空内容）。因此**天然支持跨应用粘贴**（从其他程序复制后直接 Ctrl+V）。
 - **解析**：从粘贴文本按 `\n` 和 `\t` 分割为二维字符串网格 `Vec<Vec<String>>`，过滤空行。
 - **写入逻辑**（与 Excel 一致）：
   - 以活动单元格（`selected_cell`）为粘贴起点。
@@ -231,7 +234,9 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 - **重算**：含公式则 `evaluate_sheet`（全量），否则对每个写入格调用 `evaluate_dependents`（增量）。
 - **选区更新**：粘贴多行或多列时，`selected_range` 更新为覆盖粘贴区域的包围盒；单格粘贴不改变选区。
 - **撤销**：通过 `committed_paste: &mut Option<PasteCommit>` 出参通知调用方，viewer 据此构造 `UndoAction::RangeClear` 入撤销栈（保存被覆盖格的原始数据 + 选区）。
-- **事件消费**：调用 `events.retain` 移除 `Event::Paste`，防止 TextEdit 等控件二次处理。
+- **事件消费**：`events.retain` 移除 `Event::Paste`，防止 TextEdit 等控件二次处理。
+
+> **编辑态放行**：当处于原位编辑（`editing_cell.is_some()`）或公式栏/名称框获焦时，`text_edit_focused()` 为真，本节不拦截 `Event::Copy`/`Event::Paste`，交由对应 `TextEdit` 处理——即在编辑文本时 Ctrl+C/V 作用于正在编辑的文本本身（与 Excel 一致）。
 
 ### 2.14 性能相关处理汇总
 
@@ -269,7 +274,7 @@ flowchart TD
     KBD -->|Tab/方向键| NAV["导航 + 触边滚动<br/>(冻结区感知)"]
     KBD -->|Enter| EDM["进入编辑模式"]
     KBD -->|保存| SAVE1["保存编辑 + 公式重算"]
-    KBD -->|Ctrl+C| COPY["序列化选区 → TSV<br/>ctx.copy_text()"]
+    KBD -->|Event::Copy| COPY["序列化选区 → TSV<br/>ctx.copy_text()"]
     KBD -->|Event::Paste| PASTE_DET["解析 TSV → 二维网格<br/>paste_request"]
     NAV --> RENDER
     EDM --> RENDER

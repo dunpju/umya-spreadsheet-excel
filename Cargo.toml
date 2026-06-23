@@ -1,6 +1,6 @@
 [package]
 name = "umya-spreadsheet-excel"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 build = "build.rs"  # 指定构建脚本
 
