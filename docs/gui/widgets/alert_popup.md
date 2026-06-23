@@ -230,8 +230,8 @@ pub struct AlertNotifyState {
 ### 6.2 弹窗特性
 
 - **宽度**：固定 300px
-- **位置**：屏幕右侧居中（`content_rect().right_center() - vec2(320, 0)`）
-- **不可调整大小**、**不可拖拽标题栏**、**不可折叠**（通过 `egui::Window` 属性控制）
+- **位置**：屏幕（视口）**水平垂直居中**（`.anchor(Align2::CENTER_CENTER, Vec2::ZERO)`，窗口中心对齐屏幕中心；每帧重新锚定，故展开/折叠动画改变高度时仍保持居中）。早期版本用 `default_pos(content_rect().right_center() - vec2(320,0))` 定位在屏幕右侧居中、整体偏下，现已改为居中
+- **不可调整大小**、**不可拖拽**（`anchor` 会自动置 `movable=false`）、**无标题栏**、**不可折叠**（通过 `egui::Window` 属性控制）
 - **展开/折叠动画**：使用 `egui::animate_value_with_time`（200ms）+ smoothstep 缓动函数，避免手动逐帧驱动造成的卡顿
 - **折叠时**：仅显示标题栏，点击标题栏展开
 

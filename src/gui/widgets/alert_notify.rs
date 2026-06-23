@@ -565,7 +565,11 @@ pub fn draw_alert_notify_popup(
         .resizable(false)
         .collapsible(false)
         .open(&mut keep_open)
-        .default_pos(ctx.content_rect().right_center() - egui::vec2(320.0, 0.0))
+        // 以主窗口视口（屏幕）中心为基准居中弹出：
+        // anchor(CENTER_CENTER, ZERO) 让窗口中心点对齐屏幕中心，每帧重新锚定，
+        // 故展开/折叠动画改变高度时窗口仍保持居中（高度从中心向上下两侧伸缩）。
+        // 注意 anchor 会令窗口不可拖动（movable=false）——对自动触发的通知弹窗是期望行为。
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_min_width(popup_width);
 

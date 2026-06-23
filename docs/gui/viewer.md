@@ -55,6 +55,11 @@
 > `table.rs` 引用。**配置相关类型（`SettingsPanelState` / `SettingsPage` / `SearchPage`）及其 UI 已
 > 迁移至独立模块 [`gui/widgets/config.rs`](widgets/config.md)**，`menu_bar.rs` 经 `config` 模块引用它们。
 
+> **预警触发检测 + 通知弹窗**（`check_alert_rules` / `draw_alert_notify_popup` / `draw_alert_icon` /
+> `filter_by_triggered_rule` / `update_alert_range_expansions_*`）位于 [`gui/widgets/alert_notify.rs`](widgets/alert_notify.md)，
+> `viewer.rs` 每帧调用并持有 `alert_notify_state`，`menu_bar.rs` 绘制图标。规则**配置**侧见 [`alert_popup.md`](widgets/alert_popup.md)，
+> 通知弹窗的**居中定位实现**见 [`alert_notify.md`](widgets/alert_notify.md) §6。
+
 ---
 
 ## 2. 代码架构与设计逻辑
