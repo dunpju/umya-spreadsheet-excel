@@ -1,6 +1,6 @@
 # 搜索组件业务实现分析（`src/gui/widgets/search.rs`）
 
-> 本文档基于 `search.rs`（约 1920 行）源码梳理，系统阐述 GUI 搜索窗口的模块定位、数据结构、
+> 本文档基于 `search.rs`（约 2076 行）源码梳理，系统阐述 GUI 搜索窗口的模块定位、数据结构、
 > 搜索/筛选流程、隐藏集合填充机制、关键调用链，状态与 UI 联动逻辑，以及视觉布局。
 
 ---
@@ -181,7 +181,7 @@ pub enum CompareOp {
 
 ### 4.1 `local_hidden` 的填充（并行路径）
 
-并行扫描的关键片段（`search.rs:1278-1304`）：
+并行扫描的关键片段（`search.rs:1397-1422`）：
 
 ```rust
 let mut local_hidden = HashSet::new();
@@ -191,13 +191,13 @@ for idx in start_idx..end_idx {
         // 多条件 AND/OR：逐条件求值，再按运算符整体求值
         let matches: Vec<bool> = parsed_ref.iter().enumerate()
             .map(|(fi, pf)| match_filter_value(
-                &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range))
+                &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range, pf.op))
             .collect();
         !row_matches_expr(&matches, logic_seq_ref) // 不满足表达式 → 隐藏
     } else {
         // 纯 AND：任一条件不匹配即隐藏
         !parsed_ref.iter().enumerate().all(|(fi, pf)| match_filter_value(
-            &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range))
+            &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range, pf.op))
     };
     if hide { local_hidden.insert(row); }
 }
@@ -307,8 +307,8 @@ fn compare_value(value, keyword, op: CompareOp) -> bool {
 - 从 `active_filters` 映射：`parse_row_keywords(&f.keyword)` → `(keywords, is_range)`，连同 `f.col` 打包。
 - **owned 数据**（`String`/`Vec`），可安全地被 `&parsed`（`parsed_ref`）跨线程借用，无需 `Arc`。
 - 消费点：
-  - 二分路径：`find_rows_in_sorted(&first_col_data, &parsed[0].keywords, parsed[0].is_range)`，再用 `parsed[1..].all(...)` 验证候选行；
-  - 串行/并行路径：每行每条件取 `all_col_data[fi][idx].1`，配合 `parsed[fi].{keywords,is_range}` 调 `match_filter_value`。
+  - 二分路径：`find_rows_in_sorted(&first_col_data, &parsed[0].keywords, parsed[0].is_range)`，再对候选行用 `parsed[1..].iter().all(|pf| match_filter_value(&value, &pf.keywords, pf.is_range, pf.op))` 验证（候选集已被二分缩小，按需 `get_cell`）；
+  - 串行/并行路径：每行每条件取 `all_col_data[fi][idx].1`，配合 `parsed[fi].{keywords,is_range,op}` 调 `match_filter_value`。
 
 ### 5.5 调用链总览
 
@@ -373,8 +373,8 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 - 执行后 `response.surrender_focus()` 收起键盘焦点。
 
 ### 6.4 动态增删与编辑
-- **列筛选**：`添加筛选条件` 按钮追加空 `ColumnFilter`；每行有列下拉、关键字输入、AND/OR 下拉、删除按钮（`can_delete = count>1`）；删除用 `delete_idx` **延迟到循环外** `remove`，避免迭代中越界。
-- **行筛选**：配置项数量由 `search.row` 决定，不可增删，但可编辑 `keyword` 与 `logic`。
+- **列筛选**：`添加筛选条件` 按钮追加空 `ColumnFilter`；每行有列下拉、比较运算符下拉、关键字输入、AND/OR 下拉、删除按钮（`can_delete = count>1`）；删除用 `delete_idx` **延迟到循环外** `remove`，避免迭代中越界。
+- **行筛选**：配置项数量由 `search.row` 决定，不可增删，但可编辑 `keyword`、`logic` 与 `op`。
 
 ### 6.5 自动还原（行筛选特有）
 当某行筛选输入被改空（`response.changed() && keyword.trim().is_empty() && is_row_searching`）时，自动 `hidden_rows.clear()` 并重置行筛选状态——用户清空输入即恢复全表显示，无需点重置。
@@ -426,7 +426,7 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 │  入库 (D14): [  >  ▾] [                                            ] [OR ▾]          │   运算符60/输入250
 │                                                                                      │
 │  行筛选[二分]: [日期=A] 行15→1000 共986行 | 匹配50行 隐藏936行                      │ ← row_debug_info
-│  选中A1 | 行1 B→X 共10列 | 匹配3列 隐藏7列                                          │ ← debug_info
+│  选中A1 | 共10列 | 匹配3列 隐藏7列                                                 │ ← debug_info
 │                                                                                      │
 │ 💡 搜索选中列右侧所有列；已排序数据自动启用二分查找                                  │ ← 底部提示
 └──────────────────────────────────────────────────────────────────────────────────────┘
@@ -499,4 +499,4 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 
 ---
 
-*文档生成依据：`src/gui/widgets/search.rs`（master 分支，commit `8857786`）。如代码重构，请同步更新本文件中的行号与函数签名。*
+*文档生成依据：`src/gui/widgets/search.rs`（master 分支 HEAD `26d55bc`；search.rs 最近变更 `fe77811`「添加比较运算符支持」，本文件已据此同步 `CompareOp` 相关说明）。如代码重构，请同步更新本文件中的行号与函数签名。*
