@@ -13,7 +13,7 @@
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
 - **交互**：点击选中（绿色边框）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、键盘导航（Tab/方向键/Enter）。
-- **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.13）。
+- **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.12）。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
 ### 依赖
@@ -24,6 +24,7 @@
 | 内部模块 | `crate::excel::reader` | `CellAlignment`、`CellData`、`ExcelData`、`col_to_letter` |
 | 内部模块 | `crate::gui::alignment` | `alignment_to_egui`（对齐方式映射） |
 | 内部模块 | `crate::excel::formula` | `evaluate_sheet` / `evaluate_dependents`（公式重算） |
+| 内部模块 | `crate::excel::fill` | `apply_fill`（填充柄拖拽填充：格式复制 + 公式相对引用平移） |
 | 内部模块 | `crate::gui::viewer` | `ContextMenuState`（右键菜单状态） |
 | 标准库 | `std::borrow::Cow` | 文本借用，避免克隆 |
 | 标准库 | `std::collections::HashSet` | 隐藏行/列集合 |
@@ -103,7 +104,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 编辑过程中还有**实时重算**（`editing_cell.is_some() && edit_value != prev_display` 时），边输入边更新依赖公式，提供所见即所得体验。
 
-> **原位编辑（与 Excel 一致）**：编辑态不再叠加额外的输入框控件，而是用透明无边框的 `TextEdit` 直接在单元格原位置编辑（详见 §2.12）。为保证透明输入框下方不透出旧值造成"双重文字"，内容绘制遍会**跳过正在编辑的单元格**（`*editing_cell == Some((col, row))` 时 `continue`）；单元格背景（填充色）照常绘制并透过透明输入框显示。
+> **原位编辑（与 Excel 一致）**：编辑态不再叠加额外的输入框控件，而是用透明无边框的 `TextEdit` 直接在单元格原位置编辑（详见 §2.13）。为保证透明输入框下方不透出旧值造成"双重文字"，内容绘制遍会**跳过正在编辑的单元格**（`*editing_cell == Some((col, row))` 时 `continue`）；单元格背景（填充色）照常绘制并透过透明输入框显示。
 
 
 
@@ -143,6 +144,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 冻结区必须固定在视口顶部/左侧，且要处理**合并单元格的溢出**（如冻结顶部数据行的 `N1:O1` 合并可能向左溢出到冻结左侧区域）。绘制顺序为：
 
 ```
+前奏：白色填充整个冻结覆盖区域（顶部 + 左侧），遮住主网格在滚动时透出的内容（消除重影）
 第1步：绘制顶部冻结区域（列标题 + 冻结数据行，全宽，可能向左溢出）
 第2步：白色重填左侧冻结区域，覆盖第1步顶部数据行合并的溢出
 第3步：绘制左侧冻结区域内容（左上角、冻结列标题、冻结行号、角落数据、非冻结行号、冻结左侧数据列）
@@ -158,7 +160,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 - **选中范围内部柔光**（`selected_range`）：半透明蓝色背景（`0,112,192`，α=40）。仅作选区内部提示，外缘边框已统一由绿色选中框绘制（不再单独描边，避免双重边框）。由拖拽选择/填充产生。
 - **填充柄（Fill Handle）**：选区右下角 5×5px 深灰方块（`Color32::from_rgb(80,80,80)`），位置取**整段选区右下角**：`selected_range` 优先，否则 `selected_cell` 并展开到所在合并区域（故水平合并 `D9:E9` 的柄落在末端格 `E9` 右下角，而非锚点 `D9`）。绿框为 2px + `StrokeKind::Outside`（画在选区外侧），柄相对选区矩形 `max` 外移 2px（= 绿框厚度），外缘与绿框外拐角对齐、横跨绿框线（Excel 式"压角"，非紧贴内侧）。独立 `ui.interact`（`Id::new("fill_handle")`，`Sense::click_and_drag()`）+ `on_hover_cursor(CursorIcon::Crosshair)`。拖拽它向相邻区域填充（见 §2.13）。
 
-### 2.13 填充柄与填充（Fill Handle）
+### 2.12 填充柄与填充（Fill Handle）
 
 填充柄拖拽与表格主体的框选拖拽（`table_interaction`）用**独立 interact 分流**——egui 把一次拖拽路由到指针按下时命中的那个 interact，命中柄则走填充、否则走框选。
 
@@ -168,7 +170,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 - **撤销**：调用方（viewer）据 `committed_fill` 构造 `UndoAction::RangeClear`（恢复 `old_cells` + 选区 + 全表重算），Ctrl+Z 即撤销填充。
 
 
-### 2.12 原位编辑器（无缝编辑）
+### 2.13 原位编辑器（无缝编辑）
 
 `editing_cell` 非空且在可见范围内时，用 `ui.scope_builder(UiBuilder::new().max_rect(edit_rect), ...)` 在单元格**整格矩形**上放一个 `egui::TextEdit::singleline`。编辑态视觉上**与 Excel 一致——无额外输入框/边框**，直接在单元格内显示文本与闪烁光标：
 
@@ -185,7 +187,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 > 之所以仍使用 `TextEdit` widget（而非手写 painter 编辑器）：egui 中光标、文本选区、剪贴板、CJK IME 均由 `TextEdit` 提供，手写会丢失这些能力。把它做透明无边框并占满整格，即可达到"直接在单元格里编辑"的视觉效果，同时保留全部编辑能力。
 
-### 2.13 性能相关处理汇总
+### 2.14 性能相关处理汇总
 
 | 技术 | 位置 | 作用 |
 |------|------|------|
@@ -199,11 +201,11 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 ---
 
-### 2.14 批注指示器与悬停气泡（Comment）
+### 2.15 批注指示器与悬停气泡（Comment）
 
 集成自 `CellData.comment`（见 [excel/comments.md](../../excel/comments.md)），采用 Excel 风格：
 
-- **红色三角指示器**：模块级函数 `draw_comment_indicator(painter, x, y, width)`，用 `egui::Shape::convex_polygon` 在单元格右上角画 ~7px 红色实心三角。
+- **橙红色三角指示器**：模块级函数 `draw_comment_indicator(painter, x, y, width)`，用 `egui::Shape::convex_polygon` 在单元格右上角画 ~7px 橙红色（RGB 217,83,25）实心三角。
   - **主网格非冻结区**：第二遍内容绘制之后的独立遍历，合并非左上角跳过（只在合并左上角画）。
   - **冻结区**：在 `draw_frozen_cell` 闭包末尾调用。
 - **悬停气泡**：所有单元格绘制完成后（编辑框之前）一次性指针检测。`response.hovered() && !dragged && editing_cell.is_none() && !validation_error_active` 时，用冻结区感知坐标转换（复用 `partition_point` 二分）定位到单元格，合并单元格自动取左上角；命中带批注单元格则用 `painter.layout_job(LayoutJob::simple(...))` 生成自动换行 galley，绘制淡黄背景（`#FFFFE0`）+ 边框 + 正文（黑色）。**作者头仅当正文未以「作者:」开头时单独显示**（灰色小字）：Excel 把作者名嵌入正文首行（如 `"s:\n..."`），重复显示会产生多余作者行。气泡定位在指针右下方、越界自动翻转并夹紧到视口。
@@ -248,23 +250,30 @@ flowchart TD
 flowchart TD
     L0["0. 灰色背景填充整个表格区"] --> L1["1. 第一遍: 非冻结单元格背景"]
     L1 --> L2["2. 第二遍: 非冻结单元格内容"]
-    L2 --> L3["3. 冻结顶部区域(列标题+冻结数据行)"]
-    L3 --> L4["4. 白色重填冻结左侧区域(覆盖顶部溢出)"]
-    L4 --> L5["5. 冻结左侧区域内容(左上角/标题/行号/数据)"]
-    L5 --> L6["6. 白色重填左上角+重绘左上角(覆盖左侧溢出)"]
-    L6 --> L7["7. 冻结分隔线"]
-    L7 --> L8["8. 选中单元格高亮边框"]
-    L8 --> L9["9. 选中范围半透明背景"]
-    L9 --> L10["10. 编辑输入框 TextEdit(最上层)"]
+    L2 --> L2b["2b. 批注指示器(橙红色三角)"]
+    L2b --> L3["3. 冻结覆盖白色填充(消除主网格透出)"]
+    L3 --> L3a["3a. 冻结顶部区域(列标题+冻结数据行)"]
+    L3a --> L3b["3b. 白色重填冻结左侧(覆盖顶部溢出)"]
+    L3b --> L3c["3c. 冻结左侧区域内容(左上角/标题/行号/数据)"]
+    L3c --> L3d["3d. 白色重填左上角+重绘(覆盖左侧溢出)"]
+    L3d --> L4["4. 冻结分隔线"]
+    L4 --> L5["5. 选中高亮边框"]
+    L5 --> L6["6. 选中范围半透明背景"]
+    L6 --> L7["7. 填充柄(深灰方块)"]
+    L7 --> L8["8. 批注悬停气泡"]
+    L8 --> L9["9. 编辑输入框 TextEdit(最上层)"]
 
     style L0 fill:#eeeeee,stroke:#9e9e9e
     style L1 fill:#fff9c4,stroke:#f9a825
     style L2 fill:#fff9c4,stroke:#f9a825
-    style L3 fill:#fce4ec,stroke:#c2185b
-    style L5 fill:#fce4ec,stroke:#c2185b
-    style L6 fill:#fce4ec,stroke:#c2185b
-    style L8 fill:#bbdefb,stroke:#1976d2
-    style L10 fill:#c8e6c9,stroke:#388e3c
+    style L3 fill:#f5f5f5,stroke:#bdbdbd
+    style L3a fill:#fce4ec,stroke:#c2185b
+    style L3c fill:#fce4ec,stroke:#c2185b
+    style L3d fill:#fce4ec,stroke:#c2185b
+    style L5 fill:#bbdefb,stroke:#1976d2
+    style L7 fill:#e0e0e0,stroke:#616161
+    style L8 fill:#fff9c4,stroke:#f9a825
+    style L9 fill:#c8e6c9,stroke:#388e3c
 ```
 
 ### 3.3 调用层级关系（文本树）
@@ -272,6 +281,8 @@ flowchart TD
 ```
 draw_table_content(ui, excel_data, current_sheet, ...)
 ├── cell_display_text(cell)                    [私有: 文本/日期转换]
+├── align2_to_hv(align2)                        [私有: Align2 → (水平, 垂直)]
+├── draw_comment_indicator(painter, x, y, w)   [私有: 批注红三角]
 ├── [闭包] get_col_width / get_row_height       [尺寸查表]
 ├── [构建] col_cumulative_width / row_cumulative_height
 ├── [闭包] get_cell_rect                        [坐标计算(导航用)]
@@ -280,19 +291,25 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 ├── 键盘处理
 │   ├── Tab(编辑/非编辑) → ui.scroll_to_rect
 │   ├── 方向键 → ui.scroll_to_rect + consume_key
-│   └── Enter → 进入编辑模式
+│   ├── Enter → 进入编辑模式
+│   └── 键入即编辑(type-to-edit) → Event::Text 捕获
 ├── 保存编辑 → sheet.validate_cell / formula::evaluate_sheet|evaluate_dependents
-├── [闭包] screen_to_cell                       [点击命中]
+├── [闭包] screen_to_cell                       [拖拽/框选: 屏幕坐标→单元格]
 ├── [闭包] expand_to_merge                      [拖拽合并展开]
 ├── 拖拽选择 → selected_range
 ├── 绘制: painter.rect_filled / painter.text / painter.rect_stroke
 │   ├── 第一遍背景
 │   ├── 第二遍内容 → alignment_to_egui (gui::alignment)
-│   ├── [闭包] draw_frozen_cell                 [冻结区单元格]
-│   ├── 冻结窗格四步覆盖
+│   ├── 批注指示器 → draw_comment_indicator
+│   ├── 冻结覆盖初始白色填充(消除重影)
+│   ├── 冻结窗格四步覆盖 → draw_frozen_cell
+│   ├── 冻结分隔线
 │   ├── 选中高亮 / 选中范围
-│   └── TextEdit 输入框
-└── 实时重算 → formula::evaluate_dependents
+│   ├── 填充柄渲染 + 拖拽预览
+│   ├── 批注悬停气泡
+│   └── TextEdit 输入框（冻结覆盖之后绘制）
+├── 实时重算 → formula::evaluate_sheet|evaluate_dependents
+└── 填充执行 → excel::fill::apply_fill → formula 重算
 ```
 
 ### 3.4 对齐映射链路
@@ -364,7 +381,7 @@ flowchart LR
 
 ### 4.4 自定义类型
 
-> 本文件**不定义任何 `pub struct` / `pub enum`**。所有数据类型复用自 [`excel::reader`](../../excel/reader.md)（`CellData`、`CellAlignment`、`ExcelData`、`HorizontalAlignment`、`VerticalAlignment`、`col_to_letter`）与 `egui`（`Align2`、`Rect`、`Pos2`、`Color32`、`FontId`、`Stroke`、`StrokeKind`、`Key`、`Modifiers` 等）。
+> 本文件**不定义任何 `pub struct` / `pub enum`**。所有数据类型复用自 [`excel::reader`](../../excel/reader.md)（`CellData`、`CellAlignment`、`ExcelData`、`col_to_letter`）与 `egui`（`Align2`、`Rect`、`Pos2`、`Color32`、`FontId`、`Stroke`、`StrokeKind`、`Key`、`Modifiers` 等）。
 
 ### 4.5 常量
 
