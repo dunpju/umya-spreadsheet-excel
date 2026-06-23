@@ -1875,18 +1875,28 @@ impl ExcelData {
         if sheet.conditional_rules.is_empty() {
             return;
         }
-        // 先恢复规则范围内的单元格原始样式
-        for rule in &sheet.conditional_rules {
-            for range in &rule.ranges {
-                for row in range.start_row..=range.end_row {
-                    for col in range.start_col..=range.end_col {
-                        if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                            cell.background_color = cell.original_bg;
-                            cell.font_color = None;
-                            cell.bold = false;
-                        }
-                    }
-                }
+        // 先恢复规则范围内"已存在"单元格的原始样式。
+        // 性能：原先按 range 的行列双重循环遍历"范围面积"（如 5000×400 预警范围 = 200 万格），
+        // 每格一次 HashMap 查找，造成 ~1 秒卡顿；改为只遍历实际存在的单元格（sheet.cells 稀疏），
+        // O(非空格数) 而非 O(范围面积)。空格本就无 CellData、无样式可恢复。
+        let keys: Vec<(u32, u32)> = {
+            let rule_ranges: Vec<&CellRange> = sheet
+                .conditional_rules
+                .iter()
+                .flat_map(|r| r.ranges.iter())
+                .collect();
+            sheet
+                .cells
+                .keys()
+                .copied()
+                .filter(|&(row, col)| rule_ranges.iter().any(|r| r.contains(col, row)))
+                .collect()
+        };
+        for key in keys {
+            if let Some(cell) = sheet.cells.get_mut(&key) {
+                cell.background_color = cell.original_bg;
+                cell.font_color = None;
+                cell.bold = false;
             }
         }
         // 重新求值应用
@@ -1944,26 +1954,26 @@ impl ExcelData {
 
     fn apply_conditional_formatting(sheet: &mut SheetData) {
         let rules: Vec<CondFormatRule> = sheet.conditional_rules.clone();
-        for rule in &rules {
-            for range in &rule.ranges {
-                for row in range.start_row..=range.end_row {
-                    for col in range.start_col..=range.end_col {
-                        let cell_value = sheet
-                            .get_cell(row, col)
-                            .map(|c| c.value.clone())
-                            .unwrap_or_default();
-                        if Self::evaluate_rule(rule, &cell_value) {
-                            if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                                if let Some(bg) = rule.bg_color {
-                                    cell.background_color = Some(bg);
-                                }
-                                if let Some(fc) = rule.font_color {
-                                    cell.font_color = Some(fc);
-                                }
-                                if rule.bold {
-                                    cell.bold = true;
-                                }
-                            }
+        // 稀疏遍历：只处理已存在单元格（避免按范围面积遍历空格，大表上造成卡顿）。
+        // 对每个已存在格依次套用每条规则：落在其范围内且匹配则应用，后规则覆盖前规则。
+        let keys: Vec<(u32, u32)> = sheet.cells.keys().copied().collect();
+        for (row, col) in keys {
+            let cell_value = match sheet.cells.get(&(row, col)) {
+                Some(c) => c.value.clone(),
+                None => continue,
+            };
+            for rule in &rules {
+                let in_range = rule.ranges.iter().any(|r| r.contains(col, row));
+                if in_range && Self::evaluate_rule(rule, &cell_value) {
+                    if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                        if let Some(bg) = rule.bg_color {
+                            cell.background_color = Some(bg);
+                        }
+                        if let Some(fc) = rule.font_color {
+                            cell.font_color = Some(fc);
+                        }
+                        if rule.bold {
+                            cell.bold = true;
                         }
                     }
                 }
@@ -2064,30 +2074,34 @@ fn extract_contains_text_from_formula(formula: &str) -> String {
                 continue;
             };
 
-            // 求值并应用
-            for row in start_row..=end_row {
-                for col in start_col..=end_col {
-                    let cell_value = sheet
-                        .get_cell(row, col)
-                        .map(|c| c.value.clone())
-                        .unwrap_or_default();
-                    let threshold_val: f64 = rule.value.parse().unwrap_or(0.0);
-
-                    let matches = match rule.operator.as_str() {
-                        ">" => Self::parse_cell_number(&cell_value).map_or(false, |v| v > threshold_val),
-                        "<" => Self::parse_cell_number(&cell_value).map_or(false, |v| v < threshold_val),
-                        "=" => Self::compare_equal(&cell_value, &rule.value),
-                        ">=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v >= threshold_val),
-                        "<=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v <= threshold_val),
-                        "!=" => !Self::compare_equal(&cell_value, &rule.value),
-                        _ => false,
-                    };
-
-                    if matches {
-                        if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                            if let Some(bg) = bg {
-                                cell.background_color = Some(bg);
-                            }
+            // 求值并应用（稀疏遍历：只处理该范围内已存在单元格，避免按范围面积遍历空格）
+            let threshold_val: f64 = rule.value.parse().unwrap_or(0.0);
+            let keys: Vec<(u32, u32)> = sheet
+                .cells
+                .keys()
+                .copied()
+                .filter(|&(row, col)| {
+                    row >= start_row && row <= end_row && col >= start_col && col <= end_col
+                })
+                .collect();
+            for (row, col) in keys {
+                let cell_value = match sheet.cells.get(&(row, col)) {
+                    Some(c) => c.value.clone(),
+                    None => continue,
+                };
+                let matches = match rule.operator.as_str() {
+                    ">" => Self::parse_cell_number(&cell_value).map_or(false, |v| v > threshold_val),
+                    "<" => Self::parse_cell_number(&cell_value).map_or(false, |v| v < threshold_val),
+                    "=" => Self::compare_equal(&cell_value, &rule.value),
+                    ">=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v >= threshold_val),
+                    "<=" => Self::parse_cell_number(&cell_value).map_or(false, |v| v <= threshold_val),
+                    "!=" => !Self::compare_equal(&cell_value, &rule.value),
+                    _ => false,
+                };
+                if matches {
+                    if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                        if let Some(bg) = bg {
+                            cell.background_color = Some(bg);
                         }
                     }
                 }

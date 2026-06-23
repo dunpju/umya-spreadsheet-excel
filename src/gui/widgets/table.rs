@@ -2333,9 +2333,12 @@ pub fn draw_table_content(
             if has_formula {
                 crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
             } else {
-                for (r, c, _) in &old_cells {
-                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], *r, *c);
-                }
+                // 批量增量重算：一次构建依赖图重算受影响公式，替代逐格 evaluate_dependents
+                // （后者每格都全表重建依赖图；大表上填 K 格 = K × O(2M)，造成 2~3 秒卡顿）
+                crate::excel::formula::evaluate_dependents_many(
+                    &mut excel_data.sheets[current_sheet],
+                    old_cells.iter().map(|(r, c, _)| (*r, *c)),
+                );
             }
             *dirty = true;
             // 填充后选区 = 源 ∪ 目标（保持目标区域选中，活动格为源左上）
@@ -2395,13 +2398,14 @@ pub fn draw_table_content(
         if has_formula {
             crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
         } else {
-            for (dr, row_vals) in rows.iter().enumerate() {
-                for dc in 0..row_vals.len() {
-                    let tc = start_col + dc as u32;
-                    let tr = start_row + dr as u32;
-                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], tr, tc);
-                }
-            }
+            // 批量增量重算：一次构建依赖图，替代逐格 evaluate_dependents（大表性能）
+            crate::excel::formula::evaluate_dependents_many(
+                &mut excel_data.sheets[current_sheet],
+                rows.iter().enumerate().flat_map(|(dr, row_vals)| {
+                    (0..row_vals.len() as u32)
+                        .map(move |dc| (start_row + dr as u32, start_col + dc))
+                }),
+            );
         }
         *dirty = true;
 

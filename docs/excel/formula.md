@@ -81,12 +81,15 @@ parse_comparison  ( = <> < <= > >= )   最低
 ### 2.8 顶层 API
 
 - `evaluate_sheet(sheet)` —— **全量求值**：构建依赖图后对所有公式单元格拓扑求值。用于初始加载或公式本身变更。
-- `evaluate_dependents(sheet, changed_row, changed_col)` —— **增量求值**：从变更单元格出发，沿 `reverse_deps` 做 BFS 收集所有受影响公式，再对该子集拓扑求值。避免每帧全量重算。
-- **副作用**：上述两者求值时都会置位 `sheet.cf_dirty = true`，作为**条件格式事件驱动刷新**的唯一触发信号（值变化 → 公式求值 → 标脏 → viewer 仅对当前表、仅在脏时重算条件格式）。详见 [reader.md §2.7 事件驱动刷新机制](./reader.md#27-条件格式求值)。
+- `evaluate_dependents(sheet, changed_row, changed_col)` —— **增量求值**：从变更单元格出发，沿 `reverse_deps` 做 BFS 收集所有受影响公式，再对该子集拓扑求值。避免每帧全量重算。（内部委托 `evaluate_dependents_many`，单格即一次单元素批量。）
+- `evaluate_dependents_many(sheet, changed: IntoIterator<Item=(u32,u32)>)` —— **批量增量求值**：语义与 `evaluate_dependents` 一致（只重算依赖公式），但**一次构建依赖图**处理多个变更格。用于填充/粘贴等一次改动多格的场景——**关键性能点**：`build_formula_graph` 为 O(单元格数)，逐格调用 `evaluate_dependents` 在 200 万+ 单元格的大表上为 K × O(2M)（K=改动格数），造成 2~3 秒卡顿；本函数把 K 次图重建收敛为 1 次，K 格改动只建一次图 + 一次拓扑求值。
+- **副作用**：上述三者求值时都会置位 `sheet.cf_dirty = true`，作为**条件格式事件驱动刷新**的唯一触发信号（值变化 → 公式求值 → 标脏 → viewer 仅对当前表、仅在脏时重算条件格式）。详见 [reader.md §2.7 事件驱动刷新机制](./reader.md#27-条件格式求值)。
+
+> **性能瓶颈与优化**：所有增量/全量求值入口都先调 `build_formula_graph`（全表扫描 + 逐公式解析，O(单元格数)）。单次调用（如单元格编辑）代价可接受；但「按改动格循环调用」的模式（填充/粘贴的值路径）会把单次开销放大 K 倍。已用 `evaluate_dependents_many` 收敛为一次。若后续仍需进一步优化单次延迟，可考虑在 `SheetData` 上缓存依赖图并仅在公式变更时失效（代价是需在所有写 `cell.formula` 处加失效点，有 staleness 风险）。
 
 ### 2.9 测试
 
-文件内嵌 `tests` 模块，覆盖：解析（数字/算术/单元格/范围/`$` 引用/`_xlfn.`/`@`）、求值（算术/单元格/`SUM`/`IF`/`IFS`/`CONCATENATE`/除零/日期减法）、循环依赖 `#CIRC!`、链式依赖、增量求值（受影响/不受影响）、`$` 引用链重算、`TODAY`/`ROW`，以及 `adjust_formula_rows` 的十余个边界用例（绝对/混合/跨越阈值/负偏移/字符串字面量/`@` 前缀等）。
+文件内嵌 `tests` 模块，覆盖：解析（数字/算术/单元格/范围/`$` 引用/`_xlfn.`/`@`）、求值（算术/单元格/`SUM`/`IF`/`IFS`/`CONCATENATE`/除零/日期减法）、循环依赖 `#CIRC!`、链式依赖、增量求值（受影响/不受影响）、**批量增量求值 `evaluate_dependents_many`**、`$` 引用链重算、`TODAY`/`ROW`，以及 `adjust_formula_rows` 的十余个边界用例（绝对/混合/跨越阈值/负偏移/字符串字面量/`@` 前缀等）。
 
 ## 3. 视觉结构图
 
@@ -180,7 +183,8 @@ flowchart LR
 | `adjust_formula_rows` | `(formula, threshold_row, shift) -> String` | 调整行引用（插入/删除行） |
 | `adjust_formula_by_mapping` | `(formula, mapping, fb_col, fb_row) -> String` | 按映射表调整引用（迁移） |
 | `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式；并置位 `cf_dirty` |
-| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式；并置位 `cf_dirty` |
+| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式（单格）；委托 `evaluate_dependents_many`；并置位 `cf_dirty` |
+| `evaluate_dependents_many` | `(sheet, changed: IntoIterator<Item=(u32,u32)>)` | **批量**增量求值（多格改动一次建图）；填充/粘贴值路径用；并置位 `cf_dirty` |
 
 ### 4.3 关键内部函数（私有 fn）
 

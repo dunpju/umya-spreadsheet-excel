@@ -33,7 +33,7 @@ pub fn apply_fill(
     src: (u32, u32, u32, u32),   // (start_col, start_row, end_col, end_row)，自动归一化
     target: (u32, u32),          // (col, row) 拖拽结束格
 ) -> (Vec<(u32, u32, Option<CellData>)>, bool)
-//   ^被覆盖目标格原始数据 (row,col,旧值)     ^是否含公式填充（提示重算粒度）
+//   ^被覆盖目标格原始数据 (row,col,旧值)     ^是否含公式填充（提示重算粒度：公式→evaluate_sheet 全量；仅值→evaluate_dependents_many 批量增量）
 ```
 
 #### 轴向与方向

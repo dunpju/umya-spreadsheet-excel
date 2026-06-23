@@ -1704,22 +1704,37 @@ pub fn evaluate_sheet(sheet: &mut SheetData) {
 /// * `changed_row` - 发生变化的单元格行号
 /// * `changed_col` - 发生变化的单元格列号
 pub fn evaluate_dependents(sheet: &mut SheetData, changed_row: u32, changed_col: u32) {
+    evaluate_dependents_many(sheet, std::iter::once((changed_row, changed_col)));
+}
+
+/// 批量增量求值：**只构建一次依赖图**，重新计算「直接或间接依赖这批被改单元格的所有公式」。
+///
+/// 用于一次改动多个单元格的场景（填充柄填充、粘贴等）。替代对每个改动单元格各调用一次
+/// `evaluate_dependents`——后者每次都全表重建依赖图（`build_formula_graph` 为 O(单元格数)），
+/// 在 200 万+ 单元格的大表上，填 K 格 = K × O(2M)，造成 2~3 秒卡顿；本函数把 K 次重建收敛为 1 次。
+///
+/// 语义与 `evaluate_dependents` 完全一致（只重算依赖公式，不改被改格本身），仅支持一次传入多个变更格。
+pub fn evaluate_dependents_many<I>(sheet: &mut SheetData, changed: I)
+where
+    I: IntoIterator<Item = (u32, u32)>,
+{
     // 单元格值变化 → 标记条件格式需重算（事件驱动，替代每帧重算）
     sheet.cf_dirty = true;
     let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
-    if formula_cells.is_empty() { return; }
+    if formula_cells.is_empty() {
+        return;
+    }
 
-    let changed = (changed_row, changed_col);
-
-    // BFS 查找所有受影响的公式单元格
+    // BFS 查找所有受影响的公式单元格（从这批变更格出发）
     let mut affected: HashSet<(u32, u32)> = HashSet::new();
     let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-
-    // 从变更单元格出发，找到直接依赖它的公式单元格
-    if let Some(direct_deps) = reverse_deps.get(&changed) {
-        for &dep in direct_deps {
-            if affected.insert(dep) {
-                queue.push_back(dep);
+    for changed_cell in changed {
+        // 从变更单元格出发，找到直接依赖它的公式单元格
+        if let Some(direct_deps) = reverse_deps.get(&changed_cell) {
+            for &dep in direct_deps {
+                if affected.insert(dep) {
+                    queue.push_back(dep);
+                }
             }
         }
     }
@@ -1735,7 +1750,9 @@ pub fn evaluate_dependents(sheet: &mut SheetData, changed_row: u32, changed_col:
         }
     }
 
-    if affected.is_empty() { return; }
+    if affected.is_empty() {
+        return;
+    }
 
     topo_eval(sheet, &formula_cells, &affected, &forward_deps, &reverse_deps);
 }
@@ -1949,6 +1966,34 @@ mod tests {
         // A1=10 → SUM(A1:A5)=10+2+3+4+5=24 → C1=24+1=25
         assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "24");
         assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "25");
+    }
+
+    #[test]
+    fn test_evaluate_dependents_many() {
+        // 批量增量求值：一次改动多个单元格，受影响公式只重算一次，结果与逐格调用一致。
+        // 性能用例：fill/paste 的值路径改用本函数后，K 格改动只构建一次依赖图。
+        // B1=SUM(A1:A5), C1=B1+1
+        let mut sheet = make_formula_sheet(vec![
+            ((1, 1), "1", ""),   // A1
+            ((2, 1), "2", ""),   // A2
+            ((3, 1), "3", ""),   // A3
+            ((4, 1), "4", ""),   // A4
+            ((5, 1), "5", ""),   // A5
+            ((1, 2), "15", "=SUM(A1:A5)"), // B1
+            ((1, 3), "16", "=B1+1"),       // C1
+        ]);
+        evaluate_sheet(&mut sheet);
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "15");
+        assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "16");
+
+        // 同时改 A1=10、A2=20（一次传入多个变更格），批量增量求值
+        sheet.cells.get_mut(&(1, 1)).unwrap().value = "10".to_string();
+        sheet.cells.get_mut(&(2, 1)).unwrap().value = "20".to_string();
+        evaluate_dependents_many(&mut sheet, [(1, 1), (2, 1)].into_iter());
+
+        // SUM(A1:A5)=10+20+3+4+5=42 → C1=43
+        assert_eq!(sheet.cells.get(&(1, 2)).unwrap().value, "42");
+        assert_eq!(sheet.cells.get(&(1, 3)).unwrap().value, "43");
     }
 
     #[test]

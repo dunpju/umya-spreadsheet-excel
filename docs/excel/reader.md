@@ -78,10 +78,10 @@
 
 ### 2.7 条件格式求值
 
-- `apply_conditional_formatting(sheet)`：克隆规则后，对每个范围逐格取值并用 `evaluate_rule` 判定，命中则覆盖背景/字色/加粗。
+- `apply_conditional_formatting(sheet)`：克隆规则后，**只遍历已存在的单元格**（`sheet.cells` 稀疏），按范围包含关系（`CellRange::contains`）过滤并用 `evaluate_rule` 判定，命中则覆盖背景/字色/加粗。**复杂度 O(非空格数) 而非 O(范围面积)**——避免对大范围（如 5000×400 预警范围 = 200 万格）逐格 HashMap 查找的卡顿。
 - `evaluate_rule(rule, cell_value)`：按 `rule_type`/`operator` 分支，支持 `ContainsText`（含 `extract_contains_text_from_formula` 从 `SEARCH("...")` 提取文本）、`Greater/Less/Equal/NotEqual/Between` 等比较。
-- `reapply_conditional_formatting(sheet)`：重算入口——先恢复范围内原始样式（`original_bg`），再调用 `apply_conditional_formatting` 重新求值。**何时调用由 viewer 的事件驱动逻辑决定（见下）**，不再每帧无条件执行。
-- `apply_user_cond_format_rules(sheet, rules)`：应用用户 YAML 规则（`UserCondFormatRule`）。先经 `resolve_dynamic_range` 解析动态引用（`~行号`→行尾列、`列字母~`→列尾行、纯 `~`→右下角），再逐格用 `compare_equal` 等求值并着色。
+- `reapply_conditional_formatting(sheet)`：重算入口——先恢复范围内**已存在**单元格的原始样式（`original_bg`），再调用 `apply_conditional_formatting` 重新求值。**何时调用由 viewer 的事件驱动逻辑决定（见下）**，不再每帧无条件执行。
+- `apply_user_cond_format_rules(sheet, rules)`：应用用户 YAML 规则（`UserCondFormatRule`）。先经 `resolve_dynamic_range` 解析动态引用（`~行号`→行尾列、`列字母~`→列尾行、纯 `~`→右下角），再**只遍历该范围内已存在的单元格**用 `compare_equal` 等求值并着色（同样稀疏，避免按范围面积遍历空格）。
 
 #### 事件驱动刷新机制（`SheetData.cf_dirty`）
 
@@ -103,6 +103,8 @@
 | 滚动 / 闲置 | **否** | 无 evaluate，颜色保持（**主要收益**） |
 
 > 性能：对含条件格式的文件，滚动/闲置期间条件格式计算量下降约一个数量级；不含条件格式的表 `reapply_conditional_formatting` 本就走早返回快路径，收益较小。`cf_dirty` 是瞬时 UI 标志，不参与 xlsx 序列化。
+>
+> **稀疏遍历（性能关键）**：三个求值函数（`apply_conditional_formatting` / `reapply_conditional_formatting` / `apply_user_cond_format_rules`）都**遍历已存在的单元格 `sheet.cells`**（稀疏，仅非空格），而非按 `range.start..end` 的行列双重循环遍历"范围面积"。原因：`sheet.cells` 来自 OOXML，仅含非空格（稀疏）；而条件/预警范围常覆盖整张表（如 5000×400 = 200 万格），按面积遍历会每格做一次 HashMap 查找，单次重算可达 ~1 秒。稀疏遍历把复杂度从 O(范围面积) 降到 O(非空格数)。空格本就无 `CellData`、不会被着色/恢复，故稀疏遍历与原逻辑结果完全一致。修改 CF 求值时务必保持这一稀疏模式。
 
 ### 2.8 日期处理
 

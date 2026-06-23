@@ -150,7 +150,9 @@ fn format_date_text(pat: &DateText, y: u32, m: u32, d: u32) -> String {
 /// - `target` = `(col, row)` 拖拽结束格，决定填充轴向（垂直/水平）与方向（前/后）。
 ///
 /// 返回 `(被覆盖目标格的原始数据, 是否含公式填充)`。原始数据用于撤销；
-/// `has_formula` 提示调用方选择全表重算（`evaluate_sheet`）还是逐格增量重算（`evaluate_dependents`）。
+/// `has_formula` 提示调用方选择重算策略：含公式走全量重算（`evaluate_sheet`），
+/// 仅值走**批量**增量重算（`evaluate_dependents_many`，一次建图；勿逐格调 `evaluate_dependents`，
+/// 大表上为 K × O(2M) 会卡顿）。
 pub fn apply_fill(
     sheet: &mut SheetData,
     src: (u32, u32, u32, u32),
