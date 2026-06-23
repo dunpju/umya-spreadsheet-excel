@@ -12,7 +12,7 @@
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
-- **交互**：点击选中（绿色边框）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、键盘导航（Tab/方向键/Enter）。
+- **交互**：点击选中（绿色边框）、**Shift+点击范围选择**（从锚点到目标格的矩形选区）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、**Ctrl+C/Ctrl+V 复制粘贴（单格/矩形区域，TSV 格式，公式保留，支持撤销）**、键盘导航（Tab/方向键/Enter）。
 - **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.12）。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
@@ -25,7 +25,7 @@
 | 内部模块 | `crate::gui::alignment` | `alignment_to_egui`（对齐方式映射） |
 | 内部模块 | `crate::excel::formula` | `evaluate_sheet` / `evaluate_dependents`（公式重算） |
 | 内部模块 | `crate::excel::fill` | `apply_fill`（填充柄拖拽填充：格式复制 + 公式相对引用平移） |
-| 内部模块 | `crate::gui::viewer` | `ContextMenuState`（右键菜单状态） |
+| 内部模块 | `crate::gui::viewer` | `ContextMenuState`（右键菜单状态）、`PasteCommit`（粘贴撤销信号） |
 | 标准库 | `std::borrow::Cow` | 文本借用，避免克隆 |
 | 标准库 | `std::collections::HashSet` | 隐藏行/列集合 |
 
@@ -187,6 +187,48 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 > 之所以仍使用 `TextEdit` widget（而非手写 painter 编辑器）：egui 中光标、文本选区、剪贴板、CJK IME 均由 `TextEdit` 提供，手写会丢失这些能力。把它做透明无边框并占满整格，即可达到"直接在单元格里编辑"的视觉效果，同时保留全部编辑能力。
 
+### 2.16 Shift+点击范围选择
+
+Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单元格，选中以锚点（`shift_click_anchor`）和目标格为对角端点的矩形区域。
+
+- **锚点（`shift_click_anchor`）**：最后一次**非 Shift**点击或键盘导航（Tab/方向键）时的活动单元格。持久化在 viewer，跨帧保持。
+- **Shift+点击行为**：
+  - 活动单元格（`selected_cell`）**保持不变**（与 Excel 一致）。
+  - `selected_range` 设为锚点与目标格的包围盒：`(min_col, min_row, max_col, max_row)`。
+  - 若 Shift+点击锚点本身，清除 `selected_range`（退回单格选中）。
+  - 若无锚点（首次操作），视为普通点击。
+  - Shift+点击**不触发双击编辑**（仅普通点击才进入编辑模式）。
+- **与 viewer.rs 自动清除的协作**：viewer 在 `draw_table_content` 返回后检测 `selected_cell` 是否变化。Shift+点击不改变 `selected_cell`，因此不会触发自动清除，`selected_range` 保留。
+
+### 2.17 复制与粘贴（Ctrl+C / Ctrl+V）
+
+支持对单个单元格或矩形单元格区域执行 Ctrl+C 复制和 Ctrl+V 粘贴，与 Excel 交互行为一致。
+
+#### 复制（Ctrl+C）
+
+- **触发条件**：`Ctrl+C`（不含 Shift）、非编辑模式、有选中单元格、无校验弹窗。
+- **序列化格式**：TSV（Tab-Separated Values）——列间用 `\t` 分隔，行间用 `\n` 分隔。
+- **内容**：
+  - 有公式的单元格：复制公式文本（保证 `=` 前缀）。
+  - 无公式的单元格：复制显示文本（经 `cell_display_text` 处理，日期格式转换为日期字符串）。
+  - 空单元格：空字符串（TSV 中仍占据一个 tab 位置）。
+- **选区范围**：优先取 `selected_range` 的包围盒；否则为单格。
+- **剪贴板写入**：通过 `ui.ctx().copy_text(tsv)` 写入系统剪贴板，支持跨应用粘贴。
+- **事件消费**：调用 `consume_key(CTRL, C)` 防止快捷键穿透到其他控件。
+
+#### 粘贴（Ctrl+V）
+
+- **触发条件**：检测 `Event::Paste` 事件（由 winit 后端在 Ctrl+V 时生成）、非编辑模式、有选中单元格、无校验弹窗。
+- **解析**：从粘贴文本按 `\n` 和 `\t` 分割为二维字符串网格 `Vec<Vec<String>>`，过滤空行。
+- **写入逻辑**（与 Excel 一致）：
+  - 以活动单元格（`selected_cell`）为粘贴起点。
+  - 每个网格元素写入对应的 `sheet.cells[(row, col)]`：以 `=` 开头的字符串作为公式（写入 `cell.formula`），否则作为值（写入 `cell.value`）。
+  - 粘贴区域 = 起点 `(col, row)` 到 `(col + cols - 1, row + rows - 1)`。
+- **重算**：含公式则 `evaluate_sheet`（全量），否则对每个写入格调用 `evaluate_dependents`（增量）。
+- **选区更新**：粘贴多行或多列时，`selected_range` 更新为覆盖粘贴区域的包围盒；单格粘贴不改变选区。
+- **撤销**：通过 `committed_paste: &mut Option<PasteCommit>` 出参通知调用方，viewer 据此构造 `UndoAction::RangeClear` 入撤销栈（保存被覆盖格的原始数据 + 选区）。
+- **事件消费**：调用 `events.retain` 移除 `Event::Paste`，防止 TextEdit 等控件二次处理。
+
 ### 2.14 性能相关处理汇总
 
 | 技术 | 位置 | 作用 |
@@ -223,9 +265,13 @@ flowchart TD
     KBD -->|Tab/方向键| NAV["导航 + 触边滚动<br/>(冻结区感知)"]
     KBD -->|Enter| EDM["进入编辑模式"]
     KBD -->|保存| SAVE1["保存编辑 + 公式重算"]
+    KBD -->|Ctrl+C| COPY["序列化选区 → TSV<br/>ctx.copy_text()"]
+    KBD -->|Event::Paste| PASTE_DET["解析 TSV → 二维网格<br/>paste_request"]
     NAV --> RENDER
     EDM --> RENDER
     SAVE1 --> RENDER
+    COPY --> RENDER
+    PASTE_DET --> RENDER
 
     RENDER["获取 sheet 不可变借用<br/>painter_at + interact"] --> VP["虚拟渲染:<br/>二分查找可见行列"]
     VP --> P1["第一遍: 绘制单元格背景<br/>(合并左上角画大矩形)"]
@@ -234,14 +280,16 @@ flowchart TD
     FROZEN --> SEL["选中高亮 + 选中范围"]
     SEL --> EDIT{"editing_cell?<br/>(冻结覆盖层之后)"}
     EDIT -->|是| TEDIT["TextEdit 输入框<br/>保存/取消/实时重算"]
-    EDIT -->|否| RT
-    TEDIT --> RT["实时重算<br/>(edit_value 变化时)"]
-    RT --> OUT(["返回<br/>(scroll_to_rect, selected_cell_rect)"])
+    EDIT -->|否| POST
+    TEDIT --> POST["后处理: 填充 + 粘贴执行 + 实时重算"]
+    POST --> OUT(["返回<br/>(scroll_to_rect, selected_cell_rect)"])
 
     style IN fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style OUT fill:#e8f5e9,stroke:#43a047,stroke-width:2px
     style RENDER fill:#fff9c4,stroke:#f9a825,stroke-width:2px
     style FROZEN fill:#fce4ec,stroke:#c2185b
+    style COPY fill:#c8e6c9,stroke:#388e3c
+    style PASTE_DET fill:#c8e6c9,stroke:#388e3c
 ```
 
 ### 3.2 渲染层次（绘制顺序，后画者在上）
@@ -289,10 +337,15 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 ├── [闭包] is_cell_in_viewport                  [可见性判定]
 ├── [闭包] get_cell_global_rect                 [屏幕矩形(合并感知)]
 ├── 键盘处理
-│   ├── Tab(编辑/非编辑) → ui.scroll_to_rect
-│   ├── 方向键 → ui.scroll_to_rect + consume_key
+│   ├── Tab(编辑/非编辑) → ui.scroll_to_rect + 更新 shift_click_anchor
+│   ├── 方向键 → ui.scroll_to_rect + consume_key + 更新 shift_click_anchor
 │   ├── Enter → 进入编辑模式
-│   └── 键入即编辑(type-to-edit) → Event::Text 捕获
+│   ├── 键入即编辑(type-to-edit) → Event::Text 捕获
+│   ├── Ctrl+C → 序列化选区 TSV → ctx.copy_text()
+│   └── Event::Paste → 解析 TSV → paste_request
+├── 点击处理
+│   ├── 普通点击 → 更新 selected_cell + shift_click_anchor + 双击编辑
+│   └── Shift+点击 → 计算锚点到目标格的矩形范围 → selected_range
 ├── 保存编辑 → sheet.validate_cell / formula::evaluate_sheet|evaluate_dependents
 ├── [闭包] screen_to_cell                       [拖拽/框选: 屏幕坐标→单元格]
 ├── [闭包] expand_to_merge                      [拖拽合并展开]
@@ -309,7 +362,8 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 │   ├── 批注悬停气泡
 │   └── TextEdit 输入框（冻结覆盖之后绘制）
 ├── 实时重算 → formula::evaluate_sheet|evaluate_dependents
-└── 填充执行 → excel::fill::apply_fill → formula 重算
+├── 填充执行 → excel::fill::apply_fill → formula 重算
+└── 粘贴执行 → 解析 paste_request → 写入 cells → formula 重算 → committed_paste
 ```
 
 ### 3.4 对齐映射链路
@@ -357,6 +411,8 @@ flowchart LR
 | `committed_fill` | `&mut Option<crate::gui::viewer::FillCommit>` | 填充柄提交信号：一次成功填充后写入，调用方据此构造 `UndoAction::RangeClear` 入撤销栈 |
 | `hidden_columns` | `&HashSet<u32>` | 隐藏列集合 |
 | `hidden_rows` | `&HashSet<u32>` | 隐藏行集合 |
+| `shift_click_anchor` | `&mut Option<(u32, u32)>` | Shift+点击锚点（最后一次非 Shift 点击/键盘导航的单元格坐标），用于 Shift+点击范围选择 |
+| `committed_paste` | `&mut Option<crate::gui::viewer::PasteCommit>` | 粘贴提交信号：一次成功粘贴后写入，调用方据此构造 `UndoAction::RangeClear` 入撤销栈 |
 
 ### 4.2 私有函数（fn）
 

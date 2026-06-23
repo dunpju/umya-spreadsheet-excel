@@ -90,6 +90,8 @@ pub fn draw_table_content(
     committed_fill: &mut Option<crate::gui::viewer::FillCommit>,
     hidden_columns: &HashSet<u32>,
     hidden_rows: &HashSet<u32>,
+    shift_click_anchor: &mut Option<(u32, u32)>,
+    committed_paste: &mut Option<crate::gui::viewer::PasteCommit>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -261,6 +263,8 @@ pub fn draw_table_content(
     let editing_cell_for_save = editing_cell.clone();
     // 填充柄拖拽意图：渲染段检测 drag_stopped 时写入 (源选区, 目标格)，末尾执行段消费
     let mut fill_request: Option<((u32, u32, u32, u32), (u32, u32))> = None;
+    // 粘贴意图：键盘段检测 Event::Paste 后写入 (行数据, 目标起始格)，末尾执行段消费
+    let mut paste_request: Option<(Vec<Vec<String>>, (u32, u32))> = None;
 
     // 用于存储滚动目标矩形
     let mut scroll_to_rect: Option<egui::Rect> = None;
@@ -551,7 +555,68 @@ pub fn draw_table_content(
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
         }
     }
-    
+
+    // ========== Ctrl+C: 复制选中单元格（非编辑模式） ==========
+    // 将选中单元格/范围的值序列化为 TSV 格式，写入系统剪贴板
+    if input.modifiers.ctrl && !input.modifiers.shift && input.key_pressed(egui::Key::C)
+        && editing_cell.is_none() && selected_cell.is_some() && !validation_error_active
+    {
+        if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+            let (sc, sr, ec, er) = if let Some((c0, r0, c1, r1)) = *selected_range {
+                (c0.min(c1), r0.min(r1), c0.max(c1), r0.max(r1))
+            } else if let Some((c, r)) = *selected_cell {
+                (c, r, c, r)
+            } else {
+                (0, 0, 0, 0)
+            };
+            if sc > 0 {
+                let mut tsv = String::new();
+                for r in sr..=er {
+                    for c in sc..=ec {
+                        if c > sc { tsv.push('\t'); }
+                        if let Some(cell) = sheet.get_cell(r, c) {
+                            if !cell.formula.is_empty() {
+                                let f = &cell.formula;
+                                if f.starts_with('=') {
+                                    tsv.push_str(f);
+                                } else {
+                                    tsv.push_str(&format!("={}", f));
+                                }
+                            } else {
+                                tsv.push_str(&cell_display_text(cell));
+                            }
+                        }
+                    }
+                    tsv.push('\n');
+                }
+                ui.ctx().copy_text(tsv);
+            }
+        }
+        ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::C));
+    }
+
+    // ========== Ctrl+V / Event::Paste: 粘贴到选中单元格（非编辑模式） ==========
+    // 从 Event::Paste 获取剪贴板文本（由 winit 后端在 Ctrl+V 时生成），解析 TSV 并写入目标区域
+    if editing_cell.is_none() && selected_cell.is_some() && !validation_error_active {
+        let pasted = input.events.iter().find_map(|ev| match ev {
+            egui::Event::Paste(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        });
+        if let Some(text) = pasted {
+            if let Some((col, row)) = *selected_cell {
+                let rows: Vec<Vec<String>> = text.split('\n')
+                    .filter(|line| !line.is_empty())
+                    .map(|line| line.split('\t').map(|s| s.to_string()).collect())
+                    .collect();
+                if !rows.is_empty() && !rows[0].is_empty() {
+                    paste_request = Some((rows, (col, row)));
+                }
+            }
+            // 消费粘贴事件，防止 TextEdit 等控件二次处理
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+        }
+    }
+
     // 执行状态更新（在借用之前完成）
     if save_current_edit {
         if let Some((edit_col, edit_row)) = editing_cell_for_save {
@@ -610,6 +675,8 @@ pub fn draw_table_content(
     }
     if let Some(cell) = new_selected_cell {
         *selected_cell = Some(cell);
+        // 键盘导航（Tab/方向键）更新 Shift+点击锚点
+        *shift_click_anchor = Some(cell);
     }
     
     // 处理Enter进入编辑模式（需要重新获取sheet）
@@ -802,40 +869,64 @@ pub fn draw_table_content(
                 // 更新选中单元格（保持 col, row 顺序）
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
                     if col > 0 && row > 0 {
-                        *selected_cell = Some((col, row));
-                        
-                        // 处理双击事件，进入编辑模式
-                        if response.double_clicked() {
-                            // 检查是否是合并单元格，如果是则获取左上角单元格
-                            let (edit_col, edit_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
-                                // 合并单元格：使用左上角单元格
-                                (merged_range.start_col, merged_range.start_row)
+                        let shift_held = input.modifiers.shift;
+                        if shift_held {
+                            // Shift+点击：从锚点到点击格扩展选中范围（与 Excel 一致）
+                            // 活动单元格（selected_cell）保持不变
+                            if let Some((ac, ar)) = *shift_click_anchor {
+                                if (ac, ar) == (col, row) {
+                                    // Shift+点击锚点本身：清除选区范围
+                                    *selected_range = None;
+                                } else {
+                                    let sr_col = ac.min(col);
+                                    let sr_row = ar.min(row);
+                                    let er_col = ac.max(col);
+                                    let er_row = ar.max(row);
+                                    *selected_range = Some((sr_col, sr_row, er_col, er_row));
+                                }
                             } else {
-                                // 普通单元格：使用当前单元格
-                                (col, row)
-                            };
-                            
-                            *editing_cell = Some((edit_col, edit_row));
-                            // 有公式的单元格显示公式，无公式的显示值
-                            *edit_value = sheet.get_cell(edit_row, edit_col)
-                                .map(|cell| {
-                                    if !cell.formula.is_empty() {
-                                        let f = &cell.formula;
-                                        if f.starts_with('=') {
-                                            f.clone()
+                                // 无锚点（首次操作）：视为普通点击
+                                *shift_click_anchor = Some((col, row));
+                                *selected_cell = Some((col, row));
+                            }
+                        } else {
+                            // 普通点击：更新锚点和活动单元格
+                            *shift_click_anchor = Some((col, row));
+                            *selected_cell = Some((col, row));
+
+                            // 处理双击事件，进入编辑模式（仅普通点击触发，Shift+点击不进入编辑）
+                            if response.double_clicked() {
+                                // 检查是否是合并单元格，如果是则获取左上角单元格
+                                let (edit_col, edit_row) = if let Some(merged_range) = sheet.get_merged_range(col, row) {
+                                    // 合并单元格：使用左上角单元格
+                                    (merged_range.start_col, merged_range.start_row)
+                                } else {
+                                    // 普通单元格：使用当前单元格
+                                    (col, row)
+                                };
+
+                                *editing_cell = Some((edit_col, edit_row));
+                                // 有公式的单元格显示公式，无公式的显示值
+                                *edit_value = sheet.get_cell(edit_row, edit_col)
+                                    .map(|cell| {
+                                        if !cell.formula.is_empty() {
+                                            let f = &cell.formula;
+                                            if f.starts_with('=') {
+                                                f.clone()
+                                            } else {
+                                                format!("={}", f)
+                                            }
                                         } else {
-                                            format!("={}", f)
+                                            cell_display_text(cell).into_owned()
                                         }
-                                    } else {
-                                        cell_display_text(cell).into_owned()
-                                    }
-                                })
-                                .unwrap_or_default();
-                            // 保存原始单元格数据，用于校验失败时恢复
-                            let orig = sheet.get_cell(edit_row, edit_col)
-                                .map(|c| (c.value.clone(), c.formula.clone()))
-                                .unwrap_or_default();
-                            *original_cell_data = Some(((edit_col, edit_row), orig.0, orig.1));
+                                    })
+                                    .unwrap_or_default();
+                                // 保存原始单元格数据，用于校验失败时恢复
+                                let orig = sheet.get_cell(edit_row, edit_col)
+                                    .map(|c| (c.value.clone(), c.formula.clone()))
+                                    .unwrap_or_default();
+                                *original_cell_data = Some(((edit_col, edit_row), orig.0, orig.1));
+                            }
                         }
                     }
                 }
@@ -2225,6 +2316,78 @@ pub fn draw_table_content(
                 old_range: prev_range,
             });
         }
+    }
+
+    // ========== 粘贴提交：将剪贴板内容写入单元格、重算、更新选区、通知撤销 ==========
+    if let Some((rows, (start_col, start_row))) = paste_request {
+        let prev_selected = *selected_cell;
+        let prev_range = *selected_range;
+
+        // 保存旧单元格数据（用于撤销）
+        let old_cells = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
+            let mut cells = Vec::new();
+            for (dr, row_vals) in rows.iter().enumerate() {
+                for dc in 0..row_vals.len() {
+                    let tc = start_col + dc as u32;
+                    let tr = start_row + dr as u32;
+                    cells.push((tr, tc, sheet.get_cell(tr, tc).cloned()));
+                }
+            }
+            cells
+        } else {
+            Vec::new()
+        };
+
+        // 写入粘贴数据
+        let mut has_formula = false;
+        for (dr, row_vals) in rows.iter().enumerate() {
+            for (dc, val) in row_vals.iter().enumerate() {
+                let tc = start_col + dc as u32;
+                let tr = start_row + dr as u32;
+                let is_formula = val.starts_with('=');
+                if is_formula { has_formula = true; }
+                if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                    let cell = sheet.cells.entry((tr, tc)).or_insert_with(CellData::default);
+                    if is_formula {
+                        cell.formula = val.clone();
+                        // value 将由公式求值填充
+                    } else {
+                        cell.value = val.clone();
+                        cell.formula.clear();
+                    }
+                }
+            }
+        }
+
+        // 公式重算
+        if has_formula {
+            crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+        } else {
+            for (dr, row_vals) in rows.iter().enumerate() {
+                for dc in 0..row_vals.len() {
+                    let tc = start_col + dc as u32;
+                    let tr = start_row + dr as u32;
+                    crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], tr, tc);
+                }
+            }
+        }
+        *dirty = true;
+
+        // 更新选中范围（覆盖粘贴区域）
+        let paste_rows = rows.len() as u32;
+        let paste_cols = rows[0].len() as u32;
+        if paste_rows > 1 || paste_cols > 1 {
+            let er = start_row + paste_rows - 1;
+            let ec = start_col + paste_cols - 1;
+            *selected_range = Some((start_col, start_row, ec, er));
+        }
+
+        // 撤销信号：调用方据此构造 RangeClear 入栈（恢复 old_cells + 选区）
+        *committed_paste = Some(crate::gui::viewer::PasteCommit {
+            old_cells,
+            old_selected: prev_selected,
+            old_range: prev_range,
+        });
     }
 
     // 返回（滚动目标矩形, 选中单元格屏幕矩形）
