@@ -130,7 +130,7 @@ flowchart TD
     D -->|是| E["viewer 置 visible=true（自动弹窗）"]
     D -->|否| F["仅显示图标或隐藏"]
     E --> G["draw_alert_notify_popup(ctx, state, ...)"]
-    G --> H["Window::anchor(CENTER_CENTER, ZERO) 居中定位"]
+    G --> H["Window::pivot(CENTER_CENTER) + default_pos(center) 居中且可拖动"]
     G --> I["点击规则 ► filter_by_triggered_rule ► hidden_columns/rows"]
     G --> J["点击重置/关闭 ► reset_filter"]
     I --> K["表格渲染跳过隐藏行列"]
@@ -166,11 +166,12 @@ flowchart TD
 
 ---
 
-## 6. 弹窗居中定位的实现方式（重点）
+## 6. 弹窗居中定位 + 可拖动的实现方式（重点）
 
 ### 6.1 定位代码
 
-`draw_alert_notify_popup` 中用 `egui::Window` 的 **anchor**（锚点）定位：
+`draw_alert_notify_popup` 中用 `egui::Window` 的 **`pivot` + `default_pos`** 组合定位——
+既精确居中，又保留鼠标拖动：
 
 ```rust
 egui::Window::new("alert_notify_popup")
@@ -178,41 +179,57 @@ egui::Window::new("alert_notify_popup")
     .resizable(false)
     .collapsible(false)
     .open(&mut keep_open)
-    // 以主窗口视口（屏幕）中心为基准居中弹出
-    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+    // pivot(CENTER_CENTER)：窗口中心点作为锚点；default_pos(center)：仅首次出现时把锚点设为视口中心
+    .pivot(egui::Align2::CENTER_CENTER)
+    .default_pos(ctx.content_rect().center())
     .show(ctx, |ui| { ... });
 ```
 
-### 6.2 egui anchor 的工作原理（数据流）
+### 6.2 egui 定位 + 拖动的数据流
 
 egui 的 `Area`（`Window` 的基类）定位由两个字段决定（见 egui 0.34 `containers/area.rs`）：
 
-- `pivot: Align2` —— 窗口自身的锚点（默认 `LEFT_TOP`，即左上角）。
+- `pivot: Align2` —— 窗口自身的锚点（默认 `LEFT_TOP`，即左上角）。`pivot(CENTER_CENTER)` 改为窗口**中心**。
 - `pivot_pos: Pos2` —— 该锚点要对齐到的**屏幕坐标**。
 
-最终窗口左上角 = `pivot_pos - pivot.to_factor() * size`（`AreaState::left_top_pos`）。
-`.anchor(align, offset)` 同时设置二者：
+最终窗口左上角 = `pivot_pos − pivot.to_factor() × size`（`AreaState::left_top_pos`）。
+定位与拖动每帧的数据流（`Area::show`）：
 
-1. `pivot = align`（此处 `CENTER_CENTER`，`to_factor()` 在 x、y 均为 0.5）；
-2. `pivot_pos = 屏幕对应角/点的坐标 + offset`（`CENTER_CENTER` → 屏幕中心 + `ZERO`）；
-3. 故左上角 = `屏幕中心 - 0.5 × 窗口尺寸` → **窗口中心精确落在屏幕中心**，水平垂直同时居中。
+1. `state.pivot = self.pivot`（每帧从 `pivot()` 设置 → `CENTER_CENTER`，`to_factor()` 在 x、y 均为 0.5）；
+2. `if let Some(new_pos) = new_pos { state.pivot_pos = Some(new_pos) }` —— **仅 `current_pos`/`fixed_pos`/`anchor` 走这条**，
+   每帧强制覆盖 `pivot_pos`；`default_pos` **不走这条**。
+3. `state.pivot_pos.get_or_insert_with(|| default_pos ...)` —— **仅当 `pivot_pos` 为空（首次出现）时**用 `default_pos`
+   填入 `content_rect().center()`；之后 `pivot_pos` 被持久化，不再每帧覆盖。
+4. 拖动：`Area` 对**整个窗口矩形** `state.rect()` 建立 `Sense::DRAG` 的 `move` 交互（`movable=true` 时）；
+   拖动期间 `state.pivot_pos = 拖动起点的 pivot_pos + total_drag_delta()`（持久化更新）。
 
-关键性质：
+故本组合达成：
 
-- **每帧重新锚定**：anchor 在 `Area::show` 每帧把 `pivot_pos` 重设为屏幕中心，因此展开/折叠动画改变
-  窗口高度时，窗口**从中心向上下两侧对称伸缩**，始终保持居中（而非从某条边生长）。
-- **`movable(false)`**：`anchor` 内部调用 `self.movable(false)`，窗口不可拖拽——对自动触发的通知弹窗是期望行为。
-- **居中基准为屏幕（视口）**：anchor 使用 `ctx` 屏幕矩形；对 eframe 全屏原生窗口即"主窗口视口中心"。
+- **精确居中**：首帧 `pivot_pos = 视口中心`、`pivot = CENTER_CENTER` → 左上角 = `视口中心 − 0.5×尺寸` → 窗口中心落在视口中心。
+- **动画仍从中心伸缩**：高度随展开/折叠变化时，`左上角 = 中心 − 0.5×尺寸` 每帧重算，窗口**从中心向上下两侧对称生长/收缩**。
+- **可自由拖动**：`movable` 保持默认 `true`（未调用 `anchor`/`fixed_pos`），拖动更新的 `pivot_pos` 不被每帧覆盖，故可拖动；
+  且 `move` 交互作用于整个窗口矩形，拖动标题栏或空白处都能移动（点击按钮/规则项等子控件由其自身消费，不触发拖动）。
 
-### 6.3 历史 / 对比
+### 6.3 为什么不用 `.anchor(...)`（回归根因）
 
-| 版本 | 定位方式 | 结果 |
-|------|----------|------|
-| 旧 | `.default_pos(content_rect().right_center() - vec2(320, 0))` | 窗口**左上角**落在视口右中点偏左 320px 处 → 整体偏右、且窗口向下延伸显得偏下 |
-| 现 | `.anchor(CENTER_CENTER, Vec2::ZERO)` | 窗口**中心**对齐视口中心 → 水平垂直居中 |
+此前为居中改用 `.anchor(Align2::CENTER_CENTER, Vec2::ZERO)`，但 `anchor` 有两个副作用导致拖动回归：
 
-> `default_pos` 设的是窗口**左上角**且仅首次出现生效（之后 egui 记忆位置、可拖动），无法在不预知窗口尺寸时精确居中；
-> `anchor` 按锚点 + 尺寸反算左上角，且每帧重锚定，是 egui 居中弹窗的惯用法。
+- `anchor` 内部调用 `self.movable(false)` → `movable=false`，`Area` 不再建立 `Sense::DRAG` 的 `move` 交互；
+- `anchor` 每帧走第 2 步把 `pivot_pos` 强制重设为屏幕中心 → 即便强行恢复 `movable(true)`，拖动更新的 `pivot_pos`
+  下一帧又被覆盖回中心，表现为"拖不动 / 拖完弹回中心"。
+
+改用 `pivot(CENTER_CENTER) + default_pos(center)` 同时规避这两点（`movable` 默认 `true`、`default_pos` 不每帧覆盖）。
+
+### 6.4 版本对比
+
+| 版本 | 定位方式 | 居中 | 可拖动 |
+|------|----------|------|--------|
+| 最初 | `.default_pos(right_center − vec2(320,0))`（左上角定位） | ✗（偏右偏下） | ✓ |
+| 居中改版（回归） | `.anchor(CENTER_CENTER, Vec2::ZERO)` | ✓ | ✗（`movable=false`） |
+| **现** | `.pivot(CENTER_CENTER).default_pos(content_rect().center())` | ✓ | ✓ |
+
+> 说明：`default_pos` 仅在首次出现（`pivot_pos` 为空）时生效，egui 之后持久化 `pivot_pos`；若弹窗被关闭较久
+> （Area 状态被回收），下次打开会重新按 `default_pos` 居中。
 
 ---
 
@@ -221,5 +238,6 @@ egui 的 `Area`（`Window` 的基类）定位由两个字段决定（见 egui 0.
 - 弹窗、搜索过滤、表格渲染共用同一份 `hidden_columns` / `hidden_rows`；切换工作表 / 关闭弹窗需清空，
   避免遗留隐藏状态（`reset_filter` / viewer 的清空逻辑负责）。
 - 改动不得破坏菜单栏图标点击、表格交互（冻结窗格、复制粘贴、填充柄等）。
-- 若日后需要让弹窗可拖动，应改用 `.pivot(CENTER_CENTER).current_pos(center)`（但注意此时每帧强制设位会令拖动失效），
-  或仅用 `default_pos` 做首次居中——需自行取舍"精确居中"与"可拖动"。
+- **居中定位切勿改回 `.anchor(...)`**：anchor 会置 `movable=false` 且每帧重锚定，导致拖动回归
+  （详见 §6.3）。需"精确居中 + 可拖动"时，统一用 `.pivot(CENTER_CENTER).default_pos(center)`。
+  勿用 `.current_pos(center)`（每帧强制覆盖 `pivot_pos`，同样令拖动失效）。

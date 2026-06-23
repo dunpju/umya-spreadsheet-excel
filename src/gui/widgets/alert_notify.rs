@@ -565,11 +565,15 @@ pub fn draw_alert_notify_popup(
         .resizable(false)
         .collapsible(false)
         .open(&mut keep_open)
-        // 以主窗口视口（屏幕）中心为基准居中弹出：
-        // anchor(CENTER_CENTER, ZERO) 让窗口中心点对齐屏幕中心，每帧重新锚定，
-        // 故展开/折叠动画改变高度时窗口仍保持居中（高度从中心向上下两侧伸缩）。
-        // 注意 anchor 会令窗口不可拖动（movable=false）——对自动触发的通知弹窗是期望行为。
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 以视口中心为基准居中弹出，同时保留鼠标拖动：
+        // · pivot(CENTER_CENTER)：把"窗口中心点"作为锚点，egui 按 left_top = pivot_pos − 0.5×size
+        //   反算左上角，窗口中心精确落在 pivot_pos → 居中。
+        // · default_pos(center)：仅在 pivot_pos 为空（首次出现）时把锚点设为视口中心；之后 egui
+        //   持久化 pivot_pos，不再每帧覆盖——故鼠标拖动（Sense::DRAG 作用于整个窗口矩形）对 pivot_pos
+        //   的更新得以保留，弹窗可自由拖动。
+        // 不能用 .anchor(...)：anchor 每帧强制重锚定 pivot_pos 且内部置 movable(false)，会令拖动失效。
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
             ui.set_min_width(popup_width);
 
