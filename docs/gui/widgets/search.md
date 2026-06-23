@@ -355,7 +355,8 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 `draw_search_window(ctx, state, excel_data, current_sheet, hidden_columns, hidden_rows)` 是每帧调用的绘制入口，状态与 UI 联动如下：
 
 ### 6.1 窗口控制与动画
-- `state.visible` 为 false 直接 `return`；`keep_open` 与 egui `Window::open` 绑定，关闭时置 `visible=false`。
+- `state.visible` 为 false 直接 `return`；`keep_open` 与 egui `Window::open` 绑定。
+- **关闭即重置**：点击 `✖` 关闭按钮或 egui 内置关闭（如 Escape）时，自动调用 `reset_search` 清空隐藏行列、搜索状态、用户输入与筛选条件，将表格恢复到搜索前的完整显示——用户无需手动点击重置。
 - **折叠动画**：用 `ctx.animate_value_with_time("search_window_expand", target, 0.2)` 驱动 `p∈[0,1]`；`p > 0.001` 才渲染内容区。动画器自动 `request_repaint`，避免逐帧卡顿。点击自定义标题栏切换 `state.collapsed`。
 
 ### 6.2 延迟加载（一次性）
@@ -379,8 +380,13 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 ### 6.5 自动还原（行筛选特有）
 当某行筛选输入被改空（`response.changed() && keyword.trim().is_empty() && is_row_searching`）时，自动 `hidden_rows.clear()` 并重置行筛选状态——用户清空输入即恢复全表显示，无需点重置。
 
-### 6.6 重置按钮
-统一清空：`hidden_columns`/`hidden_rows`、列搜索状态（`is_searching/matched_count/total_searched/search_keyword`）、行筛选状态、所有 `row_filters[i].keyword` 与 `row_filters[i].op`（重置为 `包含`）、`row_debug_info`，并把 `column_filters` 复位为一条空条件（`op=包含`，保留交互骨架）。
+### 6.6 重置按钮与关闭按钮共享还原逻辑
+三个入口共用同一个 `reset_search(state, hidden_columns, hidden_rows)` 私有函数：
+- **🔄 重置按钮**：用户点击后调用 `reset_search`。
+- **✖ 关闭按钮**：调用 `reset_search` 后置 `visible=false`，关闭弹窗的同时恢复表格。
+- **egui 内置关闭**（`!keep_open`）：同上，覆盖 Escape 等关闭路径。
+
+`reset_search` 统一清空：`hidden_columns`/`hidden_rows`、列搜索状态（`is_searching/matched_count/total_searched/search_keyword`/`debug_info`）、行筛选状态（`is_row_searching/matched_count/total_searched/`debug_info`）、所有 `row_filters[i].keyword` 与 `row_filters[i].op`（重置为 `包含`）、并把 `column_filters` 复位为一条空条件（`op=包含`，保留交互骨架）。模式与 `alert_notify.rs` 的 `reset_filter` 一致。
 
 ### 6.7 反馈信息
 - **列筛选统计**：`is_searching` 时显示 `匹配 N/M 列`，走二分时附加 `(二分)` 标记。
@@ -448,9 +454,9 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 | 区域 | UI 元素 | 绑定的状态字段 / 动作 | 宽度/约束 |
 |------|---------|----------------------|-----------|
 | 标题栏 | 折叠箭头 `▶/▼` + "搜索" | 点击切换 `state.collapsed` | — |
-| 标题栏 | `🔄 重置` | 清空 `hidden_*`、搜索状态、关键字与运算符，`column_filters` 复位为一条 | — |
+| 标题栏 | `🔄 重置` | 调用 `reset_search` 清空全部（与关闭按钮共用） | — |
 | 标题栏 | `🔍 搜索` | 有激活输入时启用；执行列搜索 + 行筛选 | enabled = `has_col \|\| has_row` |
-| 标题栏 | `✖` | `state.visible = false` | — |
+| 标题栏 | `✖` | `reset_search(...)` 后置 `visible = false`，关闭时自动恢复表格 | — |
 | 列标题行 | "列筛选:" + `匹配 N/M 列 (二分)` | `is_searching` / `matched_count` / `total_searched` / `use_binary_search` | — |
 | 列标题行 | `添加筛选条件` | `column_filters.push(空 ColumnFilter)` | right_to_left |
 | 条件行 | 列下拉 ComboBox | `column_filters[idx].column_index` → `column_options` | 166 |

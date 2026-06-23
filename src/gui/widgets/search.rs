@@ -1532,6 +1532,40 @@ fn expand_hidden_rows_for_merged_cells(
     }
 }
 
+/// 重置搜索状态并恢复表格显示（关闭弹窗 / 重置按钮共用）
+///
+/// 清空所有隐藏行列集合、搜索/筛选状态字段、用户输入与筛选条件，
+/// 使表格恢复到未搜索前的完整显示状态。遵循 `alert_notify.rs` 的
+/// `reset_filter` 模式：关闭与重置共享同一个还原函数。
+fn reset_search(
+    state: &mut SearchWindowState,
+    hidden_columns: &mut HashSet<u32>,
+    hidden_rows: &mut HashSet<u32>,
+) {
+    hidden_columns.clear();
+    hidden_rows.clear();
+    state.is_searching = false;
+    state.matched_count = 0;
+    state.total_searched = 0;
+    state.search_keyword.clear();
+    state.is_row_searching = false;
+    state.row_matched_count = 0;
+    state.row_total_searched = 0;
+    state.debug_info.clear();
+    for f in &mut state.row_filters {
+        f.keyword.clear();
+        f.op = CompareOp::Contains;
+    }
+    state.row_debug_info.clear();
+    state.column_filters.clear();
+    state.column_filters.push(ColumnFilter {
+        column_index: 0,
+        filter_value: String::new(),
+        logic: FilterLogic::And,
+        op: CompareOp::Contains,
+    });
+}
+
 /// 执行多条件列筛选（按列值过滤数据行，AND 优先级高于 OR）
 ///
 /// 根据 `column_filters` 中的条件，对每行数据检查指定列的值是否匹配。
@@ -1689,8 +1723,9 @@ pub fn draw_search_window(
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        // 关闭按钮
+                        // 关闭按钮：关闭弹窗并恢复表格到搜索前状态
                         if ui.button("✖").clicked() {
+                            reset_search(state, hidden_columns, hidden_rows);
                             state.visible = false;
                         }
 
@@ -1720,30 +1755,9 @@ pub fn draw_search_window(
                             }
                         }
 
-                        // 重置按钮（统一清空列搜索 + 列过滤 + 行筛选）
+                        // 重置按钮：清空搜索状态并恢复表格显示
                         if ui.button("🔄 重置").clicked() {
-                            hidden_columns.clear();
-                            hidden_rows.clear();
-                            state.is_searching = false;
-                            state.matched_count = 0;
-                            state.total_searched = 0;
-                            state.search_keyword.clear();
-                            state.is_row_searching = false;
-                            state.row_matched_count = 0;
-                            state.row_total_searched = 0;
-                            for f in &mut state.row_filters {
-                                f.keyword.clear();
-                                f.op = CompareOp::Contains;
-                            }
-                            state.row_debug_info.clear();
-                            // 清空列筛选条件（保留一条空条件）
-                            state.column_filters.clear();
-                            state.column_filters.push(ColumnFilter {
-                                column_index: 0,
-                                filter_value: String::new(),
-                                logic: FilterLogic::And,
-                                op: CompareOp::Contains,
-                            });
+                            reset_search(state, hidden_columns, hidden_rows);
                         }
                     },
                 );
@@ -2068,8 +2082,9 @@ pub fn draw_search_window(
             }
         });
 
-    // 窗口关闭
+    // 窗口关闭（egui 内置关闭机制，如按 Escape）：恢复表格到搜索前状态
     if !keep_open {
+        reset_search(state, hidden_columns, hidden_rows);
         state.visible = false;
     }
 }
