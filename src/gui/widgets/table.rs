@@ -92,6 +92,7 @@ pub fn draw_table_content(
     hidden_rows: &HashSet<u32>,
     shift_click_anchor: &mut Option<(u32, u32)>,
     committed_paste: &mut Option<crate::gui::viewer::PasteCommit>,
+    copied_cells: &mut Option<String>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -589,20 +590,36 @@ pub fn draw_table_content(
                     }
                     tsv.push('\n');
                 }
-                ui.ctx().copy_text(tsv);
+                ui.ctx().copy_text(tsv.clone());
+                // 同步存储到内部剪贴板缓冲（解决 Event::Paste 在无文本焦点时不触发的问题）
+                *copied_cells = Some(tsv);
             }
         }
         ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::C));
     }
 
     // ========== Ctrl+V / Event::Paste: 粘贴到选中单元格（非编辑模式） ==========
-    // 从 Event::Paste 获取剪贴板文本（由 winit 后端在 Ctrl+V 时生成），解析 TSV 并写入目标区域
+    // 优先使用内部剪贴板缓冲（copied_cells），其次尝试 Event::Paste（编辑态下由 TextEdit 触发）。
+    // 根因：winit/egui 后端仅在存在活跃 TextEdit 焦点时才生成 Event::Paste，
+    // 普通表格交互区域有焦点但无 TextEdit 时按 Ctrl+V 不会产生 Paste 事件。
     if editing_cell.is_none() && selected_cell.is_some() && !validation_error_active {
+        // 优先级 1：直接检测 Ctrl+V 按键，从内部缓冲读取
+        let ctrl_v_pressed = input.modifiers.ctrl && !input.modifiers.shift && input.key_pressed(egui::Key::V);
+        // 优先级 2：Event::Paste（编辑态内部粘贴，或某些后端会生成）
         let pasted = input.events.iter().find_map(|ev| match ev {
             egui::Event::Paste(s) if !s.is_empty() => Some(s.clone()),
             _ => None,
         });
-        if let Some(text) = pasted {
+
+        let paste_text = if ctrl_v_pressed {
+            // Ctrl+V 按下：优先内部缓冲，其次 Event::Paste
+            copied_cells.clone().or(pasted)
+        } else {
+            // 无 Ctrl+V：仅在 Event::Paste 时触发（如编辑态 TextEdit 自身的粘贴）
+            pasted
+        };
+
+        if let Some(text) = paste_text {
             if let Some((col, row)) = *selected_cell {
                 let rows: Vec<Vec<String>> = text.split('\n')
                     .filter(|line| !line.is_empty())
@@ -614,6 +631,10 @@ pub fn draw_table_content(
             }
             // 消费粘贴事件，防止 TextEdit 等控件二次处理
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+        }
+        // 消费 Ctrl+V 按键，防止穿透到其他控件
+        if ctrl_v_pressed {
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
         }
     }
 

@@ -214,11 +214,15 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
   - 空单元格：空字符串（TSV 中仍占据一个 tab 位置）。
 - **选区范围**：优先取 `selected_range` 的包围盒；否则为单格。
 - **剪贴板写入**：通过 `ui.ctx().copy_text(tsv)` 写入系统剪贴板，支持跨应用粘贴。
+- **内部缓冲同步**：同时存储到 `copied_cells: &mut Option<String>` 内部缓冲。这是粘贴时不依赖 `Event::Paste` 的关键——winit/egui 后端仅在活跃 `TextEdit` 焦点时才生成 `Event::Paste`，普通表格交互区域有焦点但无 TextEdit 时按 Ctrl+V 不会产生 Paste 事件。
 - **事件消费**：调用 `consume_key(CTRL, C)` 防止快捷键穿透到其他控件。
 
 #### 粘贴（Ctrl+V）
 
-- **触发条件**：检测 `Event::Paste` 事件（由 winit 后端在 Ctrl+V 时生成）、非编辑模式、有选中单元格、无校验弹窗。
+- **触发条件**：`Ctrl+V`（不含 Shift）或 `Event::Paste`、非编辑模式、有选中单元格、无校验弹窗。
+- **数据来源优先级**：
+  1. **Ctrl+V 按键** → 优先读取 `copied_cells` 内部缓冲（保证无文本焦点时粘贴可用）。
+  2. 若内部缓冲为空 → 尝试读取 `Event::Paste`（覆盖编辑态内部粘贴或某些后端补丁场景）。
 - **解析**：从粘贴文本按 `\n` 和 `\t` 分割为二维字符串网格 `Vec<Vec<String>>`，过滤空行。
 - **写入逻辑**（与 Excel 一致）：
   - 以活动单元格（`selected_cell`）为粘贴起点。

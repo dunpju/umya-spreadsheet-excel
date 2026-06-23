@@ -223,6 +223,10 @@ pub struct ExcelViewer {
     pub fill_drag_source: Option<(u32, u32)>,
     /// Shift+点击选择锚点（最后一次非 Shift 点击/键盘导航的单元格坐标），用于 Shift+点击范围选择
     pub shift_click_anchor: Option<(u32, u32)>,
+    /// 内部剪贴板缓冲：存储上次 Ctrl+C 复制的 TSV 数据。
+    /// 解决 winit/egui 后端仅在活跃 TextEdit 焦点时才生成 Event::Paste 的问题，
+    /// 确保无文本焦点时 Ctrl+V 仍能从内部缓冲粘贴。
+    pub copied_cells: Option<String>,
     /// 插入完成后滚动到最右列，使新列出现在可视区域
     scroll_to_last_col: bool,
     /// 菜单栏触发的"添加行"操作标志
@@ -308,6 +312,7 @@ impl ExcelViewer {
             drag_anchor: None,
             fill_drag_source: None,
             shift_click_anchor: None,
+            copied_cells: None,
             search_window: SearchWindowState::default(),
             convert_popup: ConvertPopupState::default(),
             alert_popup: AlertPopupState::load_from_file(),
@@ -1084,6 +1089,7 @@ impl eframe::App for ExcelViewer {
                             &self.hidden_rows,
                             &mut self.shift_click_anchor,
                             &mut committed_paste,
+                            &mut self.copied_cells,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
