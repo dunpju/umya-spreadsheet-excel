@@ -1574,12 +1574,19 @@ impl eframe::App for ExcelViewer {
 
                         // 根据操作类型显示不同的确认弹窗
                         if confirm_action == Some(ContextAction::ClearCell) {
-                            // 清空确认弹窗（区分范围/单格）
+                            // 清空确认弹窗（区分范围/单格）—— 红色警示样式
+                            // 清空属于破坏性操作，整个弹窗（标题/正文/边框/背景/确认按钮）采用红色系配色，
+                            // 从视觉上强化警示效果，与插入列的普通确认弹窗区分开。
                             let confirm_text = if self.context_menu.clear_is_range {
                                 "确定清空选中范围的内容？"
                             } else {
                                 "确定清空该单元格的内容？"
                             };
+                            // 红色系配色
+                            let warn_red = egui::Color32::from_rgb(211, 47, 47);   // 主警示红：边框 + 标题 + 确认按钮填充
+                            let light_red = egui::Color32::from_rgb(254, 236, 236); // 浅红背景
+                            let dark_red = egui::Color32::from_rgb(150, 24, 24);    // 深红正文
+                            let soft_red = egui::Color32::from_rgb(200, 80, 80);    // 柔红：取消按钮描边
                             egui::Window::new("clear_confirm")
                                 .title_bar(false)
                                 .open(&mut keep_open)
@@ -1587,18 +1594,52 @@ impl eframe::App for ExcelViewer {
                                 .collapsible(false)
                                 .order(egui::Order::Foreground)
                                 .fixed_pos(self.context_menu.position)
+                                .min_height(80.0)
+                                .max_height(80.0)
+                                // 红色边框 + 浅红背景的警示框架（沿用 Window 默认阴影/圆角以保留层次感）
+                                .frame(
+                                    egui::Frame::window(ui.style())
+                                        .fill(light_red)
+                                        .stroke(egui::Stroke::new(2.0, warn_red))
+                                        .inner_margin(egui::Margin::same(10)),
+                                )
                                 .show(ui.ctx(), |ui| {
-                                    ui.set_width(200.0);
-                                    ui.set_height(25.0);
+                                    ui.set_width(240.0);
+                                    // 警示标题行（红色加粗 + ⚠ 图标）
                                     ui.vertical_centered(|ui| {
-                                        ui.label(egui::RichText::new(confirm_text).size(13.0));
+                                        ui.label(
+                                            egui::RichText::new("⚠ 警告")
+                                                .color(warn_red)
+                                                .strong()
+                                                .size(15.0),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                    // 正文（深红）
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(confirm_text)
+                                                .color(dark_red)
+                                                .size(13.0),
+                                        );
                                     });
                                     ui.add_space(8.0);
+                                    // 按钮：确认（红色填充，破坏性操作）在右、取消（中性描边）在左
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("确认").clicked() {
+                                        let confirm_btn = egui::Button::new(
+                                            egui::RichText::new("确认")
+                                                .color(egui::Color32::WHITE)
+                                                .strong(),
+                                        )
+                                        .fill(warn_red)
+                                        .stroke(egui::Stroke::new(1.0, warn_red));
+                                        if ui.add(confirm_btn).clicked() {
                                             confirm_execute = true;
                                         }
-                                        if ui.button("取消").clicked() {
+                                        let cancel_btn = egui::Button::new("取消")
+                                            .fill(egui::Color32::WHITE)
+                                            .stroke(egui::Stroke::new(1.0, soft_red));
+                                        if ui.add(cancel_btn).clicked() {
                                             cancel_clicked = true;
                                         }
                                     });

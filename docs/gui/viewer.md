@@ -107,6 +107,14 @@
   （用于**外部点击关闭**时跳过触发帧，避免一打开就被关掉）；
 - `copy_merge/copy_formula/copy_style/copy_value`：插入列时的复制选项。
 
+> **两种确认弹窗的视觉区分**：`confirm_action == ClearCell` 的「清空确认弹窗」（`egui::Window::new("clear_confirm")` 分支）
+> 采用**红色警示样式**——浅红背景（`#FEECEC`）+ 2px 红色边框（`#D32F2F`）+ 红色加粗标题「⚠ 警告」+ 深红正文（`#961818`），
+> 且「确认」按钮为红底（`#D32F2F`）白字的破坏性操作按钮、「取消」为白底柔红描边（`#C85050`）。清空属于不可逆的破坏性操作，
+> 故从视觉上强化警示，与插入列的中性确认弹窗区分开，并与下方 §3「保存失败提示框」的红底红边风格一致。
+> 插入列确认弹窗（`insert_confirm`）仍保持普通（默认框架）样式。
+> **尺寸约束**：清空确认弹窗设 `min_height(80.0).max_height(80.0)` 把窗口高度**固定为 80px**（宽度 `ui.set_width(240.0)`
+> 为 240px），避免内容自适应时窗口被竖直拉伸；插入列弹窗用 `set_min_width(360.0)` + `set_height(50.0)`，约束方式不同。
+
 ### 2.4 配置面板 —— 已迁移至 `config.rs`
 
 > **配置相关代码已抽离到独立模块 [`gui/widgets/config.rs`](widgets/config.md)：**
@@ -301,7 +309,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 | 搜索窗口 | 搜索 → 搜索 | 非模态 `Window`（520 宽，可折叠） | 详见 [`search.md`](widgets/search.md) |
 | 右键菜单 | 表格右键 | `Area`（Foreground） | 220 宽，外部点击/Escape 关闭 |
 | 保存失败提示框 | 保存 `Err`（按钮 / Ctrl+S） | `Window`（Foreground，居中） | 红底红边，文案"保存失败!请检查{路径}文件是否被占用打开"，"知道了"关闭 |
-| 确认弹窗 | 插入列/清空 | `Window`（Foreground，fixed_pos） | 首帧 established 后才检测外部点击 |
+| 确认弹窗 | 插入列/清空 | `Window`（Foreground，fixed_pos） | 插入列=普通样式（min 360 宽）；**清空=红色警示样式**（240 宽 × **80 高固定**，红边/浅红底/⚠警告标题/红底确认按钮，破坏性操作）。首帧 established 后才检测外部点击 |
 | 预警消息 / 通知 | 配置/自动 | `Window`/图标 | 写回隐藏行列集合 |
 | 帮助 / 转换 / 条件格式 | 菜单 | `Window` | — |
 | 激活/付款弹窗 | 试用/拦截 | `Window`（模态遮罩） | 拦截态不可关闭 |
