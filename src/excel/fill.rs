@@ -35,6 +35,9 @@ enum Kind {
     Date,
     Number,
     DateText,
+    /// 数字型日期文本：无 number_format、非中文，但 `value` 形如 `2026/2/7`、`2026-01-26`
+    /// （斜杠/连字符分隔、年开头）。按天递增，输出沿用源格式的分隔符与前导零。
+    DateNum,
     Text,
 }
 
@@ -151,6 +154,56 @@ fn format_date_text(pat: &DateText, y: u32, m: u32, d: u32) -> String {
     s
 }
 
+// ========== 数字型日期（斜杠/连字符分隔，年开头，如 "2026/2/7"、"2026-01-26"）==========
+// 这类值无 number_format、非中文，不会被 is_date_format/parse_date_text 识别，
+// 故单独识别其模式并按天递增（与 Excel 一致）。与中文日期文本（DateText）对称。
+
+/// 解析出的数字型日期：序列号 + 格式码。
+///
+/// `fmt` 记录分隔符与前导零（如 `yyyy/m/d`、`yyyy-mm-dd`），供递增后经
+/// [`ExcelData::format_date`] 按源格原样回填。
+struct NumericDate {
+    serial: f64,
+    fmt: String,
+}
+
+/// 解析数字型日期：`YYYY<M><D>`，分隔符为 `/` 或 `-`（不可混用）。
+///
+/// 仅识别**年开头**且年份为 4 位（≥1000）的日期，避免与 `m/d/yyyy`、两位年份等歧义。
+/// 无效日期（如 `2026/2/30`）经序列号往返校验后不予识别。
+fn parse_numeric_date(s: &str) -> Option<NumericDate> {
+    let s = s.trim();
+    let sep = if s.contains('/') && !s.contains('-') {
+        '/'
+    } else if s.contains('-') && !s.contains('/') {
+        '-'
+    } else {
+        return None; // 不含分隔符或混用 → 非数字日期
+    };
+    let parts: Vec<&str> = s.split(sep).collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: u32 = parts[0].parse().ok()?;
+    if parts[0].len() != 4 || year < 1000 {
+        return None; // 年必须 4 位且在最前
+    }
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+    if month == 0 || month > 12 || day == 0 || day > 31 {
+        return None;
+    }
+    let serial = ExcelData::date_to_serial(year, month, day);
+    // 往返校验：拒绝 2026/2/30 这类不存在的日期（溢出到下月）
+    if ExcelData::serial_to_date(serial) != (year, month, day) {
+        return None;
+    }
+    let m_code = if parts[1].len() == 2 { "mm" } else { "m" };
+    let d_code = if parts[2].len() == 2 { "dd" } else { "d" };
+    let fmt = format!("yyyy{sep}{m_code}{sep}{d_code}");
+    Some(NumericDate { serial, fmt })
+}
+
 /// 对目标区域执行填充（同步，直接写入 sheet）。
 ///
 /// - `src` = `(start_col, start_row, end_col, end_row)` 源选区（内部自动归一化）。
@@ -228,6 +281,7 @@ pub fn apply_fill(
             }
             Some(c) if cell_number(Some(c)).is_some() => Kind::Number,
             Some(c) if parse_date_text(&c.value).is_some() => Kind::DateText,
+            Some(c) if parse_numeric_date(&c.value).is_some() => Kind::DateNum,
             _ => Kind::Text,
         };
         if kind == Kind::Formula {
@@ -261,6 +315,20 @@ pub fn apply_fill(
                     c.as_ref()
                         .and_then(|cell| parse_date_text(&cell.value))
                         .map(|p| ExcelData::date_to_serial(p.year, p.month, p.day))
+                        .unwrap_or(0.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // 数字型日期序列号（DateNum 用："2026/2/7"、"2026-01-26" → 序列号）
+        let dn_serials: Vec<f64> = if kind == Kind::DateNum {
+            src_data
+                .iter()
+                .map(|c| {
+                    c.as_ref()
+                        .and_then(|cell| parse_numeric_date(&cell.value))
+                        .map(|nd| nd.serial)
                         .unwrap_or(0.0)
                 })
                 .collect()
@@ -317,6 +385,17 @@ pub fn apply_fill(
                         let serial = base + (j as f64 + 1.0) * signed_d;
                         let (yy, mm, dd) = ExcelData::serial_to_date(serial);
                         new_cell.value = format_date_text(&pat, yy, mm, dd);
+                        new_cell.raw_number = Some(serial);
+                    }
+                    new_cell.formula.clear();
+                }
+                Kind::DateNum => {
+                    if let Some(nd) = parse_numeric_date(&new_cell.value) {
+                        let d = detect_step(&dn_serials).unwrap_or(1.0);
+                        let base = if forward { dn_serials[n - 1] } else { dn_serials[0] };
+                        let signed_d = if forward { d } else { -d };
+                        let serial = base + (j as f64 + 1.0) * signed_d;
+                        new_cell.value = ExcelData::format_date(serial, &nd.fmt);
                         new_cell.raw_number = Some(serial);
                     }
                     new_cell.formula.clear();
@@ -423,6 +502,7 @@ pub fn compute_fill_values(
             }
             Some(c) if cell_number(Some(c)).is_some() => Kind::Number,
             Some(c) if parse_date_text(&c.value).is_some() => Kind::DateText,
+            Some(c) if parse_numeric_date(&c.value).is_some() => Kind::DateNum,
             _ => Kind::Text,
         };
         if kind == Kind::Formula {
@@ -454,6 +534,20 @@ pub fn compute_fill_values(
                     c.as_ref()
                         .and_then(|cell| parse_date_text(&cell.value))
                         .map(|p| ExcelData::date_to_serial(p.year, p.month, p.day))
+                        .unwrap_or(0.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // 数字型日期序列号（DateNum 用："2026/2/7"、"2026-01-26" → 序列号）
+        let dn_serials: Vec<f64> = if kind == Kind::DateNum {
+            src_data
+                .iter()
+                .map(|c| {
+                    c.as_ref()
+                        .and_then(|cell| parse_numeric_date(&cell.value))
+                        .map(|nd| nd.serial)
                         .unwrap_or(0.0)
                 })
                 .collect()
@@ -506,6 +600,17 @@ pub fn compute_fill_values(
                         let serial = base + (j as f64 + 1.0) * signed_d;
                         let (yy, mm, dd) = ExcelData::serial_to_date(serial);
                         new_cell.value = format_date_text(&pat, yy, mm, dd);
+                        new_cell.raw_number = Some(serial);
+                    }
+                    new_cell.formula.clear();
+                }
+                Kind::DateNum => {
+                    if let Some(nd) = parse_numeric_date(&new_cell.value) {
+                        let d = detect_step(&dn_serials).unwrap_or(1.0);
+                        let base = if forward { dn_serials[n - 1] } else { dn_serials[0] };
+                        let signed_d = if forward { d } else { -d };
+                        let serial = base + (j as f64 + 1.0) * signed_d;
+                        new_cell.value = ExcelData::format_date(serial, &nd.fmt);
                         new_cell.raw_number = Some(serial);
                     }
                     new_cell.formula.clear();
@@ -833,6 +938,13 @@ mod tests {
         sheet.cells.insert((row, col), c);
     }
 
+    /// 存入纯文本值（无 raw_number、无 number_format），模拟编辑器对无格式单元格的保存路径。
+    fn put_text(sheet: &mut SheetData, col: u32, row: u32, value: &str) {
+        let mut c = CellData::default();
+        c.value = value.to_string();
+        sheet.cells.insert((row, col), c);
+    }
+
     fn put_cell(sheet: &mut SheetData, col: u32, row: u32, cell: CellData) {
         sheet.cells.insert((row, col), cell);
     }
@@ -1001,6 +1113,70 @@ mod tests {
         let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 3));
         assert_eq!(val(&s, 1, 2), "hello");
         assert_eq!(val(&s, 1, 3), "hello");
+    }
+
+    // ========== 数字型日期文本（DateNum：斜杠/连字符分隔）==========
+
+    #[test]
+    fn fill_numeric_date_slash_single() {
+        // 单格 "2026/2/7" 向下填 → 按天递增，保持斜杠/无前导零格式
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026/2/7");
+        let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 3));
+        assert_eq!(val(&s, 1, 2), "2026/2/8");
+        assert_eq!(val(&s, 1, 3), "2026/2/9");
+    }
+
+    #[test]
+    fn fill_numeric_date_slash_two_step() {
+        // 两格 "2026/2/7"、"2026/2/8" 推断步长 1 → 2026/2/9、2026/2/10
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026/2/7");
+        put_text(&mut s, 1, 2, "2026/2/8");
+        let _ = apply_fill(&mut s, (1, 1, 1, 2), (1, 4));
+        assert_eq!(val(&s, 1, 3), "2026/2/9");
+        assert_eq!(val(&s, 1, 4), "2026/2/10");
+    }
+
+    #[test]
+    fn fill_numeric_date_dash_padded() {
+        // "2026-01-26"（连字符 + 前导零）→ 保持原格式递增
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026-01-26");
+        let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 3));
+        assert_eq!(val(&s, 1, 2), "2026-01-27");
+        assert_eq!(val(&s, 1, 3), "2026-01-28");
+    }
+
+    #[test]
+    fn fill_numeric_date_dash_month_boundary() {
+        // 月末跨月：前导零格式保持，跨到下月
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026-01-30");
+        put_text(&mut s, 1, 2, "2026-01-31");
+        let _ = apply_fill(&mut s, (1, 1, 1, 2), (1, 3));
+        assert_eq!(val(&s, 1, 3), "2026-02-01");
+    }
+
+    #[test]
+    fn fill_numeric_date_invalid_not_date() {
+        // 不存在的日期 "2026/2/30" 不应被当作日期递增 → 按文本复制
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026/2/30");
+        let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 2));
+        assert_eq!(val(&s, 1, 2), "2026/2/30"); // 复制而非 "2026/2/31"
+    }
+
+    #[test]
+    fn fill_numeric_date_sets_raw_number() {
+        // DateNum 填充应写入序列号（raw_number），便于后续按数值处理
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026/2/7");
+        let _ = apply_fill(&mut s, (1, 1, 1, 1), (1, 2));
+        let serial = s.get_cell(2, 1).and_then(|c| c.raw_number);
+        assert!(serial.is_some(), "raw_number 应被设置");
+        // 序列号往返：2026/2/8
+        assert_eq!(ExcelData::serial_to_date(serial.unwrap()), (2026, 2, 8));
     }
 
     #[test]
@@ -1227,6 +1403,28 @@ mod tests {
     }
 
     #[test]
+    fn autofill_numeric_date_slash_user_scenario() {
+        // 报修用例：A1="2026/2/7"、A2="2026/2/8"（纵向线 A1:A2，纯文本无 number_format）；
+        // 源列 A 列 A3:A6 有数据、A7 空 → 双击填充柄边界到第 6 行。
+        // 预期：A3..A6 = 2026/2/9 .. 2026/2/12（按天递增，保持斜杠格式）
+        let mut s = empty_sheet();
+        s.max_row = 100;
+        put_text(&mut s, 1, 1, "2026/2/7");
+        put_text(&mut s, 1, 2, "2026/2/8");
+        for r in 3..=6 {
+            put(&mut s, 1, r, "x"); // 源列相邻数据，设定边界
+        }
+        let (hc, hr) = empty_hidden();
+        let target = compute_autofill_target(&s, (1, 1, 1, 2), &hc, &hr);
+        assert_eq!(target, Some((1, 6))); // 填到 A6
+        let _ = apply_fill(&mut s, (1, 1, 1, 2), target.unwrap());
+        assert_eq!(val(&s, 1, 3), "2026/2/9");
+        assert_eq!(val(&s, 1, 4), "2026/2/10");
+        assert_eq!(val(&s, 1, 5), "2026/2/11");
+        assert_eq!(val(&s, 1, 6), "2026/2/12");
+    }
+
+    #[test]
     fn autofill_vertical_skip_empty_from_row() {
         // 纵向线 A38:A39，源列 A 的 from_row(A40) 为空，但 A41:A44 有数据
         // → 应跳过空行 A40，从 A41 开始扫描连续数据到 A44。
@@ -1363,6 +1561,25 @@ mod tests {
         let fv = compute_fill_values(&s, (1, 1, 1, 1), (1, 2)).unwrap();
         assert_eq!(fv.cells.len(), 1);
         assert_eq!(fv.cells[0].2.value, "08月25号");
+    }
+
+    #[test]
+    fn compute_fill_values_date_num() {
+        // 数字型日期文本预计算：与 apply_fill 一致（斜杠/连字符均覆盖）
+        let mut s = empty_sheet();
+        put_text(&mut s, 1, 1, "2026/2/7");
+        put_text(&mut s, 1, 2, "2026/2/8");
+        let fv = compute_fill_values(&s, (1, 1, 1, 2), (1, 4)).unwrap();
+        assert_eq!(fv.cells.len(), 2);
+        assert_eq!(fv.cells[0].2.value, "2026/2/9");
+        assert_eq!(fv.cells[1].2.value, "2026/2/10");
+        assert!(fv.cells[0].2.raw_number.is_some());
+
+        // 连字符 + 前导零格式保持
+        let mut s2 = empty_sheet();
+        put_text(&mut s2, 1, 1, "2026-01-26");
+        let fv2 = compute_fill_values(&s2, (1, 1, 1, 1), (1, 2)).unwrap();
+        assert_eq!(fv2.cells[0].2.value, "2026-01-27");
     }
 
     #[test]
