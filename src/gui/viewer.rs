@@ -90,6 +90,30 @@ pub struct PasteCommit {
     pub old_range: Option<(u32, u32, u32, u32)>,
 }
 
+/// 分批跨帧填充状态（仅在目标格数 > `FILL_SYNC_THRESHOLD` 时激活）。
+///
+/// 双击填充柄的目标范围可能很大（数千~数万格），单帧同步写入会导致 UI 卡顿。
+/// `PendingFill` 将预计算的填充值分批写入：每帧写入 `FILL_BATCH_SIZE` 格，
+/// 帧间 UI 正常响应，填充完成后统一触发公式重算 + 选区更新 + 撤销入栈。
+pub struct PendingFill {
+    /// 预计算的待写入值 `(row, col, new_cell_data)`
+    pub values: Vec<(u32, u32, crate::excel::reader::CellData)>,
+    /// 下一个待写入的索引
+    pub next_idx: usize,
+    /// 目标中是否含公式填充（决定重算策略：公式→`evaluate_sheet`，仅值→`evaluate_dependents_many`）
+    pub has_formula: bool,
+    /// 累积的旧单元格数据（撤销用）
+    pub old_cells: Vec<(u32, u32, Option<crate::excel::reader::CellData>)>,
+    /// 填充前的活动单元格（撤销用）
+    pub prev_selected: Option<(u32, u32)>,
+    /// 填充前的选中范围（撤销用）
+    pub prev_range: Option<(u32, u32, u32, u32)>,
+    /// 源选区 `(start_col, start_row, end_col, end_row)`（填充完成后更新选区用）
+    pub src: (u32, u32, u32, u32),
+    /// 目标格 `(col, row)`（填充完成后更新选区用）
+    pub target: (u32, u32),
+}
+
 
 /// 右键菜单状态
 #[derive(Debug)]
@@ -257,6 +281,8 @@ pub struct ExcelViewer {
     pub hidden_columns: HashSet<u32>,
     /// 隐藏的行号集合（1-based），由行筛选功能写入，table 渲染时读取
     pub hidden_rows: HashSet<u32>,
+    /// 分批跨帧填充状态（Some = 正在逐帧写入填充值）
+    pending_fill: Option<PendingFill>,
     /// 预警通知状态（图标 + 弹窗）
     pub alert_notify_state: AlertNotifyState,
     /// 授权管理器（试用/激活状态）
@@ -315,6 +341,7 @@ impl ExcelViewer {
             help_popup: HelpPopupState::default(),
             hidden_columns: HashSet::new(),
             hidden_rows: HashSet::new(),
+            pending_fill: None,
             alert_notify_state: AlertNotifyState::default(),
             license,
             license_popup: LicensePopupState {
@@ -910,11 +937,25 @@ impl eframe::App for ExcelViewer {
                         }
                         UndoAction::CellChange { sheet_index, row, col, old_cell, old_selected } => {
                             if excel_data.sheets.len() > sheet_index {
+                                // 恢复前记录当前格公式状态（用于精确维护 formula_positions）
+                                let current_had_formula = excel_data.sheets[sheet_index]
+                                    .get_cell(row, col)
+                                    .map_or(false, |c| !c.formula.is_empty());
+                                let old_had_formula = old_cell.as_ref().map_or(false, |c| !c.formula.is_empty());
+
                                 if let Some(old) = old_cell {
                                     excel_data.sheets[sheet_index].cells.insert((row, col), old);
                                 } else {
                                     excel_data.sheets[sheet_index].cells.remove(&(row, col));
                                 }
+
+                                // 精确维护 formula_positions 索引
+                                if old_had_formula && !current_had_formula {
+                                    excel_data.sheets[sheet_index].mark_formula(row, col);
+                                } else if !old_had_formula && current_had_formula {
+                                    excel_data.sheets[sheet_index].unmark_formula(row, col);
+                                }
+
                                 self.selected_cell = old_selected;
                                 self.selected_range = None;
                                 self.editing_cell = None;
@@ -925,8 +966,14 @@ impl eframe::App for ExcelViewer {
                         }
                         UndoAction::RangeClear { sheet_index, old_cells, old_selected, old_range } => {
                             if excel_data.sheets.len() > sheet_index {
+                                // 恢复旧单元格（可能含公式文本）→ 依赖图缓存失效
+                                crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[sheet_index]);
                                 for (r, c, old) in old_cells {
                                     if let Some(cell) = old {
+                                        // 恢复含公式的旧格 → 重新标记 formula_positions
+                                        if !cell.formula.is_empty() {
+                                            excel_data.sheets[sheet_index].mark_formula(r, c);
+                                        }
                                         excel_data.sheets[sheet_index].cells.insert((r, c), cell);
                                     } else {
                                         excel_data.sheets[sheet_index].cells.remove(&(r, c));
@@ -1056,6 +1103,8 @@ impl eframe::App for ExcelViewer {
                 let mut committed_fill: Option<FillCommit> = None;
                 // 粘贴提交信号：由 draw_table_content 在一次成功粘贴后写入
                 let mut committed_paste: Option<PasteCommit> = None;
+                // 分批跨帧填充请求：由 draw_table_content 在大填充时写入
+                let mut pending_fill_request: Option<PendingFill> = None;
 
                 // 冻结窗格布局：列标题固定顶部，行标题固定左侧
                 // 双向滚动区域（垂直+水平），替代嵌套 ScrollArea
@@ -1084,6 +1133,7 @@ impl eframe::App for ExcelViewer {
                             &self.hidden_rows,
                             &mut self.shift_click_anchor,
                             &mut committed_paste,
+                            &mut pending_fill_request,
                         );
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
@@ -1186,6 +1236,12 @@ impl eframe::App for ExcelViewer {
                                                                     .or_insert_with(crate::excel::reader::CellData::default);
                                                                 cell.value = orig_value.clone();
                                                                 cell.formula = orig_formula.clone();
+                                                                // 精确维护 formula_positions 索引
+                                                                if orig_formula.is_empty() {
+                                                                    sheet.unmark_formula(row, col);
+                                                                } else {
+                                                                    sheet.mark_formula(row, col);
+                                                                }
                                                                 self.dirty = true;
                                                                 // 触发公式重算
                                                                 if orig_formula.is_empty() {
@@ -1261,6 +1317,12 @@ impl eframe::App for ExcelViewer {
                             old_selected: pc.old_selected,
                             old_range: pc.old_range,
                         });
+                    }
+
+                    // 分批跨帧填充请求：大填充由 draw_table_content 预计算后写入，
+                    // 此处接管 PendingFill 状态，由下方「分批写入」段逐帧执行。
+                    if let Some(pf) = pending_fill_request {
+                        self.pending_fill = Some(pf);
                     }
 
                     // 绘制右键上下文菜单
@@ -1745,6 +1807,7 @@ impl eframe::App for ExcelViewer {
                                                                 if let Some(cell) = sheet.cells.get_mut(&(r, c)) {
                                                                     cell.value.clear();
                                                                     cell.formula.clear();
+                                                                    sheet.unmark_formula(r, c);
                                                                 }
                                                             }
                                                         }
@@ -1758,6 +1821,7 @@ impl eframe::App for ExcelViewer {
                                                     if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
                                                         cell.value.clear();
                                                         cell.formula.clear();
+                                                        sheet.unmark_formula(row, col);
                                                     }
                                                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
                                                     self.dirty = true;
@@ -1851,32 +1915,38 @@ impl eframe::App for ExcelViewer {
                                     self.original_cell_data = Some(((col, row), orig.0, orig.1));
                                 } else {
                                     // 校验通过，执行保存
-                                    let cell = excel_data.sheets[self.current_sheet]
-                                        .cells.entry((row, col))
-                                        .or_insert_with(|| crate::excel::reader::CellData::default());
-                                    let save_value = if let Some(ref fmt) = cell.number_format {
-                                        if ExcelData::is_date_format(fmt) {
-                                            ExcelData::parse_date_string(&formula_value)
-                                                .map(|serial| serial.to_string())
-                                                .unwrap_or_else(|| formula_value.clone())
+                                    {
+                                        let cell = excel_data.sheets[self.current_sheet]
+                                            .cells.entry((row, col))
+                                            .or_insert_with(|| crate::excel::reader::CellData::default());
+                                        let save_value = if let Some(ref fmt) = cell.number_format {
+                                            if ExcelData::is_date_format(fmt) {
+                                                ExcelData::parse_date_string(&formula_value)
+                                                    .map(|serial| serial.to_string())
+                                                    .unwrap_or_else(|| formula_value.clone())
+                                            } else {
+                                                formula_value.clone()
+                                            }
                                         } else {
                                             formula_value.clone()
-                                        }
-                                    } else {
-                                        formula_value.clone()
-                                    };
-                                    cell.value = save_value;
-                                    cell.formula.clear();
+                                        };
+                                        cell.value = save_value;
+                                        cell.formula.clear();
+                                    }
+                                    excel_data.sheets[self.current_sheet].unmark_formula(row, col);
                                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[self.current_sheet], row, col);
                                     self.dirty = true;
                                 }
                             }
                         } else {
                             // 公式直接保存
-                            let cell = excel_data.sheets[self.current_sheet]
-                                .cells.entry((row, col))
-                                .or_insert_with(|| crate::excel::reader::CellData::default());
-                            cell.formula = formula_value;
+                            {
+                                let cell = excel_data.sheets[self.current_sheet]
+                                    .cells.entry((row, col))
+                                    .or_insert_with(|| crate::excel::reader::CellData::default());
+                                cell.formula = formula_value;
+                            }
+                            excel_data.sheets[self.current_sheet].mark_formula(row, col);
                             crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                             self.dirty = true;
                         }
@@ -1904,6 +1974,69 @@ impl eframe::App for ExcelViewer {
                 }
             }
         });
+
+        // ========== 分批跨帧填充：每帧写入 FILL_BATCH_SIZE 格 ==========
+        // 由 draw_table_content 在大填充（> FILL_SYNC_THRESHOLD）时创建 PendingFill，
+        // 此处逐帧写入预计算值，帧间 UI 保持流畅。
+        if let Some(pending) = self.pending_fill.as_mut() {
+            if let Some(excel_data) = self.excel_data.as_mut() {
+                let end = (pending.next_idx + crate::excel::fill::FILL_BATCH_SIZE)
+                    .min(pending.values.len());
+                if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                    for &(row, col, ref new_cell) in &pending.values[pending.next_idx..end] {
+                        let old = sheet.get_cell(row, col).cloned();
+                        let old_had_formula = old.as_ref().map_or(false, |c| !c.formula.is_empty());
+                        pending.old_cells.push((row, col, old));
+                        sheet.cells.insert((row, col), new_cell.clone());
+                        // 精确维护 formula_positions 索引
+                        if !new_cell.formula.is_empty() {
+                            sheet.mark_formula(row, col);
+                        } else if old_had_formula {
+                            sheet.unmark_formula(row, col);
+                        }
+                    }
+                }
+                pending.next_idx = end;
+                ctx.request_repaint(); // 确保下一帧继续写入
+
+                if pending.next_idx >= pending.values.len() {
+                    // 填充完成 → 触发重算 + 选区更新 + 撤销入栈
+                    let pf = self.pending_fill.take().unwrap();
+                    if let Some(sheet) = excel_data.sheets.get_mut(self.current_sheet) {
+                        if pf.has_formula {
+                            crate::excel::formula::invalidate_formula_graph(sheet);
+                            crate::excel::formula::evaluate_sheet(sheet);
+                        } else {
+                            crate::excel::formula::evaluate_dependents_many(
+                                sheet,
+                                pf.old_cells.iter().map(|(r, c, _)| (*r, *c)),
+                            );
+                        }
+                    }
+                    self.dirty = true;
+                    // 填充后选区 = 源 ∪ 目标
+                    let (sc0, sr0, sc1, sr1) = pf.src;
+                    let (tcol, trow) = pf.target;
+                    self.selected_cell = Some((sc0, sr0));
+                    self.selected_range = Some((
+                        sc0.min(tcol),
+                        sr0.min(trow),
+                        sc1.max(tcol),
+                        sr1.max(trow),
+                    ));
+                    // 入撤销栈
+                    if self.undo_stack.len() >= MAX_UNDO_DEPTH {
+                        self.undo_stack.remove(0);
+                    }
+                    self.undo_stack.push(UndoAction::RangeClear {
+                        sheet_index: self.current_sheet,
+                        old_cells: pf.old_cells,
+                        old_selected: pf.prev_selected,
+                        old_range: pf.prev_range,
+                    });
+                }
+            }
+        }
 
         // 处理延迟的保存请求（在 excel_data 借用释放后执行）
         if self.save_requested {

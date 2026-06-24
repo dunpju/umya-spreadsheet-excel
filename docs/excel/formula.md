@@ -53,15 +53,18 @@ parse_comparison  ( = <> < <= > >= )   最低
 
 ### 2.5 引用偏移调整
 
-三个对称的字符串改写函数，逐字符扫描公式，**跳过字符串字面量**，用正则式 `[$]?[A-Za-z]+[$]?[0-9]+` 匹配单元格引用并重写坐标：
+四个对称的字符串改写函数，逐字符扫描公式，**跳过字符串字面量**，用正则式 `[$]?[A-Za-z]+[$]?[0-9]+` 匹配单元格引用并重写坐标：
 
 | 函数 | 调整对象 | 阈值与语义 |
 |------|----------|------------|
 | `adjust_formula_columns(formula, threshold_col, shift)` | 列号 ≥ `threshold_col` 的引用 | 插入/删除列；绝对列 `$A` 在结构性操作中**也偏移** |
 | `adjust_formula_rows(formula, threshold_row, shift)` | 行号 ≥ `threshold_row` 的引用 | 插入/删除行；绝对行 `$1` **也偏移**（Excel 行为） |
 | `adjust_formula_by_mapping(formula, mapping, fb_col, fb_row)` | 按源→目标映射表替换 | 在映射表中用映射目标（绝对引用保持原位），否则用 fallback 偏移 |
+| `shift_formula_relative(formula, d_col, d_row)` | 复制/填充柄：仅平移**相对**引用（无 `$`），绝对引用 `$A`/`$1` 保持不变 | 填充柄拖拽/双击自动填充时复制公式 |
 
 非单元格引用的字母串（如函数名 `SUM`）通过"后跟数字才算引用"的规则被正确跳过。
+
+`shift_formula_relative` 是纯文本级逐字符扫描，匹配 `[$]?[A-Za-z]+[$]?[0-9]+` 模式。`$` 前缀的维度不偏移。跳过字符串字面量 `"..."`。前导 `=`/`@` 原样保留。
 
 ### 2.6 求值器
 
@@ -85,11 +88,42 @@ parse_comparison  ( = <> < <= > >= )   最低
 - `evaluate_dependents_many(sheet, changed: IntoIterator<Item=(u32,u32)>)` —— **批量增量求值**：语义与 `evaluate_dependents` 一致（只重算依赖公式），但**一次构建依赖图**处理多个变更格。用于填充/粘贴等一次改动多格的场景——**关键性能点**：`build_formula_graph` 为 O(单元格数)，逐格调用 `evaluate_dependents` 在 200 万+ 单元格的大表上为 K × O(2M)（K=改动格数），造成 2~3 秒卡顿；本函数把 K 次图重建收敛为 1 次，K 格改动只建一次图 + 一次拓扑求值。
 - **副作用**：上述三者求值时都会置位 `sheet.cf_dirty = true`，作为**条件格式事件驱动刷新**的唯一触发信号（值变化 → 公式求值 → 标脏 → viewer 仅对当前表、仅在脏时重算条件格式）。详见 [reader.md §2.7 事件驱动刷新机制](./reader.md#27-条件格式求值)。
 
-> **性能瓶颈与优化**：所有增量/全量求值入口都先调 `build_formula_graph`（全表扫描 + 逐公式解析，O(单元格数)）。单次调用（如单元格编辑）代价可接受；但「按改动格循环调用」的模式（填充/粘贴的值路径）会把单次开销放大 K 倍。已用 `evaluate_dependents_many` 收敛为一次。若后续仍需进一步优化单次延迟，可考虑在 `SheetData` 上缓存依赖图并仅在公式变更时失效（代价是需在所有写 `cell.formula` 处加失效点，有 staleness 风险）。
+> **性能瓶颈与优化**：所有增量/全量求值入口都先调 `build_formula_graph`（全表扫描 + 逐公式解析，O(单元格数)）。单次调用（如单元格编辑）代价可接受；但「按改动格循环调用」的模式（填充/粘贴的值路径）会把单次开销放大 K 倍。已用 `evaluate_dependents_many` 收敛为一次。**L2 依赖图缓存已实现**（详见 §2.10），采用两级缓存架构：L1 为 `formula_positions` 索引（HashSet，通过 `mark_formula`/`unmark_formula` 增量维护）；L2 为完整依赖图（`CachedFormulaGraph`），存储于 `SheetData.cached_graph`（`Option<Box<dyn Any + Send + Sync>>` 类型擦除以避免与 `reader.rs` 的循环类型依赖）。缓存有效性由 `cached_graph_dirty` 标志控制。当两级缓存均命中时，直接克隆缓存图并返回，性能从 ~300ms 降至 ~5ms（25 万公式单元格场景）。
 
 ### 2.9 测试
 
 文件内嵌 `tests` 模块，覆盖：解析（数字/算术/单元格/范围/`$` 引用/`_xlfn.`/`@`）、求值（算术/单元格/`SUM`/`IF`/`IFS`/`CONCATENATE`/除零/日期减法）、循环依赖 `#CIRC!`、链式依赖、增量求值（受影响/不受影响）、**批量增量求值 `evaluate_dependents_many`**、`$` 引用链重算、`TODAY`/`ROW`，以及 `adjust_formula_rows` 的十余个边界用例（绝对/混合/跨越阈值/负偏移/字符串字面量/`@` 前缀等）。
+
+### 2.10 公式依赖图缓存（L2 Cache）
+
+为避免每次求值都全表扫描重建依赖图，实现了两级缓存架构：
+
+**`CachedFormulaGraph` 结构体**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `formula_cells` | `HashMap<(u32,u32), FormulaNode>` | 公式坐标 → 已解析的 AST |
+| `forward_deps` | `HashMap<(u32,u32), HashSet<(u32,u32)>>` | 公式 → 它依赖的公式（仅公式间依赖） |
+| `reverse_deps` | `HashMap<(u32,u32), HashSet<(u32,u32)>>` | 任意单元格 → 依赖它的公式集合 |
+
+**存储方式**：缓存在 `SheetData.cached_graph: Option<Box<dyn Any + Send + Sync>>`，使用类型擦除（type erasure）以避免 `formula.rs` 与 `reader.rs` 之间的循环类型依赖。
+
+**缓存有效性**：`cached_graph_dirty: bool` 标志控制缓存有效性。
+
+**`build_formula_graph` 两级缓存逻辑**：
+
+```
+build_formula_graph(sheet):
+  formula_positions_dirty? → rebuild_formula_positions() → dirty=false
+  cached_graph_dirty?      → parse all formula cells, build graph, cache it → dirty=false
+  both clean               → downcast cached graph, clone and return
+```
+
+- **L1 缓存（`formula_positions`）**：`HashSet<(u32,u32)>`，记录所有含公式的单元格坐标。通过 `mark_formula(sheet, row, col)` / `unmark_formula(sheet, row, col)` 增量维护。L1 脏时需全量扫描重建 `formula_positions`。
+- **L2 缓存（完整依赖图）**：`CachedFormulaGraph`。L1 干净但 L2 脏时，从 `formula_positions` 出发解析所有公式单元格并构建完整图。L2 脏标记会阻止直接使用缓存图。
+- **两级均命中**：直接 `downcast` 缓存图，`clone` 并返回。性能从 ~300ms 降至 ~5ms（25 万公式单元格场景）。
+
+**`invalidate_formula_graph(sheet)`**：将 `cached_graph_dirty` 置为 `true`，使 L2 缓存失效。由 `fill.rs`、`table.rs`、`viewer.rs` 在公式修改时调用，确保下次 `build_formula_graph` 重建依赖图。
 
 ## 3. 视觉结构图
 
@@ -182,6 +216,8 @@ flowchart LR
 | `adjust_formula_columns` | `(formula, threshold_col, shift) -> String` | 调整列引用（插入/删除列） |
 | `adjust_formula_rows` | `(formula, threshold_row, shift) -> String` | 调整行引用（插入/删除行） |
 | `adjust_formula_by_mapping` | `(formula, mapping, fb_col, fb_row) -> String` | 按映射表调整引用（迁移） |
+| `shift_formula_relative` | `(formula, d_col, d_row) -> String` | 填充柄复制：仅平移相对引用，绝对引用 `$A`/`$1` 不变 |
+| `invalidate_formula_graph` | `(sheet: &mut SheetData)` | 使 L2 依赖图缓存失效（`cached_graph_dirty = true`），由 fill/table/viewer 在公式修改时调用 |
 | `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式；并置位 `cf_dirty` |
 | `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式（单格）；委托 `evaluate_dependents_many`；并置位 `cf_dirty` |
 | `evaluate_dependents_many` | `(sheet, changed: IntoIterator<Item=(u32,u32)>)` | **批量**增量求值（多格改动一次建图）；填充/粘贴值路径用；并置位 `cf_dirty` |
@@ -200,7 +236,7 @@ flowchart LR
 | `eval_function` | 按函数名分派（SUM/IF/IFS/SUMIF/TODAY/ROW…） |
 | `matches_criteria` / `compare_value_to_str` / `cmp_str` | SUMIF 条件判定 |
 | `extract_dependencies` | 提取 AST 依赖（大范围仅取四角） |
-| `build_formula_graph` | 构建 AST 表 + 正/反向依赖 |
+| `build_formula_graph` | 构建 AST 表 + 正/反向依赖（含 L1/L2 两级缓存） |
 | `topo_eval` | Kahn 拓扑排序求值 + 循环依赖检测 |
 
 ### 4.4 支持的函数清单

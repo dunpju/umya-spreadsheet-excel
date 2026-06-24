@@ -45,6 +45,15 @@
 
 `SheetData` 是工作表的内存表示，字段包括：单元格表 `cells: HashMap<(row,col), CellData>`、合并列表 `merged_cells` 与**合并索引 `merge_index`**（O(1) 查找替代 O(n) 扫描）、`max_row`/`max_col`、`column_widths`/`row_heights`、`frozen_rows`/`frozen_cols`、`data_validations`、`conditional_rules`，以及条件格式脏标志 `cf_dirty`（见 [2.7 事件驱动刷新机制](#27-条件格式求值)）。
 
+公式相关字段（用于增量公式求值优化）：
+
+- `formula_positions: HashSet<(u32, u32)>` —— 公式单元格位置索引，供 `build_formula_graph` 快速定位公式格（替代遍历全部 cells 的 O(cells) 迭代）。由 `rebuild_formula_positions` 构建，在单元格公式被写入/清除时通过 `mark_formula`/`unmark_formula` 精确维护。
+- `formula_positions_dirty: bool` —— 公式位置索引脏标志。为 true 时下次 `build_formula_graph` 先重建索引。由 `rebuild_formula_positions` 置 false。行/列插入删除等结构性操作置 true（坐标偏移后索引失效）。
+- `cached_graph: Option<Box<dyn std::any::Any + Send + Sync>>` —— 缓存的公式依赖图（AST + 正向/反向依赖边），由 `build_formula_graph` 构建后写入。类型擦除为 `dyn Any` 以避免 reader.rs ↔ formula.rs 循环类型依赖（`CachedFormulaGraph` 定义在 formula.rs 中）。
+- `cached_graph_dirty: bool` —— 图缓存脏标志。由 `invalidate_formula_graph` 置 true。公式变更时通过此标志失效缓存。
+
+> **手动 Clone 实现**：`SheetData` 的 Clone **不使用 derive**，而是手动实现。其中 `cached_graph` 克隆为 `None`（缓存不随克隆传播，下次使用时按需懒重建）；其余所有字段正常克隆。
+
 核心方法分组：
 
 **查询类**
@@ -57,9 +66,12 @@
 - `validate_cell(col, row, input)` —— 按有效性类型校验输入，失败返回错误标题/消息。内部委托 `validate_number`。
 
 **编辑类（重点）**
-- `insert_rows(anchor_row, n, after)` —— 插入 N 行。流程：(1) 移动单元格；(2) 处理合并（整体下移/跨越扩展/不动）；(3) 移动行高；(4) 更新 `max_row`；(5) 平移数据有效性与条件格式范围；(6) 新行样式继承；(6.5) 复制合并结构；(6.6) 复制数据有效性；(7) **多线程并行**修正公式行引用（≥100 个公式且多核时分块 `std::thread`）；(8) 重建合并索引。
+- `insert_rows(anchor_row, n, after)` —— 插入 N 行。流程：(1) 移动单元格；(2) 处理合并（整体下移/跨越扩展/不动）；(3) 移动行高；(4) 更新 `max_row`；(5) 平移数据有效性与条件格式范围；(6) 新行样式继承；(6.5) 复制合并结构；(6.6) 复制数据有效性；(7) **多线程并行**修正公式行引用（≥100 个公式且多核时分块 `std::thread`）；(8) 重建合并索引。完成后设置 `formula_positions_dirty = true` 并调用 `invalidate_formula_graph(self)`，因为行坐标偏移后公式位置索引与依赖图均失效。
 - `append_row()` —— 表尾追加一行。与 `insert_rows(max_row,1,true)` 的关键差异：用 `old_max_row` 作为公式阈值，使 `=SUM(B15:B199)` 能扩展为 `=SUM(B15:B200)`，把新行纳入聚合范围。同样多线程处理公式。
-- `insert_columns(anchor_col, m, after, options)` —— 插入 M 列。分 **Phase A（结构性移动）** 与 **Phase B（复制内容到新列）** 两阶段：Phase A 平移单元格/合并/列宽/有效性/条件格式范围并修正公式列引用；Phase B 按选项从源列复制值/公式（带偏移）/样式/合并/有效性。处理了左右插入时公式偏移方向相反的复杂语义。
+- `insert_columns(anchor_col, m, after, options)` —— 插入 M 列。分 **Phase A（结构性移动）** 与 **Phase B（复制内容到新列）** 两阶段：Phase A 平移单元格/合并/列宽/有效性/条件格式范围并修正公式列引用；Phase B 按选项从源列复制值/公式（带偏移）/样式/合并/有效性。处理了左右插入时公式偏移方向相反的复杂语义。完成后设置 `formula_positions_dirty = true` 并调用 `invalidate_formula_graph(self)`，因为列坐标偏移后公式位置索引与依赖图均失效。
+- `mark_formula(row, col)` —— 标记指定位置为公式单元格（写入 formula_positions 索引）。在编辑/填充/粘贴/撤销路径调用。
+- `unmark_formula(row, col)` —— 从 formula_positions 索引中移除。在公式被清除或覆盖为纯值时调用。
+- `rebuild_formula_positions()` —— 全量重建 formula_positions 索引（遍历全部 cells，收集 formula 非空的坐标）。置 formula_positions_dirty = false。
 
 ### 2.6 `ExcelData` —— 工作簿模型与加载流程
 
@@ -146,8 +158,14 @@ classDiagram
         +data_validations: Vec~DataValidationInfo~
         +conditional_rules: Vec~CondFormatRule~
         +cf_dirty: bool
+        +formula_positions: HashSet~(u32,u32)~
+        +formula_positions_dirty: bool
+        +cached_graph: Option~Box~dyn Any + Send + Sync~~
+        +cached_graph_dirty: bool
         +insert_rows() / insert_columns() / append_row()
         +validate_cell() / get_cell()
+        +mark_formula() / unmark_formula()
+        +rebuild_formula_positions()
     }
     class CellData {
         +value / raw_number / formula
@@ -236,10 +254,12 @@ flowchart TD
     P7A --> P8["修正数据有效性公式"]
     P7B --> P8
     P8 --> P9["8. rebuild_merge_index"]
-    P9 --> E([完成])
+    P9 --> P10["9. formula_positions_dirty = true<br/>+ invalidate_formula_graph(self)"]
+    P10 --> E([完成])
 
     style S fill:#fff9c4,stroke:#f9a825,stroke-width:2px
     style E fill:#e8f5e9,stroke:#43a047,stroke-width:2px
+    style P10 fill:#fff9c4,stroke:#f9a825,stroke-width:2px
 ```
 
 ### 3.4 条件格式双轨求值
@@ -294,7 +314,7 @@ flowchart LR
 | `CellRange` | start_row/col, end_row/col | 合并/有效性区域，1-based |
 | `DataValidationInfo` | dv_type, dv_operator, formula1/2, ranges, prompt/error 等 | 一条有效性规则 |
 | `ColumnCopyOptions` | copy_merge, copy_formula, copy_style, copy_value | 插入列时的复制选项 |
-| `SheetData` | cells, merged_cells, merge_index, column_widths, row_heights, frozen_*, data_validations, conditional_rules, cf_dirty | 工作表模型 |
+| `SheetData` | cells, merged_cells, merge_index, column_widths, row_heights, frozen_*, data_validations, conditional_rules, cf_dirty, formula_positions, formula_positions_dirty, cached_graph, cached_graph_dirty | 工作表模型 |
 | `UserCondFormatRule` | operator, value, color, range | 用户 YAML 条件格式规则 |
 | `CondFormatRule` | ranges, operator, formula_text, text, bg_color, font_color, bold | 文件自带条件格式规则 |
 | `ExcelData` | sheets | 工作簿模型 |
@@ -308,15 +328,18 @@ flowchart LR
 | `ColumnCopyOptions::new` | impl ColumnCopyOptions | 构造复制选项 |
 | `SheetData::new` | impl SheetData | 构造空工作表 |
 | `SheetData::rebuild_merge_index` | impl SheetData | 重建合并索引（O(1) 查找） |
+| `SheetData::rebuild_formula_positions` | impl SheetData | 全量重建公式位置索引（遍历 cells，收集 formula 非空坐标，置脏标志 false） |
+| `SheetData::mark_formula` | impl SheetData | 标记指定位置为公式单元格（写入 formula_positions 索引） |
+| `SheetData::unmark_formula` | impl SheetData | 从 formula_positions 索引中移除指定位置 |
 | `SheetData::get_cell` | impl SheetData | 取单元格 |
 | `SheetData::get_merged_range` | impl SheetData | 查所在合并范围 |
 | `SheetData::get_input_message` | impl SheetData | 查输入提示 |
 | `SheetData::validate_cell` | impl SheetData | 校验用户输入 |
 | `SheetData::get_column_merge` | impl SheetData | 查跨列合并 |
 | `SheetData::default_insert_count` | impl SheetData | 默认插入数量（合并跨度） |
-| `SheetData::insert_rows` | impl SheetData | 插入 N 行（含并行公式偏移） |
+| `SheetData::insert_rows` | impl SheetData | 插入 N 行（含并行公式偏移，最后置 formula_positions_dirty + invalidate_graph） |
 | `SheetData::append_row` | impl SheetData | 表尾追加行（公式范围扩展） |
-| `SheetData::insert_columns` | impl SheetData | 插入 M 列（Phase A/B） |
+| `SheetData::insert_columns` | impl SheetData | 插入 M 列（Phase A/B，最后置 formula_positions_dirty + invalidate_graph） |
 | `ExcelData::load_from_file` | impl ExcelData | **核心入口**：解析 xlsx 为内存结构 |
 | `ExcelData::parse_style` | impl ExcelData（私有） | 提取样式为七元组 |
 | `ExcelData::parse_hex_color` | impl ExcelData（私有） | 十六进制色→RGB |

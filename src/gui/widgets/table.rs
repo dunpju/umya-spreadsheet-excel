@@ -92,6 +92,7 @@ pub fn draw_table_content(
     hidden_rows: &HashSet<u32>,
     shift_click_anchor: &mut Option<(u32, u32)>,
     committed_paste: &mut Option<crate::gui::viewer::PasteCommit>,
+    pending_fill_request: &mut Option<crate::gui::viewer::PendingFill>,
 ) -> (Option<egui::Rect>, Option<egui::Rect>) {
     // 先获取必要的数据用于键盘处理
     let (max_col, max_row, frozen_rows, frozen_cols) = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
@@ -668,8 +669,16 @@ pub fn draw_table_content(
                         cell.value = save_value;
                         cell.formula.clear();
                     }
+                    // 精确维护 formula_positions 索引
+                    if is_formula {
+                        sheet.mark_formula(edit_row, edit_col);
+                    } else {
+                        sheet.unmark_formula(edit_row, edit_col);
+                    }
                 }
                 if is_formula {
+                    // 公式文本变更 → 依赖图缓存失效
+                    crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
                     // 公式变更需要全量求值
                     crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
                 } else {
@@ -1939,6 +1948,23 @@ pub fn draw_table_content(
                     *fill_drag_source = Some((es_c1, es_r1));
                 }
 
+                // 双击填充柄（Excel 式自动填充）：按源选区朝向自动填充到「相邻连续数据」边界——
+                // 横向线→向右填到该行相邻数据末列；纵向线/单格→向下填到该列相邻数据末行（见 excel::fill::compute_autofill_target）。
+                // 复用既有 apply_fill（序列推断 + 合并感知 + 步长推断），目标格由此处算出，
+                // 写入仍走函数末尾的 fill_request 执行块（与拖拽填充同路径：写 cell + 批量重算 + 选区更新 + committed_fill 撤销）。
+                // 清空 fill_drag_source：双击不经拖拽路径，避免下方预览块/释放块据此二次写入覆盖目标。
+                if handle_resp.double_clicked() {
+                    if let Some((tcol, trow)) = crate::excel::fill::compute_autofill_target(
+                        sheet,
+                        (es_c0, es_r0, es_c1, es_r1),
+                        hidden_columns,
+                        hidden_rows,
+                    ) {
+                        fill_request = Some(((es_c0, es_r0, es_c1, es_r1), (tcol, trow)));
+                    }
+                    *fill_drag_source = None;
+                }
+
                 // 填充拖拽中：算预览范围并绘制蓝色半透明
                 if fill_drag_source.is_some() && (handle_resp.dragged() || handle_resp.drag_started()) {
                     if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
@@ -2228,8 +2254,16 @@ pub fn draw_table_content(
                             cell.value = save_value;
                             cell.formula.clear();
                         }
+                        // 精确维护 formula_positions 索引
+                        if is_formula {
+                            sheet.mark_formula(edit_row, edit_col);
+                        } else {
+                            sheet.unmark_formula(edit_row, edit_col);
+                        }
                     }
                     if is_formula {
+                        // 公式文本变更 → 依赖图缓存失效
+                        crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
                         crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
                     } else {
                         crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
@@ -2308,9 +2342,17 @@ pub fn draw_table_content(
                         };
                         cell.value = save_value;
                     }
+                    // 精确维护 formula_positions 索引
+                    if is_formula {
+                        sheet.mark_formula(edit_row, edit_col);
+                    } else {
+                        sheet.unmark_formula(edit_row, edit_col);
+                    }
                 }
                 // 编辑中实时重算依赖公式
                 if is_formula {
+                    // 公式文本实时变更 → 依赖图缓存失效
+                    crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
                     crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
                 } else {
                     crate::excel::formula::evaluate_dependents(&mut excel_data.sheets[current_sheet], edit_row, edit_col);
@@ -2320,36 +2362,74 @@ pub fn draw_table_content(
         }
     }
     
-    // 填充柄拖拽提交：执行填充（写 cell + 复制格式）、重算、保持目标区域选中、通知撤销
+    // 填充柄拖拽/双击提交：执行填充（写 cell + 复制格式）、重算、保持目标区域选中、通知撤销
+    // 小填充（≤ FILL_SYNC_THRESHOLD 格）走同步路径；大填充走分批跨帧路径（PendingFill），
+    // 每帧写入 FILL_BATCH_SIZE 格，UI 保持流畅。预计算用 compute_fill_values（只读），
+    // 结果按大小分流——两条路径共用相同的序列推断逻辑，无重复代码。
     if let Some(((sc0, sr0, sc1, sr1), (tcol, trow))) = fill_request {
         let prev_selected = *selected_cell;
         let prev_range = *selected_range;
-        let (old_cells, has_formula) = if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
-            crate::excel::fill::apply_fill(sheet, (sc0, sr0, sc1, sr1), (tcol, trow))
-        } else {
-            (Vec::new(), false)
-        };
-        if !old_cells.is_empty() {
-            if has_formula {
-                crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+
+        // 预计算填充值（只读，不修改 sheet）
+        let fv = excel_data.sheets.get(current_sheet)
+            .and_then(|sheet| crate::excel::fill::compute_fill_values(sheet, (sc0, sr0, sc1, sr1), (tcol, trow)));
+
+        if let Some(fv) = fv {
+            if fv.cells.len() > crate::excel::fill::FILL_SYNC_THRESHOLD {
+                // ===== 大填充：分批跨帧模式 =====
+                // 把预计算值存入 PendingFill，由 viewer 每帧写入 FILL_BATCH_SIZE 格。
+                // 填充完成后统一触发重算 + 选区更新 + 撤销入栈。
+                *pending_fill_request = Some(crate::gui::viewer::PendingFill {
+                    values: fv.cells,
+                    next_idx: 0,
+                    has_formula: fv.has_formula,
+                    old_cells: Vec::new(),
+                    prev_selected,
+                    prev_range,
+                    src: (sc0, sr0, sc1, sr1),
+                    target: (tcol, trow),
+                });
             } else {
-                // 批量增量重算：一次构建依赖图重算受影响公式，替代逐格 evaluate_dependents
-                // （后者每格都全表重建依赖图；大表上填 K 格 = K × O(2M)，造成 2~3 秒卡顿）
-                crate::excel::formula::evaluate_dependents_many(
-                    &mut excel_data.sheets[current_sheet],
-                    old_cells.iter().map(|(r, c, _)| (*r, *c)),
-                );
+                // ===== 小填充：同步路径（单帧完成） =====
+                let mut old_cells: Vec<(u32, u32, Option<CellData>)> = Vec::new();
+                if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+                    for &(row, col, ref new_cell) in &fv.cells {
+                        let old = sheet.get_cell(row, col).cloned();
+                        let old_had_formula = old.as_ref().map_or(false, |c| !c.formula.is_empty());
+                        old_cells.push((row, col, old));
+                        sheet.cells.insert((row, col), new_cell.clone());
+                        // 精确维护 formula_positions 索引
+                        if !new_cell.formula.is_empty() {
+                            sheet.mark_formula(row, col);
+                        } else if old_had_formula {
+                            sheet.unmark_formula(row, col);
+                        }
+                    }
+                }
+                if !old_cells.is_empty() {
+                    if fv.has_formula {
+                        // 公式填充（含公式文本变更）→ 依赖图缓存失效
+                        crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
+                        crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
+                    } else {
+                        // 批量增量重算：一次构建依赖图重算受影响公式
+                        crate::excel::formula::evaluate_dependents_many(
+                            &mut excel_data.sheets[current_sheet],
+                            old_cells.iter().map(|(r, c, _)| (*r, *c)),
+                        );
+                    }
+                    *dirty = true;
+                    // 填充后选区 = 源 ∪ 目标（保持目标区域选中，活动格为源左上）
+                    *selected_cell = Some((sc0, sr0));
+                    *selected_range = Some((sc0.min(tcol), sr0.min(trow), sc1.max(tcol), sr1.max(trow)));
+                    // 撤销信号：调用方据此构造 RangeClear 入栈（恢复 old_cells + 选区）
+                    *committed_fill = Some(crate::gui::viewer::FillCommit {
+                        old_cells,
+                        old_selected: prev_selected,
+                        old_range: prev_range,
+                    });
+                }
             }
-            *dirty = true;
-            // 填充后选区 = 源 ∪ 目标（保持目标区域选中，活动格为源左上）
-            *selected_cell = Some((sc0, sr0));
-            *selected_range = Some((sc0.min(tcol), sr0.min(trow), sc1.max(tcol), sr1.max(trow)));
-            // 撤销信号：调用方据此构造 RangeClear 入栈（恢复 old_cells + 选区）
-            *committed_fill = Some(crate::gui::viewer::FillCommit {
-                old_cells,
-                old_selected: prev_selected,
-                old_range: prev_range,
-            });
         }
     }
 
@@ -2385,10 +2465,12 @@ pub fn draw_table_content(
                     let cell = sheet.cells.entry((tr, tc)).or_insert_with(CellData::default);
                     if is_formula {
                         cell.formula = val.clone();
+                        sheet.mark_formula(tr, tc);
                         // value 将由公式求值填充
                     } else {
                         cell.value = val.clone();
                         cell.formula.clear();
+                        sheet.unmark_formula(tr, tc);
                     }
                 }
             }
@@ -2396,6 +2478,8 @@ pub fn draw_table_content(
 
         // 公式重算
         if has_formula {
+            // 粘贴含公式 → 依赖图缓存失效
+            crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
             crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[current_sheet]);
         } else {
             // 批量增量重算：一次构建依赖图，替代逐格 evaluate_dependents（大表性能）

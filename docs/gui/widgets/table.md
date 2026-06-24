@@ -12,7 +12,7 @@
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
-- **交互**：点击选中（绿色边框）、**Shift+点击范围选择**（从锚点到目标格的矩形选区）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、**Ctrl+C/Ctrl+V 复制粘贴（单格/矩形区域，TSV 格式，公式保留，支持撤销）**、键盘导航（Tab/方向键/Enter）。
+- **交互**：点击选中（绿色边框）、**Shift+点击范围选择**（从锚点到目标格的矩形选区）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、**双击填充柄自动填充（按源选区朝向填到「相邻连续数据」边界：横向线向右到行尾、纵向线/单格向下到列底；步长/类型/合并全部复用 `apply_fill`，详见 §2.12）**、**Ctrl+C/Ctrl+V 复制粘贴（单格/矩形区域，TSV 格式，公式保留，支持撤销）**、键盘导航（Tab/方向键/Enter）。
 - **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.12）。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
@@ -24,8 +24,8 @@
 | 内部模块 | `crate::excel::reader` | `CellAlignment`、`CellData`、`ExcelData`、`col_to_letter` |
 | 内部模块 | `crate::gui::alignment` | `alignment_to_egui`（对齐方式映射） |
 | 内部模块 | `crate::excel::formula` | `evaluate_sheet` / `evaluate_dependents`（公式重算） |
-| 内部模块 | `crate::excel::fill` | `apply_fill`（填充柄拖拽填充：格式复制 + 公式相对引用平移） |
-| 内部模块 | `crate::gui::viewer` | `ContextMenuState`（右键菜单状态）、`PasteCommit`（粘贴撤销信号） |
+| 内部模块 | `crate::excel::fill` | `apply_fill`（填充柄拖拽填充：格式复制 + 公式相对引用平移）、`compute_fill_values`（只读预计算填充值，供分批跨帧写入）、`FillValues`（预计算结果，含目标格列表与公式标志）、`compute_autofill_target`（双击填充柄：推断自动填充目标边界） |
+| 内部模块 | `crate::gui::viewer` | `ContextMenuState`（右键菜单状态）、`PasteCommit`（粘贴撤销信号）、`PendingFill`（分批跨帧填充状态） |
 | 标准库 | `std::borrow::Cow` | 文本借用，避免克隆 |
 | 标准库 | `std::collections::HashSet` | 隐藏行/列集合 |
 
@@ -167,8 +167,19 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 - **状态**：`fill_drag_source: &mut Option<(u32,u32)>`（持久化在 viewer，跨帧）。`drag_started`（命中柄）时置选区右下角格；`drag_stopped` 时清空。
 - **预览**：拖拽中由指针→单元格（`cell_at`，冻结感知）算目标格，结合选区算预览范围（沿单轴：下/上/右/左），蓝色半透明（α=60/160）实时绘制。
-- **提交**：`drag_stopped` 写局部 `fill_request = Some((源选区, 目标格))`。**实际写 cell 在函数末尾**（`&mut excel_data` 可用区，仿实时重算块），避免与渲染段 `&sheet` 借用冲突：调 `crate::excel::fill::apply_fill` 写入（含格式复制 + 公式相对引用平移），按是否含公式选重算：含公式 → `evaluate_sheet`（全量）；仅值 → `evaluate_dependents_many`（**批量**增量，一次建图，勿逐格调 `evaluate_dependents`——大表上 K × O(2M) 会卡顿），置 `dirty`，选区设为「源 ∪ 目标」（保持目标选中），并经出参 `committed_fill: &mut Option<FillCommit>` 通知调用方入撤销栈。`apply_fill` 为**合并单元格感知**（源/目标序列折叠合并区域，避免合并体空格被当作 0 污染步长；详见 [`excel/fill`](../../excel/fill.md) §2「合并单元格感知」）——例如合并格 AJ1:AK1（值 18）向右填充会得到 19 而非错误地变成 -18。
-- **撤销**：调用方（viewer）据 `committed_fill` 构造 `UndoAction::RangeClear`（恢复 `old_cells` + 选区 + 全表重算），Ctrl+Z 即撤销填充。
+- **提交**：`drag_stopped` 写局部 `fill_request = Some((源选区, 目标格))`。**实际写 cell 在函数末尾**（`&mut excel_data` 可用区，仿实时重算块），避免与渲染段 `&sheet` 借用冲突。填充执行采用**两阶段架构**：
+  1. **预计算阶段**（只读）：调用 `crate::excel::fill::compute_fill_values`（非 `apply_fill`），仅读取 sheet、推断序列值并收集到 `FillValues`，不执行任何写入操作。
+  2. **写入阶段**：根据 `FillValues.cells.len()` 与 `FILL_SYNC_THRESHOLD`（=2000）分流：
+     - **同步路径**（`cells.len() <= FILL_SYNC_THRESHOLD`）：单帧完成——逐格写入 `sheet.cells.insert`、逐格维护 `formula_positions` 索引（新格有公式→`mark_formula`；旧格有公式但新格无→`unmark_formula`），然后根据 `has_formula` 选择重算策略（公式→`evaluate_sheet` 全量；仅值→`evaluate_dependents_many` 批量增量），置 `dirty`，选区设为「源 ∪ 目标」，并经 `committed_fill` 通知调用方入撤销栈。
+     - **异步路径**（`cells.len() > FILL_SYNC_THRESHOLD`）：创建 `PendingFill`（含预计算值、写入游标 `next_idx=0`、`has_formula`、填充前选区/范围），存入 `pending_fill_request` 出参交由 viewer。viewer 每帧写入 `FILL_BATCH_SIZE`（=2000）格，帧间 UI 正常响应；写入阶段同步维护 `formula_positions` 索引（新格有公式→`mark_formula`；旧格有公式但新格无→`unmark_formula`）。全部写完后统一触发公式重算 + 选区更新 + 撤销入栈。
+- **双击自动填充（`handle_resp.double_clicked()`）**：双击填充柄时**不走拖拽**，而是调 `crate::excel::fill::compute_autofill_target(sheet, 源选区, hidden_columns, hidden_rows)` 推断目标格，再写**同一个** `fill_request`——**完全复用拖拽填充的末尾执行块**（`compute_fill_values` 预计算 + 同步/异步分流写入 + 批量重算 + 选区「源∪目标」+ `committed_fill` 撤销），无第二条写入路径。目标推断规则（详见 [`excel/fill`](../../excel/fill.md) `compute_autofill_target`）：
+  - **方向按源选区朝向**：横向线（多列单行，如 `AH1:AK1`）→ **仅向右**；纵向线（多行单列，如 `A38:A39`）→ **仅向下**；方向明确的选区不回退另一方向（与 Excel 一致）。单格/方块 → 默认向下，无相邻数据时回退向右；都无则返回 `None`（不填充）。
+  - **边界=相邻连续数据末尾**（仿 Excel 双击填充柄）：向下取相邻列（先左后右）从源末行下一行起的连续非空末行；向右取相邻行（先上后下）从源末列右一列起的连续非空末列。用例：`AH1:AI1=17`/`AJ1:AK1=18` + 第 2 行数据延伸到 `AN` → 填到 `AN1`（19/20/21）；`A38="08月17号"`/`A39="08月18号"` + B 列数据延伸到第 44 行 → 填到 `A44`（`08月19号`…`08月23号`）。
+  - **合并感知 / 隐藏行列透明**：边界扫描把合并区域折叠为左上角值并跨过整个合并跨度；隐藏行/列不中断连续性。
+  - 双击时立即 `*fill_drag_source = None`，使本帧的拖拽预览块/释放块不据此二次写入覆盖目标（双击帧 `drag_started` 与 `double_clicked` 可能同帧为真，靠此清空分流）。
+  - 超 `AUTO_FILL_MAX_CELLS`（5 万）时目标被夹紧，防单帧海量写入阻塞 UI（见 [`excel/fill`](../../excel/fill.md) §5 性能）。
+- **撤销**：调用方（viewer）据 `committed_fill` 构造 `UndoAction::RangeClear`（恢复 `old_cells` + 选区 + 全表重算），Ctrl+Z 即撤销填充（双击与拖拽填充共用此信号，撤销行为一致）。
+- **公式索引维护**：填充写入时同步维护 `formula_positions` 索引：新格有公式→`mark_formula`；旧格有公式但新格无→`unmark_formula`。此规则同步路径在写入循环内逐格执行；异步路径在 viewer 分批写入循环内逐格执行，确保填充完成时索引与 sheet 一致。
 
 
 ### 2.13 原位编辑器（无缝编辑）
@@ -250,6 +261,7 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 | 虚拟渲染 | 可见范围裁剪 | 仅绘制视口内单元格 |
 | 输入事件 `consume_key` | 键盘处理 | 消费已处理按键，防止穿透到菜单栏 |
 | `request_repaint` | 滚动后 | 确保滚动立即生效 |
+| `compute_fill_values` 分批写入 | 填充执行 | 大填充（>FILL_SYNC_THRESHOLD）分批跨帧写入，UI 不卡顿 |
 
 ---
 
@@ -294,12 +306,12 @@ flowchart TD
     TEDIT --> POST["后处理: 填充 + 粘贴执行 + 实时重算"]
     POST --> OUT(["返回<br/>(scroll_to_rect, selected_cell_rect)"])
 
-    style IN fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style OUT fill:#e8f5e9,stroke:#43a047,stroke-width:2px
-    style RENDER fill:#fff9c4,stroke:#f9a825,stroke-width:2px
-    style FROZEN fill:#fce4ec,stroke:#c2185b
-    style COPY fill:#c8e6c9,stroke:#388e3c
-    style PASTE_DET fill:#c8e6c9,stroke:#388e3c
+style IN fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+style OUT fill:#e8f5e9,stroke:#43a047,stroke-width:2px
+style RENDER fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+style FROZEN fill:#fce4ec,stroke:#c2185b
+style COPY fill:#c8e6c9,stroke:#388e3c
+style PASTE_DET fill:#c8e6c9,stroke:#388e3c
 ```
 
 ### 3.2 渲染层次（绘制顺序，后画者在上）
@@ -321,17 +333,17 @@ flowchart TD
     L7 --> L8["8. 批注悬停气泡"]
     L8 --> L9["9. 编辑输入框 TextEdit(最上层)"]
 
-    style L0 fill:#eeeeee,stroke:#9e9e9e
-    style L1 fill:#fff9c4,stroke:#f9a825
-    style L2 fill:#fff9c4,stroke:#f9a825
-    style L3 fill:#f5f5f5,stroke:#bdbdbd
-    style L3a fill:#fce4ec,stroke:#c2185b
-    style L3c fill:#fce4ec,stroke:#c2185b
-    style L3d fill:#fce4ec,stroke:#c2185b
-    style L5 fill:#bbdefb,stroke:#1976d2
-    style L7 fill:#e0e0e0,stroke:#616161
-    style L8 fill:#fff9c4,stroke:#f9a825
-    style L9 fill:#c8e6c9,stroke:#388e3c
+style L0 fill:#eeeeee,stroke:#9e9e9e
+style L1 fill:#fff9c4,stroke:#f9a825
+style L2 fill:#fff9c4,stroke:#f9a825
+style L3 fill:#f5f5f5,stroke:#bdbdbd
+style L3a fill:#fce4ec,stroke:#c2185b
+style L3c fill:#fce4ec,stroke:#c2185b
+style L3d fill:#fce4ec,stroke:#c2185b
+style L5 fill:#bbdefb,stroke:#1976d2
+style L7 fill:#e0e0e0,stroke:#616161
+style L8 fill:#fff9c4,stroke:#f9a825
+style L9 fill:#c8e6c9,stroke:#388e3c
 ```
 
 ### 3.3 调用层级关系（文本树）
@@ -368,11 +380,14 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 │   ├── 冻结窗格四步覆盖 → draw_frozen_cell
 │   ├── 冻结分隔线
 │   ├── 选中高亮 / 选中范围
-│   ├── 填充柄渲染 + 拖拽预览
+│   ├── 填充柄渲染 + 拖拽预览 + 双击自动填充(compute_autofill_target)
 │   ├── 批注悬停气泡
 │   └── TextEdit 输入框（冻结覆盖之后绘制）
 ├── 实时重算 → formula::evaluate_sheet|evaluate_dependents
-├── 填充执行 → excel::fill::apply_fill → formula 重算
+├── 填充柄: 拖拽(指针→目标格 cell_at) / 双击(compute_autofill_target 推断相邻数据边界) → fill_request
+├── 填充执行 → excel::fill::compute_fill_values(源选区, 目标格) → 按 cells.len() 分流:
+│   ├── 同步路径(≤FILL_SYNC_THRESHOLD): 逐格写入+mark/unmark_formula → 重算 → committed_fill
+│   └── 异步路径(>FILL_SYNC_THRESHOLD): PendingFill(分批跨帧) → viewer 逐帧写入
 └── 粘贴执行 → 解析 paste_request → 写入 cells → formula 重算 → committed_paste
 ```
 
@@ -423,6 +438,7 @@ flowchart LR
 | `hidden_rows` | `&HashSet<u32>` | 隐藏行集合 |
 | `shift_click_anchor` | `&mut Option<(u32, u32)>` | Shift+点击锚点（最后一次非 Shift 点击/键盘导航的单元格坐标），用于 Shift+点击范围选择 |
 | `committed_paste` | `&mut Option<crate::gui::viewer::PasteCommit>` | 粘贴提交信号：一次成功粘贴后写入，调用方据此构造 `UndoAction::RangeClear` 入撤销栈 |
+| `pending_fill_request` | `&mut Option<crate::gui::viewer::PendingFill>` | 大填充（>FILL_SYNC_THRESHOLD）时的分批跨帧填充请求，由 viewer 每帧逐批写入 |
 
 ### 4.2 私有函数（fn）
 
