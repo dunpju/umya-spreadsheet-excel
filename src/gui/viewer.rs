@@ -1170,7 +1170,8 @@ impl eframe::App for ExcelViewer {
                                 if let Some((col, row)) = self.selected_cell {
                                     if let Some(dv) = sheet.get_input_message(col, row) {
                                         let pos = cell_rect.left_bottom() + egui::vec2(0.0, 2.0);
-                                        let popup_width = cell_rect.width().max(100.0);
+                                        // 弹窗宽度为单元格宽度的 50%
+                                        let popup_width = cell_rect.width() * 0.5;
                                         egui::Area::new(egui::Id::new("data_validation_popup"))
                                             .fixed_pos(pos)
                                             .order(egui::Order::Foreground)
@@ -1180,11 +1181,17 @@ impl eframe::App for ExcelViewer {
                                                     .show(ui, |ui| {
                                                         ui.set_min_width(popup_width);
                                                         ui.set_max_width(popup_width);
+                                                        // 内容按弹窗宽度自动换行
                                                         if !dv.prompt_title.is_empty() {
-                                                            ui.strong(&dv.prompt_title);
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(&dv.prompt_title).strong(),
+                                                                )
+                                                                .wrap(),
+                                                            );
                                                         }
                                                         if !dv.prompt.is_empty() {
-                                                            ui.label(&dv.prompt);
+                                                            ui.add(egui::Label::new(&dv.prompt).wrap());
                                                         }
                                                     });
                                             });
