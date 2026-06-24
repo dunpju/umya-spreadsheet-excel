@@ -634,11 +634,11 @@ fn scan_right(
 /// - 方向明确的选区（横向线/纵向线）**不回退另一方向**，避免横向选区误触纵向填充。
 ///
 /// # 边界判定（仿 Excel「双击填充柄填充到相邻连续数据末尾」）
-/// - **向下**：从源末行下一行（`sr1+1`）起，在候选列（源列优先 → 向左扫描 ≤10 列 → 向右扫描 ≤10 列）
-///   中取首个有数据的列作锚点，向下扫描连续非空格，末行即目标行。紧邻位即空 → 该方向无边界。
-/// - **向右**：从源末列右一列（`sc1+1`）起，在候选行（源行优先 → 向上扫描 ≤10 行 → 向下扫描 ≤10 行）
+/// - **向下**：从源末行下一行（`sr1+1`）起，**仅沿源列**（`sc0..=sc1`）查找第一个有数据的行，
+///   从该行起向下扫描连续非空格，末行即目标行。可跳过起始空行；源列全空时兜底填充到 `max_row`。
+/// - **向右**：从源末列右一列（`sc1+1`）起，在候选行（源行优先 → 向上 ≤10 行 → 向下 ≤10 行）
 ///   中取首个有数据的行作锚点，向右扫描连续非空格，末列即目标列。
-///   扩大搜索范围避免因紧邻行/列为空而错过稍远行的相邻数据。
+/// - **单格/方块**：方向不明确，允许搜索相邻列/行以推断边界（扩展搜索）。
 /// - 合并感知 / 隐藏行列透明（详见 [`scan_down`] / [`scan_right`]）。
 ///
 /// # 安全上限
@@ -670,21 +670,25 @@ pub fn compute_autofill_target(
     let vertical_line = sr1 > sr0 && sc1 == sc0;
     // 朝向决定首选方向：横向线→右，纵向线→下，单格/方块→默认下（允许回退）
 
-    // 向下：相邻列锚点（优先源列，再向左、向右各搜索至多 10 列），从 sr1+1 起扫描
+    // 向下：仅以源列作为锚点列，从源末行下一行起向下扫描，跳过起始空行
     let try_down = || -> Option<(u32, u32)> {
-        if sr1 >= max_row {
+        let from_row = sr1 + 1;
+        if from_row > max_row {
             return None;
         }
-        let from_row = sr1 + 1;
-        // 锚点列候选：源列优先 → 向左搜索（≤10 列）→ 向右搜索（≤10 列），
-        // 扩大搜索范围避免因源列紧邻行为空而错过稍远列的相邻数据。
-        let anchor_col = {
-            let src_cols = sc0..=sc1;
-            let left = (1.max(sc0.saturating_sub(10))..sc0).rev();
-            let right = (sc1 + 1)..=(sc1 + 10).min(max_col);
-            src_cols.chain(left).chain(right).find(|&c| cell_occupied(sheet, c, from_row))?
-        };
-        let last_row = scan_down(sheet, anchor_col, from_row, max_row, hidden_rows)?;
+        // 在源列中查找 from_row 起第一个有数据的行作为扫描起点；
+        // 若源列从 from_row 起全空（如源末尾恰好是表格最底部数据），则兜底填充到 max_row
+        let last_row =
+            if let Some(anchor_col) = (sc0..=sc1).find(|&c| {
+                (from_row..=max_row).any(|r| cell_occupied(sheet, c, r))
+            }) {
+                let start_row = (from_row..=max_row)
+                    .find(|&r| cell_occupied(sheet, anchor_col, r))?;
+                scan_down(sheet, anchor_col, start_row, max_row, hidden_rows)?
+            } else {
+                // 源列无现有数据可作锚点 → 填充到表格末行
+                max_row
+            };
         let lanes = sc1 - sc0 + 1; // 垂直填充的车道数 = 源列数
         let extent = last_row - sr1; // >= 1
         let total = (lanes as u64) * (extent as u64);
@@ -697,14 +701,38 @@ pub fn compute_autofill_target(
         Some((sc0, sr1 + extent))
     };
 
-    // 向右：相邻行锚点（优先源行，再向上、向下各搜索至多 10 行），从 sc1+1 起扫描
-    let try_right = || -> Option<(u32, u32)> {
+    // ===== 横向填充：允许搜索相邻行（数据延伸行常在源行之外）=====
+
+    // 向下（扩展版）：源列优先，再向左、向右各搜索至多 10 列
+    let try_down_expanded = || -> Option<(u32, u32)> {
+        if sr1 >= max_row {
+            return None;
+        }
+        let from_row = sr1 + 1;
+        let anchor_col = {
+            let src_cols = sc0..=sc1;
+            let left = (1.max(sc0.saturating_sub(10))..sc0).rev();
+            let right = (sc1 + 1)..=(sc1 + 10).min(max_col);
+            src_cols.chain(left).chain(right).find(|&c| cell_occupied(sheet, c, from_row))?
+        };
+        let last_row = scan_down(sheet, anchor_col, from_row, max_row, hidden_rows)?;
+        let lanes = sc1 - sc0 + 1;
+        let extent = last_row - sr1;
+        let total = (lanes as u64) * (extent as u64);
+        let extent = if total > AUTO_FILL_MAX_CELLS as u64 {
+            ((AUTO_FILL_MAX_CELLS as u64) / (lanes.max(1) as u64)).max(1) as u32
+        } else {
+            extent
+        };
+        Some((sc0, sr1 + extent))
+    };
+
+    // 向右（扩展版）：源行优先，再向上、向下各搜索至多 10 行
+    let try_right_expanded = || -> Option<(u32, u32)> {
         if sc1 >= max_col {
             return None;
         }
         let from_col = sc1 + 1;
-        // 锚点行候选：源行优先 → 向上搜索（≤10 行）→ 向下搜索（≤10 行），
-        // 扩大搜索范围避免因源行紧邻列为空而错过稍远行的相邻数据。
         let anchor_row = {
             let src_rows = sr0..=sr1;
             let above = (1.max(sr0.saturating_sub(10))..sr0).rev();
@@ -712,26 +740,27 @@ pub fn compute_autofill_target(
             src_rows.chain(above).chain(below).find(|&r| cell_occupied(sheet, from_col, r))?
         };
         let last_col = scan_right(sheet, anchor_row, from_col, max_col, hidden_cols)?;
-        let lanes = sr1 - sr0 + 1; // 水平填充的车道数 = 源行数
-        let extent = last_col - sc1; // >= 1
+        let lanes = sr1 - sr0 + 1;
+        let extent = last_col - sc1;
         let total = (lanes as u64) * (extent as u64);
         let extent = if total > AUTO_FILL_MAX_CELLS as u64 {
             ((AUTO_FILL_MAX_CELLS as u64) / (lanes.max(1) as u64)).max(1) as u32
         } else {
             extent
         };
-        // target_col > sc1 且 target_row=sr0 ∈[sr0,sr1]，apply_fill 据此判为「水平向前」
         Some((sc1 + extent, sr0))
     };
 
     // 方向明确的选区不回退另一方向（与 Excel 一致）：
-    // 横向线→仅向右；纵向线→仅向下；单格/方块→默认向下，允许回退向右
+    // 纵向线→仅向下，锚点限定于源列（用户需求：不搜索相邻列）
+    // 横向线→仅向右，锚点允许搜索相邻行（数据延伸行常在源行之外）
+    // 单格/方块→默认向下，允许回退向右（均扩展搜索相邻行列）
     if horizontal_line {
-        try_right()
+        try_right_expanded()
     } else if vertical_line {
         try_down()
     } else {
-        try_down().or_else(try_right)
+        try_down_expanded().or_else(try_right_expanded)
     }
 }
 
@@ -1021,9 +1050,9 @@ mod tests {
         s.rebuild_merge_index();
         put(&mut s, 1, 1, "17"); // A1（合并左上角）
         put(&mut s, 3, 1, "18"); // C1（合并左上角）
-        put(&mut s, 5, 2, "x"); // E2
-        put(&mut s, 6, 2, "y"); // F2
-        put(&mut s, 7, 2, "z"); // G2
+        put(&mut s, 5, 2, "x"); // E2（相邻行）
+        put(&mut s, 6, 2, "y"); // F2（相邻行）
+        put(&mut s, 7, 2, "z"); // G2（相邻行）
         // H2 空
         let (hc, hr) = empty_hidden();
         let target = compute_autofill_target(&s, (1, 1, 4, 1), &hc, &hr);
@@ -1038,15 +1067,15 @@ mod tests {
     #[test]
     fn autofill_vertical_datetext_to_boundary() {
         // 报修纵向用例（缩小行号）：A1="08月17号"、A2="08月18号"（源 A1:A2，纵向线）；
-        // 相邻右侧 B 列 B3:B6 有数据、B7 空 → 边界到第 6 行。
+        // 源列 A 列 A3:A6 有数据、A7 空 → 边界到第 6 行。
         let mut s = empty_sheet();
         put(&mut s, 1, 1, "08月17号");
         put(&mut s, 1, 2, "08月18号");
-        put(&mut s, 2, 3, "p");
-        put(&mut s, 2, 4, "q");
-        put(&mut s, 2, 5, "r");
-        put(&mut s, 2, 6, "s");
-        // B7 空
+        put(&mut s, 1, 3, "p"); // A3（源列内）
+        put(&mut s, 1, 4, "q"); // A4（源列内）
+        put(&mut s, 1, 5, "r"); // A5（源列内）
+        put(&mut s, 1, 6, "s"); // A6（源列内）
+        // A7 空
         let (hc, hr) = empty_hidden();
         let target = compute_autofill_target(&s, (1, 1, 1, 2), &hc, &hr);
         assert_eq!(target, Some((1, 6))); // 填到 A6
@@ -1079,8 +1108,8 @@ mod tests {
 
     #[test]
     fn autofill_merged_adjacent_horizontal() {
-        // 横向：相邻行含合并。源 A1:B1（合并=1）、C1:D1（合并=2）（横向线）；
-        // 相邻下方 row2：E2:F2 合并="a"，G2="b"，H2 空 → 边界 G(7)。
+        // 横向：相邻行含合并。A1:B1（合并=1）、C1:D1（合并=2）（横向线）；
+        // 相邻下方 row2：E2:F2 合并="a"、G2="b"、H2 空 → 边界 G(7)。
         let mut s = empty_sheet();
         s.merged_cells.push(crate::excel::reader::CellRange::new(1, 1, 1, 2)); // A1:B1
         s.merged_cells.push(crate::excel::reader::CellRange::new(1, 3, 1, 4)); // C1:D1
@@ -1088,8 +1117,8 @@ mod tests {
         s.rebuild_merge_index();
         put(&mut s, 1, 1, "1");
         put(&mut s, 3, 1, "2");
-        put(&mut s, 5, 2, "a"); // E2 合并左上角
-        put(&mut s, 7, 2, "b"); // G2
+        put(&mut s, 5, 2, "a"); // E2 合并左上角（相邻行）
+        put(&mut s, 7, 2, "b"); // G2（相邻行）
         let (hc, hr) = empty_hidden();
         let target = compute_autofill_target(&s, (1, 1, 4, 1), &hc, &hr);
         // scan_right(row2, from=5)：E2 合并跨到 F(6)→last=6；G2→last=7；H2 空 → 边界 7
@@ -1111,8 +1140,8 @@ mod tests {
 
     #[test]
     fn autofill_horizontal_expanded_anchor_search() {
-        // 横向线选区（含合并）：源行(1)和紧邻行(2)的 from_col 均为空，但第 3 行有数据
-        // → 扩大锚点搜索范围（10 行）应能发现 row3 的数据并正确横向填充
+        // 横向线选区（含合并）：源行(1)的 from_col 为空，但第 3 行有数据
+        // → 扩大锚点搜索范围应能发现 row3 的数据并正确横向填充。
         let mut s = empty_sheet();
         s.merged_cells.push(crate::excel::reader::CellRange::new(1, 1, 1, 2)); // A1:B1 合并=17
         s.merged_cells.push(crate::excel::reader::CellRange::new(1, 3, 1, 4)); // C1:D1 合并=18
@@ -1138,28 +1167,29 @@ mod tests {
     fn autofill_vertical_no_fallback_to_horizontal() {
         // 纵向线选区：下方无数据、右侧有数据 → 不应回退横向填充
         let mut s = empty_sheet();
+        s.max_row = 2; // 源末行=max_row，无空间填充
         put(&mut s, 1, 1, "10"); // A1（源）
         put(&mut s, 1, 2, "20"); // A2（源），形成纵向线 A1:A2
         put(&mut s, 2, 1, "x"); // B1（右侧有数据，但纵向线不回退横向）
-        // A3 空（下方无数据，try_down 返回 None）
+        // from_row=3 > max_row=2，无空间填充
         let (hc, hr) = empty_hidden();
         assert_eq!(compute_autofill_target(&s, (1, 1, 1, 2), &hc, &hr), None);
     }
 
     #[test]
-    fn autofill_vertical_expanded_anchor_search() {
-        // 纵向线选区：紧邻列(2)的 from_row 为空，但第 3 列有数据
-        // → 扩大锚点搜索范围（10 列）应能发现 col3 的数据并正确纵向填充
+    fn autofill_vertical_source_only_anchor() {
+        // 纵向线选区：源列 A 列 A3:A6 有数据 → 仅沿源列扫描到第 6 行。
+        // 验证锚点搜索限定于源列（不搜索非源列数据）。
         let mut s = empty_sheet();
         put(&mut s, 1, 1, "08月17号"); // A1（源）
         put(&mut s, 1, 2, "08月18号"); // A2（源），形成纵向线 A1:A2
-        // col1 from_row=3 空, col2 from_row=3 空, col3 from_row=3-6 有数据
-        put(&mut s, 3, 3, "a");
-        put(&mut s, 3, 4, "b");
-        put(&mut s, 3, 5, "c");
-        put(&mut s, 3, 6, "d");
+        put(&mut s, 1, 3, "a"); // A3（源列内）
+        put(&mut s, 1, 4, "b"); // A4（源列内）
+        put(&mut s, 1, 5, "c"); // A5（源列内）
+        put(&mut s, 1, 6, "d"); // A6（源列内）
+        // 同时在 col3 放数据——但纵向线不应搜索非源列，应忽略
+        put(&mut s, 3, 3, "ignored"); // 非源列，应被忽略
         let (hc, hr) = empty_hidden();
-        // 扩大搜索应找到 col3 作为锚点 → scan_down 到 row6 → target=(1,6)
         let target = compute_autofill_target(&s, (1, 1, 1, 2), &hc, &hr);
         assert_eq!(target, Some((1, 6)));
         let _ = apply_fill(&mut s, (1, 1, 1, 2), target.unwrap());
@@ -1167,6 +1197,73 @@ mod tests {
         assert_eq!(val(&s, 1, 4), "08月20号");
         assert_eq!(val(&s, 1, 5), "08月21号");
         assert_eq!(val(&s, 1, 6), "08月22号");
+    }
+
+    #[test]
+    fn autofill_vertical_datetext_exact_user_scenario() {
+        // 报修用例（精确行号）：A38="08月17号"、A39="08月18号"（纵向线 A38:A39）；
+        // 源列 A 列 A40:A44 有数据、A45 空 → 边界到第 44 行。
+        // 预期：A40..A44 = 08月19号..08月23号（共 5 格）
+        let mut s = empty_sheet();
+        s.max_row = 100;
+        put(&mut s, 1, 38, "08月17号");
+        put(&mut s, 1, 39, "08月18号");
+        // 源列 A 的数据延伸到第 44 行
+        for r in 40..=44 {
+            put(&mut s, 1, r, "x");
+        }
+        let (hc, hr) = empty_hidden();
+        let target = compute_autofill_target(&s, (1, 38, 1, 39), &hc, &hr);
+        assert_eq!(target, Some((1, 44))); // 填到 A44
+        // 执行填充并验证
+        let _ = apply_fill(&mut s, (1, 38, 1, 39), target.unwrap());
+        assert_eq!(val(&s, 1, 40), "08月19号");
+        assert_eq!(val(&s, 1, 41), "08月20号");
+        assert_eq!(val(&s, 1, 42), "08月21号");
+        assert_eq!(val(&s, 1, 43), "08月22号");
+        assert_eq!(val(&s, 1, 44), "08月23号");
+        // 确认末格下一格没有被意外填充
+        assert!(!s.cells.contains_key(&(45, 1)));
+    }
+
+    #[test]
+    fn autofill_vertical_skip_empty_from_row() {
+        // 纵向线 A38:A39，源列 A 的 from_row(A40) 为空，但 A41:A44 有数据
+        // → 应跳过空行 A40，从 A41 开始扫描连续数据到 A44。
+        let mut s = empty_sheet();
+        s.max_row = 100;
+        put(&mut s, 1, 38, "08月17号");
+        put(&mut s, 1, 39, "08月18号");
+        // A40 故意留空（不 put）
+        for r in 41..=44 {
+            put(&mut s, 1, r, "x");
+        }
+        let (hc, hr) = empty_hidden();
+        let target = compute_autofill_target(&s, (1, 38, 1, 39), &hc, &hr);
+        assert_eq!(target, Some((1, 44))); // 填到 A44
+        let _ = apply_fill(&mut s, (1, 38, 1, 39), target.unwrap());
+        assert_eq!(val(&s, 1, 40), "08月19号");
+        assert_eq!(val(&s, 1, 41), "08月20号");
+        assert_eq!(val(&s, 1, 42), "08月21号");
+        assert_eq!(val(&s, 1, 43), "08月22号");
+        assert_eq!(val(&s, 1, 44), "08月23号");
+    }
+
+    #[test]
+    fn autofill_vertical_to_max_row_when_no_anchor_data() {
+        // 报修用例：A44="08月23号"、A45="08月24号"，max_row=47，
+        // A46/A47 为空（待填充），双击填充柄应兜底填充到表格末行 A47。
+        let mut s = empty_sheet();
+        s.max_row = 47;
+        put(&mut s, 1, 44, "08月23号");
+        put(&mut s, 1, 45, "08月24号");
+        // A46、A47 为空——源列从 from_row=46 起无现有数据
+        let (hc, hr) = empty_hidden();
+        let target = compute_autofill_target(&s, (1, 44, 1, 45), &hc, &hr);
+        assert_eq!(target, Some((1, 47))); // 兜底填到 max_row=47
+        let _ = apply_fill(&mut s, (1, 44, 1, 45), target.unwrap());
+        assert_eq!(val(&s, 1, 46), "08月25号");
+        assert_eq!(val(&s, 1, 47), "08月26号");
     }
 
     #[test]
