@@ -1565,11 +1565,12 @@ pub fn draw_convert_popup(
         .id(egui::Id::new("convert_popup"))
         .title_bar(false)
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
+        .default_size(egui::vec2(440.0, 330.0))
         .open(&mut keep_open)
         .show(ctx, |ui| {
             ui.set_min_width(440.0);
-            ui.set_max_width(440.0);
+            ui.set_min_height(260.0);
 
             // ══════ 自定义标题栏 ══════
             ui.horizontal(|ui| {
@@ -1586,19 +1587,28 @@ pub fn draw_convert_popup(
 
             ui.separator();
 
-            // 中间区域：多行文本输入框
+            // 中间区域：多行文本输入框（固定可视高度——不随窗口/内容撑高）
+            //
+            // 关键：`desired_rows` 与 `max_height` 都是【固定常量】，绝不依赖 `available_height`。
+            // 之前的 `desired_rows = ceil(available_height / 行高)` 会形成正反馈：
+            //   窗口越高 → 可用越高 → 行数越多 → TextEdit 越高 → 内容 min 越大 →
+            //   egui 把可缩放 Window 撑大去容纳内容 → 可用更高 → …… 直至屏幕高度
+            //   （实测空内容就把弹窗撑到 ~800px）。ScrollArea 也救不了，因为它的 min 跟着内容走。
+            // 固定后：≤ TEXT_ROWS 行正好填满默认窗口（无间隙）；超过则 ScrollArea 在 TEXT_MAX_H 封顶、滚动，不撑高。
+            const TEXT_ROWS: usize = 12;
+            const TEXT_MAX_H: f32 = 230.0;
             let text_changed = egui::ScrollArea::vertical()
-                .max_height(124.0)
+                .max_height(TEXT_MAX_H)
                 .max_width(ui.available_width())
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let response = ui.add(
+                    ui.add(
                         egui::TextEdit::multiline(&mut state.text)
                             .hint_text("请输入转换规则...")
                             .desired_width(f32::INFINITY)
-                            .desired_rows(7),
-                    );
-                    response.changed()
+                            .desired_rows(TEXT_ROWS),
+                    )
+                    .changed()
                 })
                 .inner;
 
@@ -1610,43 +1620,38 @@ pub fn draw_convert_popup(
 
             ui.separator();
 
-            // 底部行：进度条 + 开始转换按钮
+            // 预解析规则、判断按钮可用性 & 实时错误（不依赖 ui，提前计算）
+            let parse_result = if state.text.trim().is_empty() {
+                None
+            } else {
+                Some(parse_rules(&state.text))
+            };
+            let has_valid_rules = parse_result.as_ref().is_some_and(|r| r.is_ok());
+            // 若解析失败，实时显示错误信息
+            if let Some(Err(ref e)) = parse_result {
+                state.error_message = Some(e.clone());
+            } else if has_valid_rules {
+                // 规则有效时清除之前的解析错误
+                if state.error_message.as_ref().is_some_and(|m| m.contains("行")) {
+                    state.error_message = None;
+                }
+            }
+            let can_convert = !state.is_converting
+                && excel_data.is_some()
+                && file_path.is_some()
+                && has_valid_rules;
+
+            // 底部行：进度条（宽度随窗口自适应）+ 开始转换按钮（右对齐）
             ui.horizontal(|ui| {
+                let avail_w = ui.available_width();
                 ui.add(
                     egui::ProgressBar::new(state.progress / 100.0)
-                        .desired_width(370.0)
+                        .desired_width((avail_w - 96.0).max(40.0))
                         .text(format!("{:.0}%", state.progress)),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 判断按钮是否可用：实时解析规则并显示错误
-                    let parse_result = if state.text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(parse_rules(&state.text))
-                    };
-
-                    let has_valid_rules = parse_result
-                        .as_ref()
-                        .is_some_and(|r| r.is_ok());
-
-                    // 若解析失败，实时显示错误信息
-                    if let Some(Err(ref e)) = parse_result {
-                        state.error_message = Some(e.clone());
-                    } else if has_valid_rules {
-                        // 规则有效时清除之前的解析错误
-                        if state.error_message.as_ref().is_some_and(|m| m.contains("行")) {
-                            state.error_message = None;
-                        }
-                    }
-
-                    let can_convert = !state.is_converting
-                        && excel_data.is_some()
-                        && file_path.is_some()
-                        && has_valid_rules;
-
-                    let convert_btn =
-                        ui.add_enabled(can_convert, egui::Button::new("开始转换"));
+                    let convert_btn = ui.add_enabled(can_convert, egui::Button::new("开始转换"));
 
                     if convert_btn.clicked() {
                         state.error_message = None;

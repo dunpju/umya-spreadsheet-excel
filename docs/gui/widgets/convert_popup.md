@@ -1,3 +1,59 @@
+# 转换工具弹窗（`src/gui/widgets/convert_popup.rs`）
+
+> 本节为模块的**实现说明**（与代码同步）。下方「历史需求规格」各章为最初的需求记录，保留备查。
+
+## 模块职责与窗口行为（UI 布局）
+
+`draw_convert_popup` 渲染一个**可拖拽调整大小的** `egui::Window`（实现方式参照预警规则配置弹窗 `draw_alert_popup`，见 [`alert_popup.md`](./alert_popup.md)）：
+
+| 配置 | 取值 | 说明 |
+|------|------|------|
+| `Window::new("转换工具")` | — | 自定义标题栏（`title_bar(false)`），内部手绘「转换工具」标题 + ✖ 关闭按钮 |
+| `.id(egui::Id::new("convert_popup"))` | — | 固定 id，egui 据此**持久化窗口的位置与尺寸**（用户拖拽调整后被记住） |
+| `.resizable(true)` | — | **可拖拽边角/边缘调整大小**（本次改造：原为 `resizable(false)` 固定尺寸） |
+| `.collapsible(false)` | — | 不允许折叠 |
+| `.default_size` | `(440, 360)` | 首次默认尺寸（用户调整后以记忆尺寸为准） |
+| 内容约束 | `set_min_width(440)`、`set_min_height(240)` | 最小尺寸下限，防止过度缩小导致内容不可用（原为 `min/max_width=440` 固定宽度，现**取消 max_width 上限**） |
+
+### 自适应布局（调整窗口大小时内容正确响应）
+
+- **多行文本输入框**：`ScrollArea::vertical().max_height(text_h)` +
+  `TextEdit::multiline(desired_width(INFINITY)).desired_rows(按高度动态计算)`，
+  其中 `text_h = available_height - 40`（下限 `120px`，40px 预留给底部分隔线 + 按钮行），
+  `desired_rows = ceil(text_h / text_style_height(Body))`。
+  两个约束同时满足：① `ScrollArea::max_height(text_h)` **硬封顶**可视高度——内容再多也只显示 `text_h`、
+  超出滚动，不会把弹窗撑高；② `desired_rows` 按可用高度动态算出，让 TextEdit 固有高度 ≈ `text_h`，
+  从而**填满**可视区、消除与按钮行的空白间隙。
+  > 迭代历程（同一问题的三轮）：① 固定 `desired_rows(7)` → 窗口拉高后 TextEdit 仍 7 行、底部留白；
+  > ② 改 `ui.add_sized` 强制铺满 → 空内容时填满，但**输入多行后 TextEdit 随内容无限增高、把弹窗撑高**
+  > （`add_sized` 分配矩形但不封顶，无 `desired_rows` 的 multiline 高度由内容驱动）；③ 最终回到 `ScrollArea`
+  > 封顶 + 动态 `desired_rows` 填满，兼顾「不留白」与「不撑高」。
+- **进度条**：`desired_width = (available_width - 96).max(40)` —— 宽度随窗口宽度伸缩（原固定 `370`）。
+- **开始转换按钮**：`right_to_left` 布局右对齐。
+- **错误/成功提示**：底部 `error_message`（红）/`success_message`（绿）标签，位于按钮行下方。
+- 规则预解析与 `can_convert` 判定已**移出 `ui` 闭包、提前计算**（不依赖 `ui` 借用），使布局与逻辑解耦。
+
+### 状态字段（`ConvertPopupState`，本次改造**未改动**）
+
+`visible`、`text`、`progress`、`error_message`、`success_message`、`is_converting` 等全部字段保持不变；
+本次仅将 `draw_convert_popup` 的窗口属性与内部布局由「固定尺寸」改为「可调整 + 自适应」。
+
+### 「开始转换」按钮启用条件（**非 Bug**）
+
+`can_convert = !is_converting && excel_data.is_some() && file_path.is_some() && has_valid_rules`。
+即按钮可点击需**同时**满足：① 已导入文件（`excel_data`/`file_path` 非 `None`）；② 输入框含至少一条
+可解析规则（`parse_rules` 返回 `Ok`）；③ 非转换中。**未导入文件时按钮为灰色属正常行为**（转换必须有源文件）。
+`is_converting` 当前恒为 `false`（转换同步执行），故实际门槛是「已导入文件 + 规则合法」。
+
+### 依赖关系
+
+被 [`viewer.rs`](../viewer.md) 的 `ui()` 调用：`draw_convert_popup(&ctx, &mut convert_popup, excel_data, file_path, current_sheet)`。
+规则解析 / 执行（`parse_rules` / `execute_convert`）与单元格复制逻辑见本文件源码。
+
+---
+
+## 历史需求规格（保留备查）
+
 帮我完善`转换工具`功能模块（对应文件 `src/gui/widgets/convert_popup.rs`），具体要求如下：
 
 ---
