@@ -1489,8 +1489,116 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData, eval_pos: 
                 }
             }
         }
+        "EDATE" => {
+            // EDATE(start_date, months)
+            // 返回与起始日期相隔指定月份数的日期（序列号）
+            if args.len() != 2 {
+                return FormulaValue::Error("#VALUE!".to_string());
+            }
+
+            // 解析 start_date：支持数值序列号、单元格引用、文本日期
+            let start_val = eval_node(&args[0], sheet, eval_pos);
+            let start_serial = match start_val {
+                FormulaValue::Number(n) => Some(n),
+                FormulaValue::String(ref s) => {
+                    // 尝试将文本日期解析为序列号（如 "2026-06-25"）
+                    ExcelData::parse_date_string(s)
+                }
+                FormulaValue::Blank => None,
+                FormulaValue::Error(_) => return start_val,
+                FormulaValue::Boolean(_) => None,
+            };
+
+            let start_serial = match start_serial {
+                Some(n) if n >= 1.0 && n.is_finite() => n,
+                _ => return FormulaValue::Error("#VALUE!".to_string()),
+            };
+
+            // 解析 months：整数，正数=未来，负数=过去
+            let months_val = eval_node(&args[1], sheet, eval_pos);
+            let months = match months_val.as_number() {
+                Some(n) => n.floor() as i32,
+                None => return FormulaValue::Error("#VALUE!".to_string()),
+            };
+
+            // 将序列号转为 (年, 月, 日)
+            let (y, m, d) = match excel_serial_to_ymd(start_serial) {
+                Some(v) => v,
+                None => return FormulaValue::Error("#VALUE!".to_string()),
+            };
+
+            // 计算新的年月：总月份数 = y*12 + m - 1 + months
+            let total_months = y as i64 * 12 + m as i64 - 1 + months as i64;
+            let new_y = (total_months / 12) as i32;
+            let new_m = ((total_months % 12) + 1) as u32;
+            if new_m < 1 || new_m > 12 {
+                return FormulaValue::Error("#VALUE!".to_string());
+            }
+
+            // 目标月天数不足时取月末（如 1月31日 + 1月 = 2月28/29日）
+            let dim = days_in_month(new_y, new_m);
+            let new_d = (d as u32).min(dim);
+
+            let new_serial = ymd_to_excel_serial(new_y, new_m, new_d);
+            FormulaValue::Number(new_serial)
+        }
         _ => FormulaValue::Error(format!("#NAME?")),
     }
+}
+
+// ========== 日期辅助函数 ==========
+
+/// 判断是否为闰年（公历）
+fn is_leap_year(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// 返回指定年月的天数
+fn days_in_month(y: i32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if is_leap_year(y) { 29 } else { 28 },
+        _ => 30,
+    }
+}
+
+/// 将 Excel 日期序列号转换为 (年, 月, 日)
+///
+/// 序列号 1 = 1900-01-01。本函数为 `ExcelData::date_to_serial` 的精确逆运算，
+/// 使用 Howard Hinnant 的 `civil_from_days` 算法。
+fn excel_serial_to_ymd(serial: f64) -> Option<(i32, u32, u32)> {
+    if serial < 1.0 || !serial.is_finite() {
+        return None;
+    }
+    // 逆向 date_to_serial 公式：serial = unix_days + 25569
+    let z = serial.floor() as i64 - 25569;
+    // civil_from_days
+    let z2 = z + 719468;
+    let era = if z2 >= 0 { z2 / 146097 } else { (z2 - 146096) / 146097 };
+    let doe = (z2 - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = y + if m <= 2 { 1 } else { 0 };
+    Some((y as i32, m as u32, d))
+}
+
+/// 将 (年, 月, 日) 转换为 Excel 日期序列号
+///
+/// 与 `ExcelData::date_to_serial` 行为一致，使用 Hinnant 算法。
+fn ymd_to_excel_serial(year: i32, month: u32, day: u32) -> f64 {
+    let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+    let m = if month <= 2 { month as i64 + 9 } else { month as i64 - 3 };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let unix_days = era * 146097 + doe - 719468;
+    (unix_days + 25569) as f64
 }
 
 // ========== SUMIF 辅助函数 ==========
@@ -1839,7 +1947,7 @@ pub fn parse_cell_ref_input(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::excel::reader::{CellData, SheetData};
+    use crate::excel::reader::{CellData, ExcelData, SheetData};
 
     fn make_sheet(cells: Vec<((u32, u32), &str)>) -> SheetData {
         let mut sheet = SheetData::new("Test".to_string());
@@ -2188,6 +2296,137 @@ mod tests {
         let ast = parse_formula("=ROW(A10)").unwrap();
         let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "10");
+    }
+
+    // ========== EDATE 测试 ==========
+
+    #[test]
+    fn test_edate_forward() {
+        // EDATE("2026-06-25", 3) → 2026-09-25
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2026-06-25", 3)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        // 2026-09-25 的序列号应与 date_to_serial(2026, 9, 25) 一致
+        let expected = ExcelData::date_to_serial(2026, 9, 25);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_backward() {
+        // EDATE("2026-06-25", -2) → 2026-04-25
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2026-06-25", -2)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2026, 4, 25);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_end_of_month_non_leap() {
+        // EDATE("2026-01-31", 1) → 2026-02-28（非闰年）
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2026-01-31", 1)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2026, 2, 28);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_end_of_month_leap() {
+        // EDATE("2024-01-31", 1) → 2024-02-29（闰年）
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2024-01-31", 1)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2024, 2, 29);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_invalid_date() {
+        // EDATE("not-a-date", 3) → #VALUE!
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("not-a-date", 3)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "#VALUE!");
+    }
+
+    #[test]
+    fn test_edate_cell_reference() {
+        // 用单元格引用作为 start_date
+        let sheet = make_sheet(vec![((1, 1), "2024/1/31")]);
+        // A1 是日期格式字符串 "2024/1/31"，get_cell_value 会通过 parse_date_string 转为序列号
+        let ast = parse_formula("=EDATE(A1, 1)").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2024, 2, 29);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_serial_input() {
+        // 直接用序列号作为 start_date（非字符串）
+        let sheet = make_sheet(vec![]);
+        // 2024-01-31 的序列号（使用内部函数计算）
+        let serial_2024_01_31 = ExcelData::date_to_serial(2024, 1, 31);
+        let formula = format!("=EDATE({}, 1)", serial_2024_01_31);
+        let ast = parse_formula(&formula).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2024, 2, 29);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_cross_year() {
+        // EDATE("2025-11-30", 3) → 2026-02-28（跨年 + 月末处理）
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2025-11-30", 3)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2026, 2, 28);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_negative_months_cross_year() {
+        // EDATE("2025-03-15", -4) → 2024-11-15（跨年倒退）
+        let sheet = make_sheet(vec![]);
+        let ast = parse_formula(r#"=EDATE("2025-03-15", -4)"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        let expected = ExcelData::date_to_serial(2024, 11, 15);
+        match result {
+            FormulaValue::Number(n) => assert!((n - expected).abs() < 0.01, "期望 {}, 实际 {}", expected, n),
+            other => panic!("期望 Number, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_edate_roundtrip_consistency() {
+        // 验证 excel_serial_to_ymd ↔ ymd_to_excel_serial 可往返转换
+        for (y, m, d) in [(2026, 6, 25), (2024, 2, 29), (2026, 2, 28), (2025, 12, 31), (1901, 1, 1)] {
+            let serial = ExcelData::date_to_serial(y, m, d);
+            let (ny, nm, nd) = excel_serial_to_ymd(serial).unwrap();
+            assert_eq!((ny, nm, nd), (y as i32, m, d),
+                "往返转换失败: ({},{},{}) → 序列号 {} → ({},{},{})", y, m, d, serial, ny, nm, nd);
+        }
     }
 
     // ========== adjust_formula_rows 测试 ==========

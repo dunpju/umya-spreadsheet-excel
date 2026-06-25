@@ -7,7 +7,7 @@
 该模块完成三件事：
 
 1. **解析（Parse）** —— 用手写的词法分析器（Lexer）+ 递归下降解析器（Parser），把公式字符串（如 `=SUM(A1:A10)+IF(B1>5,C1,D1)`）解析为抽象语法树（AST）。支持预处理：去掉前导 `=`、隐式交叉运算符 `@`、OOXML 新函数前缀 `_xlfn.`。
-2. **求值（Evaluate）** —— 基于 AST 对单元格求值，支持运算符优先级（比较 < 加减 < 乘除 < 乘方 < 连接 < 一元）、单元格/范围引用、空值归零、错误传播，以及一批常用函数（`SUM`/`AVERAGE`/`COUNT`/`MAX`/`MIN`/`IF`/`IFS`/`AND`/`OR`/`NOT`/`CONCATENATE`/`SUMIF`/`TODAY`/`ROW` 等）。求值结果写回 `cell.value`。
+2. **求值（Evaluate）** —— 基于 AST 对单元格求值，支持运算符优先级（比较 < 加减 < 乘除 < 乘方 < 连接 < 一元）、单元格/范围引用、空值归零、错误传播，以及一批常用函数（`SUM`/`AVERAGE`/`COUNT`/`MAX`/`MIN`/`IF`/`IFS`/`AND`/`OR`/`NOT`/`CONCATENATE`/`SUMIF`/`TODAY`/`ROW`/`EDATE` 等）。求值结果写回 `cell.value`。
 3. **行列偏移与映射调整（Adjust）** —— 在插入/删除行列或迁移单元格时，批量改写公式中的引用坐标（`adjust_formula_columns` / `adjust_formula_rows` / `adjust_formula_by_mapping`），正确处理绝对引用 `$` 与字符串字面量。
 
 为高效处理多公式间的依赖关系，模块还实现了**依赖图构建 + 拓扑排序**（Kahn 算法），支持全量求值（`evaluate_sheet`）与增量求值（`evaluate_dependents`），并检测循环依赖（标记 `#CIRC!`）。
@@ -72,8 +72,28 @@ parse_comparison  ( = <> < <= > >= )   最低
 - `collect_range_values` / `collect_args_values`：展开范围引用为值向量（供 `SUM` 等聚合使用）。
 - `eval_node(node, sheet, eval_pos)`：AST 分发。`eval_pos` 是公式所在坐标，供 `ROW()`/`COLUMN()` 使用。
 - `eval_unary` / `eval_binary`：算术（空值归 0、除零→`#DIV/0!`、`powf`）、连接 `&`、比较（优先数值比较，否则大小写不敏感字符串比较）。
-- `eval_function`：按函数名 `match` 分派。`SUMIF` 用 `matches_criteria`（支持 `>=/<=/<>/></<`=` 前缀与直接相等）+ `compare_value_to_str`/`cmp_str`。`TODAY` 用系统时间算序列号；`ROW` 支持 `ROW()`（当前行）与 `ROW(ref)`。
+- `eval_function`：按函数名 `match` 分派。`SUMIF` 用 `matches_criteria`（支持 `>=/<=/<>/></<`=` 前缀与直接相等）+ `compare_value_to_str`/`cmp_str`。`TODAY` 用系统时间算序列号；`ROW` 支持 `ROW()`（当前行）与 `ROW(ref)`；`EDATE` 用日期辅助函数（见 §2.6.1）做月份偏移与月末钳制。
 - 未知函数返回 `#NAME?`。
+
+### 2.6.1 日期辅助函数
+
+`EDATE` 依赖三个私有日期工具函数，它们共同完成 Excel 序列号 ↔ 公历日期的精确双向转换：
+
+| 函数 | 签名 | 用途 |
+|------|------|------|
+| `is_leap_year` | `(y: i32) -> bool` | 判断公历闰年（能被 4 整除但不能被 100 整除，或能被 400 整除） |
+| `days_in_month` | `(y: i32, m: u32) -> u32` | 返回指定年月的天数（正确处理闰年 2 月） |
+| `excel_serial_to_ymd` | `(serial: f64) -> Option<(i32, u32, u32)>` | Excel 序列号 → (年, 月, 日)，为 `ExcelData::date_to_serial` 的精确逆运算（Howard Hinnant `civil_from_days` 算法） |
+| `ymd_to_excel_serial` | `(year: i32, month: u32, day: u32) -> f64` | (年, 月, 日) → Excel 序列号，与 `ExcelData::date_to_serial` 行为一致（Hinnant 算法 + 25569 偏移） |
+
+**EDATE 求值流程**：
+
+1. 解析 `start_date` 参数：优先作为数值（序列号），若为字符串则通过 `ExcelData::parse_date_string` 解析；无效则返回 `#VALUE!`。
+2. 解析 `months` 参数为整数（`floor` 取整）。
+3. `excel_serial_to_ymd` 将序列号转为 (年, 月, 日)。
+4. 计算新月份：`总月数 = y × 12 + m - 1 + months`，再分解为新 (年, 月)。
+5. 目标月天数不足时，钳制至该月最后一天（如 1 月 31 日 + 1 月 = 2 月 28/29 日）。
+6. `ymd_to_excel_serial` 转回序列号并返回。
 
 ### 2.7 依赖分析与拓扑求值
 
@@ -233,8 +253,9 @@ flowchart LR
 | `get_cell_value` | 单元格值→FormulaValue（含日期回退） |
 | `collect_range_values` / `collect_args_values` | 展开范围为值向量 |
 | `eval_node` / `eval_unary` / `eval_binary` | AST 求值分发 |
-| `eval_function` | 按函数名分派（SUM/IF/IFS/SUMIF/TODAY/ROW…） |
+| `eval_function` | 按函数名分派（SUM/IF/IFS/SUMIF/TODAY/ROW/EDATE…） |
 | `matches_criteria` / `compare_value_to_str` / `cmp_str` | SUMIF 条件判定 |
+| `is_leap_year` / `days_in_month` / `excel_serial_to_ymd` / `ymd_to_excel_serial` | 日期工具函数（闰年、月天数、序列号 ↔ 日期转换），供 EDATE 使用 |
 | `extract_dependencies` | 提取 AST 依赖（大范围仅取四角） |
 | `build_formula_graph` | 构建 AST 表 + 正/反向依赖（含 L1/L2 两级缓存） |
 | `topo_eval` | Kahn 拓扑排序求值 + 循环依赖检测 |
@@ -250,5 +271,6 @@ flowchart LR
 | `SUMIF` | 条件求和（支持比较前缀） |
 | `TODAY` | 当前日期序列号 |
 | `ROW` | 当前行号 / 引用行号 |
+| `EDATE` | 日期偏移：返回与起始日期相隔指定月份数的日期序列号；支持月末钳制（如 1 月 31 日 + 1 月 → 2 月 28/29 日）；无效日期返回 `#VALUE!` |
 
 > 未识别函数返回错误值 `#NAME?`；除零返回 `#DIV/0!`；独立范围在表达式上下文返回 `#VALUE!`；循环依赖标记 `#CIRC!`。
