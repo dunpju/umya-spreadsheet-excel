@@ -849,12 +849,27 @@ impl eframe::App for ExcelViewer {
                                     .color(egui::Color32::from_rgb(0, 150, 0)),
                             );
                         } else if let Some(save_path) = &self.save_path {
-                            // 保存完成：显示绿色文件路径
-                            ui.label(
-                                egui::RichText::new(save_path.as_str())
-                                    .font(egui::FontId::proportional(12.0))
-                                    .color(egui::Color32::from_rgb(0, 150, 0)),
+                            // 保存完成：显示绿色文件路径（可点击 → 用系统默认程序打开）
+                            let path = save_path.clone(); // 闭包外取出，避开 self 借用
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(save_path.as_str())
+                                        .font(egui::FontId::proportional(12.0))
+                                        .color(egui::Color32::from_rgb(0, 150, 0)),
+                                )
+                                .sense(egui::Sense::click()),
                             );
+                            // on_hover_* 消费 Response 并返回 Self，需链式重绑定
+                            let resp = resp
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("点击用系统默认程序打开");
+                            if resp.clicked() {
+                                if let Err(e) =
+                                    crate::util::open::open_in_default_app(std::path::Path::new(&path))
+                                {
+                                    eprintln!("[open] 打开文件失败: {}", e);
+                                }
+                            }
                         }
                     });
                 });

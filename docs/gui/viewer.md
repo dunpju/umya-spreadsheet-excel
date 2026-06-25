@@ -43,7 +43,7 @@
  │   │                  draw_cond_format_popup / draw_convert_popup             │
  │   │                  draw_license_popup / check_alert_rules / update_alert_* │
  │   ├─ license         LicenseManager / LicenseStatus / time::today_epoch_day  │
- │   └─ util            backup::backup_imported_file（导入备份到 ~/.MyExcel/backup/）│
+ │   └─ util            backup::backup_imported_file（导入备份）/ open::open_in_default_app（点击路径打开）│
  │                                                                              │
  │  下游被依赖（反向引用其类型）                                                │
  │   ├─ menu_bar.rs    引用 SettingsPanelState / SettingsPage                   │
@@ -286,6 +286,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 │ E:\dir\template.xlsx                       E:\dir\template.xlsx（绿色）         │ ⑥ status_bar
 └──────────────────────────────────────────────────────────────────────────────────┘
         ▲ 保存完成：右侧绿色显示**原文件路径**（直接覆盖，不再生成日期后缀新文件）；保存中显示 spinner + "正在保存..."
+        ▲ 绿色路径**可点击**：点击用系统默认程序打开该文件（`util::open::open_in_default_app`），悬停手型光标 + 提示
 
  浮层（egui::Area / Window，Order::Foreground，按需显示）：
    设置面板* │ 搜索配置* │ 搜索窗口(非模态) │ 右键菜单 │ 确认弹窗(插入列/清空)   (* 渲染自 config.rs)
@@ -338,7 +339,7 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 | 名称框行 | 💾 保存 | `save_requested`（dirty 启用） |
 | 表格主体 | 单元格网格 | `selected_cell`/`selected_range`/`editing_cell`/`edit_value`/`hidden_*`/`shift_click_anchor` |
 | sheet 栏 | sheet 标签 | `current_sheet`（切换重置选中/隐藏/预警过滤） |
-| 状态栏 | 源路径 / 保存路径 | `file_path` / `save_path` / `saving` |
+| 状态栏 | 源路径 / 保存路径 | `file_path`（灰，左）/ `save_path`（绿，右，**可点击 → `util::open` 打开**）/ `saving` |
 
 ---
 
@@ -503,6 +504,11 @@ Ctrl+S（dirty&&!saving&&有数据）/ 名称框"💾 保存" ──► save_req
 > **两种触发方式（点"保存"按钮 / `Ctrl+S`）都汇入 `start_async_save` → `check_save_result`，失败提示对二者均生效。**
 > `{原文件路径}` 取自在途保存的输出路径（`pending_save_path`，与原文件相同）；写盘失败（原文件被占用打开）
 > 或重读原文件失败（文件被占用）都会触发——见 `excel::writer::save_to_file` 的两处 `map_err`。
+
+> **绿色路径可点击打开**：保存成功后状态栏右侧的绿色 `save_path` 文本由普通 `Label` 改为
+> `Label::sense(Sense::click())`，`Response::clicked()` 时调用 [`util::open::open_in_default_app`](../util/open.md)
+> 用系统默认程序打开该文件（Windows 走 `ShellExecuteW`，UTF-16 原生支持任意 Unicode/空格路径，非阻塞）。
+> 悬停显示手型光标 + "点击用系统默认程序打开"提示。`on_hover_*` 消费 `Response` 并返回 `Self`，故需链式重绑定后再 `.clicked()`。
 
 ### 5.5 搜索 / 筛选流（隐藏集合驱动渲染）
 

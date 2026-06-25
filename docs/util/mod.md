@@ -6,22 +6,24 @@
 
 它的职责单一：声明并公开（`pub mod`）该目录下的子模块，使上层（`viewer.rs`、`license/*`、`main.rs` 等）能够通过 `crate::util::xxx` 路径访问通用工具能力。该文件本身不含业务逻辑、类型定义或函数实现，仅作为模块树的"目录节点"与统一门面（facade）存在。
 
-它把跨模块复用的纯工具能力（日期换算、文件备份）抽离为关注点独立的子模块，体现**关注点分离**与**去重复实现**的设计目标——例如日期换算原先散落在 `main.rs`、`license` 模块与（已移除的）`viewer.rs::generate_save_path`，现统一收敛到 `util::date`。
+它把跨模块复用的纯工具能力（日期换算、文件备份、文件打开）抽离为关注点独立的子模块，体现**关注点分离**与**去重复实现**的设计目标——例如日期换算原先散落在 `main.rs`、`license` 模块与（已移除的）`viewer.rs::generate_save_path`，现统一收敛到 `util::date`。
 
 | 子模块 | 职责定位 | 主要消费者 |
 |--------|----------|------------|
 | `date` | Unix epoch → 年月日/时间戳换算（无 chrono 依赖） | `license::time`、`util::backup`、`viewer.rs` |
 | `backup` | 导入文件快照备份（复制到 `~/.MyExcel/backup/`） | `viewer.rs`（`start_async_load`） |
+| `open` | 用系统默认程序打开文件（Windows `ShellExecuteW`，零新增依赖） | `viewer.rs`（状态栏绿色路径点击） |
 
 ## 2. 代码逻辑分析
 
-文件仅含两行有效声明：
+文件仅含模块声明：
 
 ```rust
 //! 通用工具模块
 
 pub mod backup;
 pub mod date;
+pub mod open;
 ```
 
 ### 模块声明
@@ -41,3 +43,4 @@ pub mod date;
 > 模块导出的所有函数请参阅对应子模块文档：
 > - [`date.md`](./date.md)
 > - [`backup.md`](./backup.md)
+> - [`open.md`](./open.md)
