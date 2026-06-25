@@ -1,7 +1,8 @@
-// 使用 Windows GUI 子系统：双击运行时不再弹出黑色控制台窗口（仅 Windows 生效）。
-// 副作用：程序默认没有控制台，println!/eprintln! 无输出；命令行场景
-// （--uuid / --license）改用 console_print 附加到父进程控制台。
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// Windows 子系统：**release** 用 GUI 子系统（双击不弹黑色控制台）；**debug** 用控制台子系统，
+// 便于 `cargo run` 时直接看到 env_logger 日志输出（debug 构建双击会附带一个控制台窗口，仅供开发）。
+// release 下 GUI 子系统无控制台，运行时日志（log::warn! 等）默认无处输出；命令行诊断
+// （--uuid / --license，需 diagnostic feature）仍由 console_print 附加到父进程控制台。
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::NativeOptions;
 use std::backtrace::Backtrace;
@@ -209,6 +210,11 @@ fn format_store_paths() -> String {
 }
 
 fn main() -> eframe::Result<()> {
+    // 初始化 env_logger：默认 info 级别（可用 RUST_LOG 覆盖，如 RUST_LOG=debug）。
+    // debug 构建为控制台子系统，日志直接显示在 `cargo run` 的终端；release 为 GUI 子系统，日志默认无去处。
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
+
     // 诊断 CLI 子命令（--uuid / --stores / --license）：仅 `diagnostic` feature 构建编译。
     // 这些命令会暴露本机存储路径 / UUID / 授权状态，公开发布版（build.bat）默认不带此 feature，
     // 以免逆向者 `strings` 出 "--stores" 等字面量并借其一次性枚举全部存储点（见 docs/main.md §6）。

@@ -65,7 +65,7 @@ backup_imported_file(src)
    ▼ viewer.rs start_async_load(path, ctx)
    └─ 后台线程（顺序执行，避免阻塞 UI）:
         ├─ backup_imported_file(Path::new(&path))   ◄── 本模块：备份到 ~/.MyExcel/backup/
-        │     └─ Err 仅 eprintln! 记日志，不阻断
+        │     └─ Err 仅 log::warn! 记日志，不阻断
         └─ ExcelData::load_from_file(path)            // 真正解析加载
 ```
 

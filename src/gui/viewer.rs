@@ -446,7 +446,7 @@ impl ExcelViewer {
         // 再读取解析。两者均放后台线程，避免阻塞 UI；备份失败仅记日志，不阻断加载流程。
         std::thread::spawn(move || {
             if let Err(e) = crate::util::backup::backup_imported_file(std::path::Path::new(&path)) {
-                eprintln!("[backup] 备份导入文件失败: {}", e);
+                log::warn!("备份导入文件失败: {e}");
             }
             match ExcelData::load_from_file(&path) {
                 Ok(data) => {
@@ -867,7 +867,7 @@ impl eframe::App for ExcelViewer {
                                 if let Err(e) =
                                     crate::util::open::open_in_default_app(std::path::Path::new(&path))
                                 {
-                                    eprintln!("[open] 打开文件失败: {}", e);
+                                    log::warn!("打开文件失败: {e}");
                                 }
                             }
                         }

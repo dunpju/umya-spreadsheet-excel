@@ -182,7 +182,7 @@ enum UndoAction {
 | 方法 | 作用 |
 |------|------|
 | `new()` | `LicenseManager::load()` + 计算拦截态 → 决定激活弹窗初始可见；初始化全部状态默认值 |
-| `start_async_load(path, ctx)` | **导入入口**：`tx`/`rx` 通道、置 `LoadState::Loading` → 开后台线程，线程内**先** `util::backup::backup_imported_file`（备份到 `~/.MyExcel/backup/`，命名 `原文件名_yyyymmddhhmmss.ext`，目录不存在则递归创建，失败仅 `eprintln!` 记日志不阻断）**再** `ExcelData::load_from_file`，完成后 `ctx.request_repaint()`。备份与加载同线程顺序执行，避免阻塞 UI |
+| `start_async_load(path, ctx)` | **导入入口**：`tx`/`rx` 通道、置 `LoadState::Loading` → 开后台线程，线程内**先** `util::backup::backup_imported_file`（备份到 `~/.MyExcel/backup/`，命名 `原文件名_yyyymmddhhmmss.ext`，目录不存在则递归创建，失败仅 `log::warn!` 记日志不阻断）**再** `ExcelData::load_from_file`，完成后 `ctx.request_repaint()`。备份与加载同线程顺序执行，避免阻塞 UI |
 | `check_load_result()` | 每帧 `rx.try_recv()`：成功则替换数据、清选中/撤销/隐藏集合、应用用户条件格式、首屏预警检测 |
 | `start_async_save(ctx)` | **授权拦截**（拦截态弹激活窗并 return）→ 克隆数据 → **输出路径 = 原文件路径**（`output_path = file_path.clone()`，直接覆盖原文件）→ 开线程 `writer::save_to_file(原路径, 数据, 原路径)`。不再生成带日期后缀的新文件 |
 | `check_save_result()` | 每帧 `save_rx.try_recv()`：成功置 `save_path`（= 原文件路径）+ `dirty=false`（并清失败提示）；失败置 `error_message` + `save_failed`（触发居中红色提示框，文案 `保存失败!请检查{原文件路径}文件是否被占用打开`） |

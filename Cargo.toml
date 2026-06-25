@@ -18,6 +18,8 @@ egui = "0.34.3"
 rfd = "0.17.2"
 serde_yaml = "0.9"
 dirs = "6"
+env_logger = "0.11.8"   # 运行时日志（log 门面的实现；debug 构建经控制台子系统输出到终端）
+log = "0.4"             # 日志门面（log::info!/warn! 等宏）
 
 # —— 离线授权 ——
 ed25519-dalek = { version = "2", default-features = false }   # 授权码验签

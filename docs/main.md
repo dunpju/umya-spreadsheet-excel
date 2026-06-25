@@ -31,22 +31,39 @@ mod shortcut; // 桌面快捷方式（Windows：启动时确保桌面存在 my-e
 ## 2. Windows GUI 子系统属性（第一行）
 
 ```rust
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 ```
 
-### 2.1 作用
-告诉链接器把可执行文件标记为 **Windows GUI 子系统**（而非默认的控制台子系统）。效果：用户在资源管理器里**双击运行时不再弹出黑色控制台窗口**。
+### 2.1 作用 —— release 用 GUI 子系统、debug 用控制台子系统
+告诉链接器把可执行文件标记为哪个 Windows 子系统，**按构建模式区分**：
 
-### 2.2 关键副作用 —— 这是全文最需要理解的设计权衡
-GUI 子系统意味着程序**默认没有标准控制台**，因此：
+- **release**（`cargo build --release` / `build.bat`）：GUI 子系统。用户在资源管理器里**双击运行时不再弹出黑色控制台窗口**（发布给终端用户的形态）。
+- **debug**（`cargo run` / `cargo build`）：**控制台子系统**。开发期 `cargo run` 从终端启动时，终端即为其控制台，env_logger 日志（见 §4.0）直接显示在终端，便于调试排查。debug 构建若被双击会附带一个控制台窗口（仅供开发，无妨）。
 
-- `println!` / `eprintln!` **没有任何输出**（写到一个不存在的 stdout/stderr）；
+### 2.2 关键副作用 —— release（GUI 子系统）下没有标准控制台
+release 的 GUI 子系统意味着程序**默认没有标准控制台**，因此：
+
+- `println!` / `eprintln!` **没有任何输出**（写到一个不存在的 stdout/stderr）；运行时改用 `log::*` 宏（见 §4.0），但 release 下日志默认也无去处。
 - 但程序仍可能被**从终端**调用（例如客服用内部诊断构建跑 `my-excel --uuid`，见 §6）。
 
-这就产生了一对矛盾：“双击要静默” vs “命令行要能看到输出”。`main.rs` 用 **`console_print`** 解决它（见 §5）。
+这就产生了一对矛盾：“双击要静默” vs “命令行要能看到输出”。`main.rs` 用 **`console_print`** 解决它（见 §5）；开发期日志则靠 debug 构建的控制台子系统 + env_logger（见 §4.0）。
 
-### 2.3 平台条件
-`cfg_attr(target_os = "windows", ...)` 表示仅在 Windows 上启用；其它平台保持默认（有控制台），保证跨平台可编译。
+### 2.3 平台与构建条件
+`cfg_attr(all(target_os = "windows", not(debug_assertions)), ...)` 表示：仅在 Windows 且**非 debug 构建**时启用 GUI 子系统；debug 构建与其它平台保持默认（有控制台），保证开发期可见日志且跨平台可编译。
+
+---
+
+## 4.0 env_logger 初始化（`main()` 首行）
+
+```rust
+let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    .try_init();
+```
+
+- **门面与实现**：代码用 `log` 门面的宏（`log::info!` / `log::warn!` / `log::error!` / `log::debug!`），`env_logger` 是其实现（`Cargo.toml` 新增 `env_logger = "0.11.8"` + `log = "0.4"`）。
+- **默认级别 info**：`default_filter_or("info")` —— 不设 `RUST_LOG` 时默认输出 info 及以上；设 `RUST_LOG=debug`（或 `=trace`、`my_excel=debug`）可看更细日志。
+- **去往何处**：env_logger 写 stderr。debug 构建为控制台子系统（§2.1），`cargo run` 终端直接可见；release 为 GUI 子系统，stderr 无去处，日志默认不显示（如需 release 可见，后续可加文件 sink 或 `AllocConsole`）。
+- **替换了运行时 `eprintln!`**：`viewer.rs` 中备份失败、打开文件失败两条原 `eprintln!` 已改为 `log::warn!`，统一走日志门面、受 `RUST_LOG` 控制。`fill.rs` 的 `println!` 是 `#[cfg(test)]` 性能基准输出，保留不动。
 
 ---
 
@@ -270,7 +287,7 @@ fn chrono_free_timestamp() -> String {
    运行时图标（PNG 解码）与编译期资源图标（ICO）覆盖不同时机，互为补充；解码失败优雅降级，不阻塞启动。
 
 5. **依赖最小化**
-   时间换算手写、不用 chrono；图标解码复用已依赖的 `image` crate；CLI 不引第三方 argparse。整个入口文件零业务依赖，只有 `eframe` / `rfd` / `image` / 标准库。
+   时间换算手写、不用 chrono；图标解码复用已依赖的 `image` crate；CLI 不引第三方 argparse。入口文件只依赖 `eframe` / `rfd` / `image` / `env_logger`(`log`) / 标准库（`env_logger` 仅为运行时日志，debug 构建经控制台子系统输出，见 §4.0）。
 
 6. **桌面集成幂等且无侵入**
    `shortcut::ensure_desktop_shortcut()` 先检测后创建：已存在即零成本跳过，缺失才初始化 COM 生成 `.lnk`；全链路 best-effort，失败静默，绝不阻塞启动或弹错。原始 COM FFI 实现零新增依赖，与 `console_print` 风格一致，非 Windows 编译为空操作。
