@@ -8,7 +8,7 @@
 
 阅读 `src/main.rs`、`src/gui/viewer.rs`、`Cargo.toml` 后，有三处既有约定决定了本方案的形态：
 
-1. **刻意零外部日期依赖**：`main.rs` 自写了 `days_to_ymd` / `is_leap`，`viewer.rs::generate_save_path` 又用 Howard Hinnant 算法算日期 —— 说明作者不愿引入 `chrono`。故本方案**全程复用 `SystemTime` + epoch 天数**，不引入 `chrono`。
+1. **刻意零外部日期依赖**：`main.rs` / `util/date.rs` 自写了 `days_to_ymd` / `is_leap`（epoch 算术换算，无 `chrono`），原散落于 `viewer.rs::generate_save_path` 的 Howard Hinnant 日期算法已随该函数移除而收敛到 `util::date` —— 说明作者不愿引入 `chrono`。故本方案**全程复用 `SystemTime` + epoch 天数**，不引入 `chrono`。
 2. **存储走 `serde_yaml` + `dirs::home_dir()`**：现有配置存在 `~/.MyExcel/my-excel.yaml`，且全程**手工拼 `serde_yaml::Value`**（未用 `#[derive(Serialize)]`）。授权负载也采用**手工文本编码 + Base64**，不引入 `serde` derive，保持风格一致。
 3. **GUI 是 egui**：弹窗用 `egui::Window`（参见 `help_popup.rs`），付款/激活弹窗照此模式。
 

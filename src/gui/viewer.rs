@@ -526,49 +526,17 @@ impl ExcelViewer {
         }
     }
 
-    /// 生成带日期后缀的保存路径
-    ///
-    /// 基于当前导入的文件路径，在文件名与扩展名之间插入日期后缀。
-    /// 例如: `template.xlsx` → `template_20260605.xlsx`
-    fn generate_save_path(&self) -> Option<String> {
-        let path = self.file_path.as_ref()?;
-        let pb = std::path::Path::new(path);
-        let stem = pb.file_stem()?.to_str()?;
-        let ext = pb.extension()?.to_str()?;
-        let dir = pb.parent()?;
-
-        // 使用 Unix 纪元 + Howard Hinnant 算法计算当前日期（无需额外依赖）
-        let duration = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let days_since_epoch = duration.as_secs() / 86400;
-        let z = days_since_epoch as i64 + 719468;
-        let era = z / 146097;
-        let doe = z - era * 146097;
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-        let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-        let y = if m <= 2 { y + 1 } else { y };
-        let date_suffix = format!("{}{:02}{:02}", y, m, d);
-
-        let new_name = format!("{}_{}.{}", stem, date_suffix, ext);
-        Some(dir.join(new_name).to_string_lossy().to_string())
-    }
-
     /// 启动异步保存 Excel 文件
+    ///
+    /// 直接**覆盖写入**当前已打开文件的原始路径（`self.file_path`），不再生成带日期后缀的
+    /// 新文件。`writer::save_to_file` 内部会先把原文件完整读入内存（`reader::xlsx::read`），
+    /// 再应用变更并写回——故输出路径等于原始路径时也不会损坏数据。
     fn start_async_save(&mut self, ctx: egui::Context) {
         // 授权拦截：试用到期/未激活时禁止保存（校验点分散到核心功能）
         if self.license.status(lic_time::today_epoch_day()).is_blocking() {
             self.license_popup.visible = true;
             return;
         }
-        let output_path = match self.generate_save_path() {
-            Some(p) => p,
-            None => return,
-        };
         let original_path = match &self.file_path {
             Some(p) => p.clone(),
             None => return,
@@ -577,6 +545,8 @@ impl ExcelViewer {
             Some(d) => d.clone(),
             None => return,
         };
+        // 输出路径 = 原文件路径：直接覆盖原文件（原文件先被完整读入内存后再回写）
+        let output_path = original_path.clone();
 
         self.saving = true;
         // 记录在途保存的输出路径，供失败时拼装"文件被占用"提示文案

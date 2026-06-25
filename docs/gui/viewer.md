@@ -184,9 +184,8 @@ enum UndoAction {
 | `new()` | `LicenseManager::load()` + 计算拦截态 → 决定激活弹窗初始可见；初始化全部状态默认值 |
 | `start_async_load(path, ctx)` | **导入入口**：`tx`/`rx` 通道、置 `LoadState::Loading` → 开后台线程，线程内**先** `util::backup::backup_imported_file`（备份到 `~/.MyExcel/backup/`，命名 `原文件名_yyyymmddhhmmss.ext`，目录不存在则递归创建，失败仅 `eprintln!` 记日志不阻断）**再** `ExcelData::load_from_file`，完成后 `ctx.request_repaint()`。备份与加载同线程顺序执行，避免阻塞 UI |
 | `check_load_result()` | 每帧 `rx.try_recv()`：成功则替换数据、清选中/撤销/隐藏集合、应用用户条件格式、首屏预警检测 |
-| `generate_save_path()` | 基于源路径加日期后缀 `stem_YYYYMMDD.ext`（Howard Hinnant 算法，无 chrono） |
-| `start_async_save(ctx)` | **授权拦截**（拦截态弹激活窗并 return）→ 克隆数据 → 开线程 `writer::save_to_file` |
-| `check_save_result()` | 每帧 `save_rx.try_recv()`：成功置 `save_path` + `dirty=false`（并清失败提示）；失败置 `error_message` + `save_failed`（触发居中红色提示框） |
+| `start_async_save(ctx)` | **授权拦截**（拦截态弹激活窗并 return）→ 克隆数据 → **输出路径 = 原文件路径**（`output_path = file_path.clone()`，直接覆盖原文件）→ 开线程 `writer::save_to_file(原路径, 数据, 原路径)`。不再生成带日期后缀的新文件 |
+| `check_save_result()` | 每帧 `save_rx.try_recv()`：成功置 `save_path`（= 原文件路径）+ `dirty=false`（并清失败提示）；失败置 `error_message` + `save_failed`（触发居中红色提示框，文案 `保存失败!请检查{原文件路径}文件是否被占用打开`） |
 | `push_undo_*` / `take_undo` | 撤销栈入栈/出栈（见 §2.5） |
 
 > 异步模式统一为「**后台线程 + mpsc 通道 + 每帧 try_recv**」：线程完成后 `request_repaint` 唤醒主线程，
@@ -284,9 +283,9 @@ egui 中 `TopBottomPanel` 按代码顺序从下往上堆叠（先 `show` 的 bot
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │  Sheet1 │ Sheet2 │ Sheet3                                                       │ ⑤ sheet_bar
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│ E:\dir\template.xlsx                       E:\dir\template_20260620.xlsx        │ ⑥ status_bar
+│ E:\dir\template.xlsx                       E:\dir\template.xlsx（绿色）         │ ⑥ status_bar
 └──────────────────────────────────────────────────────────────────────────────────┘
-        ▲ 保存完成显示绿色新路径；保存中显示 spinner + "正在保存..."
+        ▲ 保存完成：右侧绿色显示**原文件路径**（直接覆盖，不再生成日期后缀新文件）；保存中显示 spinner + "正在保存..."
 
  浮层（egui::Area / Window，Order::Foreground，按需显示）：
    设置面板* │ 搜索配置* │ 搜索窗口(非模态) │ 右键菜单 │ 确认弹窗(插入列/清空)   (* 渲染自 config.rs)
@@ -484,25 +483,26 @@ Ctrl+S（dirty&&!saving&&有数据）/ 名称框"💾 保存" ──► save_req
    │
    ▼（excel_data 借用释放后）start_async_save(ctx)
    ├─ 授权拦截? ─是► license_popup.visible=true; return
-   ├─ output_path = generate_save_path()  // stem_YYYYMMDD.ext
-   ├─ pending_save_path = Some(output_path.clone())  // 记录在途路径，供失败提示
+   ├─ output_path = file_path.clone()  // 直接覆盖原文件路径（不再生成日期后缀新文件）
+   ├─ pending_save_path = Some(output_path.clone())  // 记录在途路径（= 原路径），供失败提示
    ├─ excel_data.clone(); saving=true; (tx,rx)=channel
-   └─ spawn thread: writer::save_to_file(原路径, 数据, 输出路径) ──► tx.send ──► request_repaint
-        │
+   └─ spawn thread: writer::save_to_file(原路径, 数据, 原路径) ──► tx.send ──► request_repaint
+        │   （writer 内部 read(原路径)→apply→write(原路径)：原文件先完整读入内存再覆盖，安全）
         ▼ 每帧 check_save_result() ── save_rx.try_recv()（并 take pending_save_path）
-        ├─ Ok(path): save_path=Some(path); dirty=false; save_failed=None ──► 状态栏绿色新路径
+        ├─ Ok(path): save_path=Some(path)(=原路径); dirty=false; save_failed=None ──► 状态栏绿色（原路径）
         └─ Err(e):   error_message=Some(e);
-                     save_failed=Some("保存失败!请检查{output_path}文件是否被占用打开")
+                     save_failed=Some("保存失败!请检查{原文件路径}文件是否被占用打开")
                         └─► ui() 渲染居中红色 Foreground 浮窗（"知道了"关闭）
 ```
 
 > 关键点：① **保存校验点前置**（拦截态禁保存）；② **副本落盘**（克隆 `ExcelData` 给后台线程，
-> 主线程继续编辑不阻塞）；③ 输出**带日期后缀的新文件**，不动原模板；④ **失败反馈**：`Err` 时除内部
+> 主线程继续编辑不阻塞）；③ **直接覆盖原文件**（`output_path = file_path`，不再生成带日期后缀的新文件，
+> 原"日期后缀新文件"逻辑 `generate_save_path` 已移除）；④ **失败反馈**：`Err` 时除内部
 > `error_message` 外，置 `save_failed` 触发**居中红色提示框**（`egui::Window` + `Frame::popup` 红底红边，
-> 区别于状态栏文字），文案 `保存失败!请检查{output_path}文件是否被占用打开`；重试成功（`Ok`）会清除该框。
+> 区别于状态栏文字），文案 `保存失败!请检查{原文件路径}文件是否被占用打开`；重试成功（`Ok`）会清除该框。
 > **两种触发方式（点"保存"按钮 / `Ctrl+S`）都汇入 `start_async_save` → `check_save_result`，失败提示对二者均生效。**
-> `{output_path}` 取自在途保存的输出路径（`pending_save_path`）；写盘失败（输出文件被占用）或重读原文件
-> 失败（模板被占用）都会触发——见 `excel::writer::save_to_file` 的两处 `map_err`。
+> `{原文件路径}` 取自在途保存的输出路径（`pending_save_path`，与原文件相同）；写盘失败（原文件被占用打开）
+> 或重读原文件失败（文件被占用）都会触发——见 `excel::writer::save_to_file` 的两处 `map_err`。
 
 ### 5.5 搜索 / 筛选流（隐藏集合驱动渲染）
 

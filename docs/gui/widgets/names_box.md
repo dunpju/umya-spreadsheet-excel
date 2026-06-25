@@ -261,30 +261,32 @@ if save_btn.clicked() {
                             self.save_requested = false;
                             start_async_save(ctx.clone());                      // 延后执行
                          }
-④ viewer.rs:498  start_async_save:
+④ viewer.rs:534  start_async_save:
      ├─ 授权拦截（blocking ──► 弹激活窗并 return）
-     ├─ output_path  = generate_save_path()   // stem_YYYYMMDD.ext（Howard Hinnant 算法，无 chrono）
-     ├─ pending_save_path = Some(output_path.clone())   // 记录在途路径，供失败提示
      ├─ original_path = file_path
      ├─ excel_data    = self.excel_data.clone()
+     ├─ output_path   = original_path.clone()   // 直接覆盖原文件路径（不再生成日期后缀新文件，generate_save_path 已移除）
+     ├─ pending_save_path = Some(output_path.clone())   // 记录在途路径（= 原路径），供失败提示
      ├─ saving=true; (tx,rx)=channel; save_rx=Some(rx)
-     └─ spawn 线程: writer::save_to_file(original, data, output)
+     └─ spawn 线程: writer::save_to_file(original, data, original)   // writer 内部 read→apply→write 覆盖原文件
                        └─► tx.send(Ok(path) | Err(e)) ──► ctx.request_repaint()
-⑤ viewer.rs:723 + 538  check_save_result（每帧）: rx.try_recv()（并 take pending_save_path）
-     ├─ Ok(path) ──► save_path = Some(path); dirty = false; save_failed = None   // 重试成功清提示
+⑤ viewer.rs:571  check_save_result（每帧）: rx.try_recv()（并 take pending_save_path）
+     ├─ Ok(path) ──► save_path = Some(path)(=原路径); dirty = false; save_failed = None   // 重试成功清提示
      └─ Err(e)   ──► error_message = Some(e);
-                   save_failed = Some("保存失败!请检查{output_path}文件是否被占用打开")
+                   save_failed = Some("保存失败!请检查{原文件路径}文件是否被占用打开")
      saving=false; save_rx=None
-⑥ ui(): save_failed.is_some() ──► 渲染居中红色 Foreground 浮窗（"保存失败!请检查{路径}..."，"知道了"关闭）
+⑥ ui(): save_failed.is_some() ──► 渲染居中红色 Foreground 浮窗（"保存失败!请检查{原文件路径}..."，"知道了"关闭）
 ```
 
 要点：
 
 - **延迟执行（②→③）**：按钮回调发生在 `draw_name_box` 内（此时 `viewer.rs` 仍持有 `excel_data` 借用），
   无法立即 `start_async_save`（它需要 `excel_data.clone()`）。故先置 `save_requested` 标志，待 CentralPanel
-  闭包结束、借用释放后，在 `viewer.rs:1755` 才真正执行——这是 viewer 处理借用冲突的惯用"命令标志"模式。
+  闭包结束、借用释放后，在 `viewer.rs` 帧末才真正执行——这是 viewer 处理借用冲突的惯用"命令标志"模式。
 - **副本落盘**：后台线程持有 `excel_data` 的克隆，主线程可继续编辑，UI 不阻塞。
-- **输出带日期后缀的新文件**（`stem_YYYYMMDD.ext`，`generate_save_path`，`viewer.rs:463-489`），**不改原模板**。
+- **直接覆盖原文件**（`output_path = file_path`），不再生成带日期后缀的新文件——原"日期后缀新文件"逻辑
+  （`generate_save_path`）已移除。覆盖安全：`writer::save_to_file` 内部先 `reader::xlsx::read(原路径)` 把原文件
+  完整读入内存，再应用变更并写回原路径，故输出路径 = 原始路径时不会损坏数据。
 
 ### 3.4 界面状态变化
 
@@ -298,7 +300,7 @@ if save_btn.clicked() {
 | 阶段 | 状态字段 | 界面表现 |
 |------|----------|----------|
 | 保存中 | `saving=true` | 状态栏右侧 spinner + "正在保存..."；每帧 `request_repaint` 驱动动画 |
-| 成功 | `save_path=Some(path)`、`dirty=false` | 状态栏显示**绿色**新路径（带日期后缀）；保存按钮变灰禁用 |
+| 成功 | `save_path=Some(path)`、`dirty=false` | 状态栏显示**绿色原文件路径**（直接覆盖，不再带日期后缀）；保存按钮变灰禁用 |
 | 失败 | `error_message=Some(e)`、`save_failed=Some(...)` | 弹出**居中红色提示框**（Foreground 浮窗，非状态栏文字）"保存失败!请检查{路径}文件是否被占用打开"，点"知道了"关闭 |
 | （始终） | 名称框/公式栏文本 | 不受保存影响 |
 
@@ -306,12 +308,13 @@ if save_btn.clicked() {
 
 - **授权拦截**：拦截态点保存 → **不保存**，弹出激活/付款模态（`license_popup.visible=true`）后 `return`
   （`viewer.rs:500-503`）。
-- **路径缺失**：`file_path` 为 `None` 或 `generate_save_path()` 返回 `None` → 静默 `return`，不保存
-  （`viewer.rs:504-515`）。
-- **写盘失败（红色提示框，本次新增反馈）**：`writer::save_to_file` 返回 `Err(e)`（重读原文件失败 = 模板被占用；
-  写入输出失败 = 输出文件被占用）→ `check_save_result`（`viewer.rs:538`）置 `error_message=Some(e)` **并**
-  `save_failed=Some("保存失败!请检查{output_path}文件是否被占用打开")`；`ui()` 据此渲染**居中红色提示框**
-  （`egui::Window` + `Frame::popup` 红底红边，Foreground 浮窗，**区别于状态栏文字**），点"知道了"关闭。
+- **路径缺失**：`file_path` 为 `None` → 静默 `return`，不保存（`viewer.rs` `start_async_save` 内）。
+  （原"或 `generate_save_path()` 返回 `None`"分支已随该函数移除而消失——保存目标恒为原文件路径。）
+- **写盘失败（红色提示框）**：`writer::save_to_file` 返回 `Err(e)`（原文件被占用打开：重读原文件失败，
+  或写回原文件失败，都会触发——因为输出路径 = 原文件路径）→ `check_save_result`（`viewer.rs:571`）置
+  `error_message=Some(e)` **并** `save_failed=Some("保存失败!请检查{原文件路径}文件是否被占用打开")`；`ui()` 据此
+  渲染**居中红色提示框**（`egui::Window` + `Frame::popup` 红底红边，Foreground 浮窗，**区别于状态栏文字**），
+  点"知道了"关闭。
   **两种触发方式（点"保存"按钮 / Ctrl+S）都汇入 `start_async_save` → `check_save_result`，故对二者均生效。**
 - **重试自清除**：用户关闭占用文件后再次保存，若返回 `Ok` 则 `save_failed=None` 自动收起提示框。
 - **无自动重试**：失败不自动重试，需用户手动再次触发保存。
@@ -345,7 +348,7 @@ save_requested = true ──（excel_data 借用释放后）──► start_asyn
                           （"保存失败!请检查{output}文件是否被占用打开"，"知道了"关闭）
 ```
 
-> 与 [`viewer.md`](../viewer.md) 的关系：本节只刻画按钮侧的"发信号"；授权门面、日期后缀路径、异步通道、
+> 与 [`viewer.md`](../viewer.md) 的关系：本节只刻画按钮侧的"发信号"；授权门面、覆盖原文件路径、异步通道、
 > 状态栏反馈的完整实现均在 `viewer.rs`，详见 [`viewer.md`](../viewer.md) §2.6（方法表）与 §5.4（保存流）。
 
 ---

@@ -2,7 +2,7 @@
 
 ## 1. 模块职责
 
-`src/util/date.rs` 提供**基于 Unix epoch 的纯算术日期/时间换算工具**，全模块不依赖 `chrono` 或任何第三方日期库。它是项目内日期换算的**单一事实来源**，被 `license::time`（到期日显示）、`util::backup`（备份命名时间戳）以及 `viewer.rs`（保存路径日期后缀）复用，避免各处重复实现历法换算。
+`src/util/date.rs` 提供**基于 Unix epoch 的纯算术日期/时间换算工具**，全模块不依赖 `chrono` 或任何第三方日期库。它是项目内日期换算的**单一事实来源**，被 `license::time`（到期日显示）、`util::backup`（备份命名时间戳）以及 `main.rs` 复用，避免各处重复实现历法换算。
 
 ## 2. 主要类型与函数
 
@@ -66,4 +66,5 @@ epoch 总秒数 secs
 - **被依赖**：
   - `license::time::day_to_ymd_string` —— 调 `days_to_ymd` 渲染到期日 UI。
   - [`util::backup`](./backup.md) —— 调 `now_timestamp14` 拼备份文件名。
-  - `viewer.rs`（`generate_save_path`）—— 自行内联了等价的日期换算（历史遗留，可后续收敛到本模块）。
+  - `viewer.rs` 曾在（已移除的）`generate_save_path` 中内联过等价的日期换算用于保存路径日期后缀；
+    自保存改为直接覆盖原文件后，该函数与 viewer 内的日期逻辑一并移除，日期换算统一收敛到本模块。
