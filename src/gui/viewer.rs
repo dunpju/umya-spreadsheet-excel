@@ -426,9 +426,11 @@ impl ExcelViewer {
     }
 
     /// 启动异步加载 Excel 文件
-    /// 
-    /// 在后台线程中读取文件，避免阻塞 UI
-    /// 
+    ///
+    /// 导入入口：在后台线程中**先把用户所选文件备份**到 `~/.MyExcel/backup/`（命名
+    /// `原文件名_yyyymmddhhmmss.ext`，目录不存在则递归创建），再读取解析文件。
+    /// 备份与加载都放后台线程，避免阻塞 UI；备份为附加功能，失败仅记日志，不阻断加载。
+    ///
     /// # 参数
     /// * `path` - Excel 文件路径
     /// * `ctx` - egui 上下文，用于加载完成后请求重绘
@@ -440,8 +442,12 @@ impl ExcelViewer {
         self.error_message = None;
         self.file_path = Some(path.clone());
 
-        // 启动后台线程加载文件
+        // 启动后台线程：先备份用户所选文件到 ~/.MyExcel/backup/（原文件名_yyyymmddhhmmss.ext），
+        // 再读取解析。两者均放后台线程，避免阻塞 UI；备份失败仅记日志，不阻断加载流程。
         std::thread::spawn(move || {
+            if let Err(e) = crate::util::backup::backup_imported_file(std::path::Path::new(&path)) {
+                eprintln!("[backup] 备份导入文件失败: {}", e);
+            }
             match ExcelData::load_from_file(&path) {
                 Ok(data) => {
                     // 加载成功，发送数据
