@@ -7,7 +7,7 @@
 该模块完成三件事：
 
 1. **解析（Parse）** —— 用手写的词法分析器（Lexer）+ 递归下降解析器（Parser），把公式字符串（如 `=SUM(A1:A10)+IF(B1>5,C1,D1)`）解析为抽象语法树（AST）。支持预处理：去掉前导 `=`、隐式交叉运算符 `@`、OOXML 新函数前缀 `_xlfn.`。
-2. **求值（Evaluate）** —— 基于 AST 对单元格求值，支持运算符优先级（比较 < 加减 < 乘除 < 乘方 < 连接 < 一元）、单元格/范围引用、空值归零、错误传播，以及一批常用函数（`SUM`/`AVERAGE`/`COUNT`/`MAX`/`MIN`/`IF`/`IFS`/`AND`/`OR`/`NOT`/`CONCATENATE`/`SUMIF`/`TODAY`/`ROW`/`EDATE` 等）。求值结果写回 `cell.value`。
+2. **求值（Evaluate）** —— 基于 AST 对单元格求值，支持运算符优先级（比较 < 加减 < 乘除 < 乘方 < 连接 < 一元）、单元格/范围引用、空值归零、错误传播，以及一批常用函数（`SUM`/`AVERAGE`/`COUNT`/`MAX`/`MIN`/`IF`/`IFS`/`AND`/`OR`/`NOT`/`CONCATENATE`/`SUMIF`/`TODAY`/`ROW`/`COLUMN`/`EDATE` 等）。求值结果写回 `cell.value`。
 3. **行列偏移与映射调整（Adjust）** —— 在插入/删除行列或迁移单元格时，批量改写公式中的引用坐标（`adjust_formula_columns` / `adjust_formula_rows` / `adjust_formula_by_mapping`），正确处理绝对引用 `$` 与字符串字面量。
 
 为高效处理多公式间的依赖关系，模块还实现了**依赖图构建 + 拓扑排序**（Kahn 算法），支持全量求值（`evaluate_sheet`）与增量求值（`evaluate_dependents`），并检测循环依赖（标记 `#CIRC!`）。
@@ -41,8 +41,9 @@ parse_comparison  ( = <> < <= > >= )   最低
                       └ parse_primary  最高
 ```
 
-- `parse_primary`：处理括号表达式、数字/字符串字面量、`TRUE`/`FALSE`、函数调用（标识符后跟 `(`）、单元格/范围引用。
+- `parse_primary`：处理括号表达式、数字/字符串字面量、`TRUE`/`FALSE`、函数调用（标识符后跟 `(`）、单元格/范围引用、**列范围**（`B:D` 格式，由 `is_column_only_ref` 检测纯大写列字母后跟冒号触发）。
 - `parse_cell_or_range`：单个 `CellRef` 或 `CellRef:CellRef` 范围，自动规范化为 (min,max)。
+- `parse_column_range`：解析列范围（`Ident(列字母) : Ident(列字母)`），用于 `COLUMN(B:D)` 等场景。返回 `RangeRef` 将列号映射到 `start_col`/`end_col`，行固定为 1。
 - `parse_function`：解析 `IDENT ( arg, arg, ... )`，函数名统一转大写。
 
 `parse_cell_ref_str` / `letter_to_col` 把 `"A1"`/`"$A$1"` 解析为 `(col, row)`，剥离 `$`。
@@ -72,7 +73,7 @@ parse_comparison  ( = <> < <= > >= )   最低
 - `collect_range_values` / `collect_args_values`：展开范围引用为值向量（供 `SUM` 等聚合使用）。
 - `eval_node(node, sheet, eval_pos)`：AST 分发。`eval_pos` 是公式所在坐标，供 `ROW()`/`COLUMN()` 使用。
 - `eval_unary` / `eval_binary`：算术（空值归 0、除零→`#DIV/0!`、`powf`）、连接 `&`、比较（优先数值比较，否则大小写不敏感字符串比较）。
-- `eval_function`：按函数名 `match` 分派。`SUMIF` 用 `matches_criteria`（支持 `>=/<=/<>/></<`=` 前缀与直接相等）+ `compare_value_to_str`/`cmp_str`。`TODAY` 用系统时间算序列号；`ROW` 支持 `ROW()`（当前行）与 `ROW(ref)`；`EDATE` 用日期辅助函数（见 §2.6.1）做月份偏移与月末钳制。
+- `eval_function`：按函数名 `match` 分派。`SUMIF` 用 `matches_criteria`（支持 `>=/<=/<>/></<`=` 前缀与直接相等）+ `compare_value_to_str`/`cmp_str`。`TODAY` 用系统时间算序列号；`ROW` 支持 `ROW()`（当前行）与 `ROW(ref)`；`COLUMN` 与 `ROW` 对称，支持 `COLUMN()`（当前列）、`COLUMN(ref)`、`COLUMN(range)` 及 `COLUMN(B:D)` 列范围；`EDATE` 用日期辅助函数（见 §2.6.1）做月份偏移与月末钳制。
 - 未知函数返回 `#NAME?`。
 
 ### 2.6.1 日期辅助函数
@@ -248,6 +249,7 @@ flowchart LR
 |------|------|
 | `Lexer::tokenize` / `lex_ident_or_cellref` | 词法分析，区分单元格引用与标识符 |
 | `Parser::parse_comparison` ... `parse_primary` | 递归下降分层解析 |
+| `Parser::is_column_only_ref` / `Parser::parse_column_range` | 列范围解析（`B:D` → `RangeRef`），供 `COLUMN()` 等使用 |
 | `parse_cell_ref_str` | `"A1"`/`"$A$1"`→(col,row) |
 | `format_number` | 数字格式化（去尾零、NaN/Inf 错误码） |
 | `get_cell_value` | 单元格值→FormulaValue（含日期回退） |
@@ -271,6 +273,7 @@ flowchart LR
 | `SUMIF` | 条件求和（支持比较前缀） |
 | `TODAY` | 当前日期序列号 |
 | `ROW` | 当前行号 / 引用行号 |
+| `COLUMN` | 当前列号 / 引用列号 / 区域最左列号（与 `ROW` 对称，A=1, B=2, ...）；支持列范围 `COLUMN(B:D)` 返回最左列；无效引用返回 `#VALUE!` |
 | `EDATE` | 日期偏移：返回与起始日期相隔指定月份数的日期序列号；支持月末钳制（如 1 月 31 日 + 1 月 → 2 月 28/29 日）；无效日期返回 `#VALUE!` |
 
 > 未识别函数返回错误值 `#NAME?`；除零返回 `#DIV/0!`；独立范围在表达式上下文返回 `#VALUE!`；循环依赖标记 `#CIRC!`。

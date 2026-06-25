@@ -458,6 +458,10 @@ impl Parser {
                     "FALSE" => { self.advance(); return Ok(FormulaNode::Boolean(false)); }
                     _ => {}
                 }
+                // 列范围（如 COLUMN(B:D)）——纯大写字母 + 后跟冒号
+                if self.is_column_only_ref(&name) && matches!(self.tokens.get(self.pos + 1), Some(Token::Colon)) {
+                    return self.parse_column_range(&name);
+                }
                 // 函数调用
                 if matches!(self.tokens.get(self.pos + 1), Some(Token::LParen)) {
                     return self.parse_function(&name);
@@ -492,6 +496,32 @@ impl Parser {
             });
         }
         Ok(FormulaNode::CellRef { col: col1, row: row1 })
+    }
+
+    /// 判断标识符是否是纯列引用（1-3 个大写字母，如 B、AB、ABC）
+    fn is_column_only_ref(&self, name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 3
+            && name.chars().all(|c| c.is_ascii_uppercase())
+    }
+
+    /// 解析列范围（如 COLUMN(B:D) 中的 B:D）
+    /// 格式：Ident(纯大写字母) Colon Ident(纯大写字母)
+    fn parse_column_range(&mut self, first_col_name: &str) -> Result<FormulaNode, String> {
+        let col1 = letter_to_col(first_col_name)?;
+        self.advance(); // consume the first Ident
+        self.advance(); // consume ':'
+        let second = match self.advance() {
+            Some(Token::Ident(s)) if self.is_column_only_ref(&s) => s,
+            other => return Err(format!("列范围缺少结束列: {:?}", other)),
+        };
+        let col2 = letter_to_col(&second)?;
+        Ok(FormulaNode::RangeRef {
+            start_col: col1.min(col2),
+            start_row: 1,
+            end_col: col1.max(col2),
+            end_row: 1,
+        })
     }
 
     // function_call = IDENT '(' arg_list? ')'
@@ -1489,6 +1519,20 @@ fn eval_function(name: &str, args: &[FormulaNode], sheet: &SheetData, eval_pos: 
                 }
             }
         }
+        "COLUMN" => {
+            if args.is_empty() {
+                // COLUMN() - 返回当前公式所在单元格的列号（A=1, B=2, …）
+                FormulaValue::Number(eval_pos.1 as f64)
+            } else {
+                // COLUMN(cell_ref) - 返回引用单元格的列号
+                // COLUMN(range) - 返回区域最左上角的列号
+                match &args[0] {
+                    FormulaNode::CellRef { col, .. } => FormulaValue::Number(*col as f64),
+                    FormulaNode::RangeRef { start_col, .. } => FormulaValue::Number(*start_col as f64),
+                    _ => FormulaValue::Error("#VALUE!".to_string()),
+                }
+            }
+        }
         "EDATE" => {
             // EDATE(start_date, months)
             // 返回与起始日期相隔指定月份数的日期（序列号）
@@ -2296,6 +2340,43 @@ mod tests {
         let ast = parse_formula("=ROW(A10)").unwrap();
         let result = eval_node(&ast, &sheet, (1, 1));
         assert_eq!(result.to_display(), "10");
+    }
+
+    #[test]
+    fn test_eval_column() {
+        let sheet = make_sheet(vec![]);
+
+        // COLUMN() 返回当前公式所在列号
+        let ast = parse_formula("=COLUMN()").unwrap();
+        let result = eval_node(&ast, &sheet, (5, 3)); // 第5行第3列 (C列)
+        assert_eq!(result.to_display(), "3");
+
+        // COLUMN(H10) 返回引用的列号 (H=8)
+        let ast = parse_formula("=COLUMN(H10)").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "8");
+
+        // COLUMN(A1:F1) 返回区域最左上角的列号 (A=1)
+        let ast = parse_formula("=COLUMN(A1:F1)").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "1");
+
+        // COLUMN(B:D) — 列范围内最左列 (B=2)
+        // 注意：B:D 会被解析为 RangeRef（B1 到 D1），取 start_col
+        let ast = parse_formula("=COLUMN(B:D)").unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "2");
+    }
+
+    #[test]
+    fn test_eval_column_error() {
+        let sheet = make_sheet(vec![]);
+
+        // 无效引用（无列号的纯行引用 2:3 不被识别为 RangeRef）→ #VALUE!
+        // 测试任意无效参数
+        let ast = parse_formula(r#"=COLUMN("invalid")"#).unwrap();
+        let result = eval_node(&ast, &sheet, (1, 1));
+        assert_eq!(result.to_display(), "#VALUE!");
     }
 
     // ========== EDATE 测试 ==========
