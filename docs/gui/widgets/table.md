@@ -231,6 +231,8 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
   - 无公式的单元格：复制显示文本（经 `cell_display_text` 处理，日期格式转换为日期字符串）。
   - 空单元格：空字符串（TSV 中仍占据一个 tab 位置）。
 - **选区范围**：优先取 `selected_range` 的包围盒；否则为单格。
+  - **合并单元格解析**：单格复制时，若 `selected_cell` 位于合并区域内，先通过 `sheet.get_merged_range()` 解析到合并区域左上角再取数据（数据仅存于左上角，非左上角位置 `get_cell` 返回 `None`，会导致复制空内容）。
+  - **范围遍历跳过合并非左上角**：遍历 `selected_range` 时，对每个 `(c, r)` 先检查是否属于合并单元格的非左上角部分——若是则 `continue` 跳过，避免 TSV 中出现多余空列和多余空行。
 - **剪贴板写入**：通过 `ui.ctx().copy_text(tsv)` 写入系统剪贴板，支持跨应用粘贴。egui-winit 在 `Ctrl+V` 时读取该系统剪贴板生成 `Event::Paste`，从而构成「复制写剪贴板 → 粘贴读剪贴板」的完整闭环，**无需任何内部缓冲**。
 - **事件消费**：`events.retain` 移除 `Event::Copy`，防止后续控件二次处理。
 
@@ -240,7 +242,7 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 - **数据来源**：`Event::Paste` 携带的文本，即系统剪贴板当前内容（egui-winit 已把 `\r\n` 归一为 `\n`，并丢弃空内容）。因此**天然支持跨应用粘贴**（从其他程序复制后直接 Ctrl+V）。
 - **解析**：从粘贴文本按 `\n` 和 `\t` 分割为二维字符串网格 `Vec<Vec<String>>`，过滤空行。
 - **写入逻辑**（与 Excel 一致）：
-  - 以活动单元格（`selected_cell`）为粘贴起点。
+  - 以活动单元格（`selected_cell`）为粘贴起点。粘贴前先通过 `sheet.get_merged_range()` 解析到合并单元格左上角：若 `selected_cell` 位于合并非左上角，直接写入该位置会导致数据被合并区域视觉覆盖且渲染跳过，改正为写入左上角使其可见。
   - 每个网格元素写入对应的 `sheet.cells[(row, col)]`：以 `=` 开头的字符串作为公式（写入 `cell.formula`），否则作为值（写入 `cell.value`）。
   - 粘贴区域 = 起点 `(col, row)` 到 `(col + cols - 1, row + rows - 1)`。
 - **重算**：含公式则 `evaluate_sheet`（全量）；仅值则一次性批量 `evaluate_dependents_many`（一次建图，替代逐格 `evaluate_dependents`，避免大表 K × O(2M) 卡顿）。

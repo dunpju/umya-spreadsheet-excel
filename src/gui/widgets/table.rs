@@ -572,15 +572,28 @@ pub fn draw_table_content(
             let (sc, sr, ec, er) = if let Some((c0, r0, c1, r1)) = *selected_range {
                 (c0.min(c1), r0.min(r1), c0.max(c1), r0.max(r1))
             } else if let Some((c, r)) = *selected_cell {
-                (c, r, c, r)
+                // 解析到合并单元格的左上角（数据仅存于左上角，非左上角位置 get_cell 返回 None）
+                let (resolved_c, resolved_r) = sheet.get_merged_range(c, r)
+                    .map(|mr| (mr.start_col, mr.start_row))
+                    .unwrap_or((c, r));
+                (resolved_c, resolved_r, resolved_c, resolved_r)
             } else {
                 (0, 0, 0, 0)
             };
             if sc > 0 {
                 let mut tsv = String::new();
                 for r in sr..=er {
+                    let mut first_col_in_row = true;
                     for c in sc..=ec {
-                        if c > sc { tsv.push('\t'); }
+                        // 跳过合并单元格的非左上角部分：数据仅存于左上角，
+                        // 非左上角 get_cell 返回 None，直接跳过避免 TSV 出现多余空列
+                        if let Some(mr) = sheet.get_merged_range(c, r) {
+                            if !mr.is_top_left(c, r) {
+                                continue;
+                            }
+                        }
+                        if !first_col_in_row { tsv.push('\t'); }
+                        first_col_in_row = false;
                         if let Some(cell) = sheet.get_cell(r, c) {
                             if !cell.formula.is_empty() {
                                 let f = &cell.formula;
@@ -618,12 +631,18 @@ pub fn draw_table_content(
         });
         if let Some(text) = pasted {
             if let Some((col, row)) = *selected_cell {
+                // 解析到合并单元格的左上角：粘贴到非左上角位置时，
+                // 数据虽写入但被合并区域视觉覆盖，渲染跳过该位置导致不可见
+                let (resolved_col, resolved_row) = excel_data.get_sheet(current_sheet)
+                    .and_then(|s| s.get_merged_range(col, row))
+                    .map(|mr| (mr.start_col, mr.start_row))
+                    .unwrap_or((col, row));
                 let rows: Vec<Vec<String>> = text.split('\n')
                     .filter(|line| !line.is_empty())
                     .map(|line| line.split('\t').map(|s| s.to_string()).collect())
                     .collect();
                 if !rows.is_empty() && !rows[0].is_empty() {
-                    paste_request = Some((rows, (col, row)));
+                    paste_request = Some((rows, (resolved_col, resolved_row)));
                 }
             }
             // 消费 Event::Paste，防止 TextEdit 等控件二次处理
