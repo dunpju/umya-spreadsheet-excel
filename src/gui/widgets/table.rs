@@ -900,8 +900,9 @@ pub fn draw_table_content(
                 };
 
                 // 查找被点击的列（二分查找，累积数组严格单调递增）
+                // col_idx=1 → col=0（行号列），归入 header 点击分支处理
                 let col_idx = col_cumulative_width.partition_point(|&w| w <= click_x);
-                let clicked_col = if col_idx > 1 { Some(col_idx as u32 - 1) } else { None };
+                let clicked_col = if col_idx > 0 { Some(col_idx as u32 - 1) } else { None };
 
                 // 查找被点击的行（二分查找，累积数组严格单调递增）
                 let row_idx = row_cumulative_height.partition_point(|&h| h <= click_y);
@@ -909,7 +910,29 @@ pub fn draw_table_content(
 
                 // 更新选中单元格（保持 col, row 顺序）
                 if let (Some(col), Some(row)) = (clicked_col, clicked_row) {
-                    if col > 0 && row > 0 {
+                    // 行号点击：选中整行
+                    if col == 0 && row > 0 {
+                        let max_col = sheet.max_col;
+                        *editing_cell = None;
+                        *selected_range = Some((1, row, max_col, row));
+                        // 活动单元格设在首列，若首列为合并格则取合并格左上角
+                        let anchor_col = sheet.get_merged_range(1, row)
+                            .map(|mr| mr.start_col).unwrap_or(1);
+                        *selected_cell = Some((anchor_col, row));
+                        *shift_click_anchor = Some((anchor_col, row));
+                    }
+                    // 列号点击：选中整列
+                    else if row == 0 && col > 0 {
+                        let max_row = sheet.max_row;
+                        *editing_cell = None;
+                        *selected_range = Some((col, 1, col, max_row));
+                        // 活动单元格设在首行，若首行为合并格则取合并格左上角，避免绿框展开干扰列选中视觉
+                        let anchor_row = sheet.get_merged_range(col, 1)
+                            .map(|mr| mr.start_row).unwrap_or(1);
+                        *selected_cell = Some((col, anchor_row));
+                        *shift_click_anchor = Some((col, anchor_row));
+                    }
+                    else if col > 0 && row > 0 {
                         let shift_held = input.modifiers.shift;
                         if shift_held {
                             // Shift+点击：从锚点到点击格扩展选中范围（与 Excel 一致）

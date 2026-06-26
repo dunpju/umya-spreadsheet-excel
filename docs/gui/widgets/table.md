@@ -12,7 +12,7 @@
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
-- **交互**：点击选中（绿色边框）、**Shift+点击范围选择**（从锚点到目标格的矩形选区）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、**双击填充柄自动填充（按源选区朝向填到「相邻连续数据」边界：横向线向右到行尾、纵向线/单格向下到列底；步长/类型/合并全部复用 `apply_fill`，详见 §2.12）**、**Ctrl+C/Ctrl+V 复制粘贴（单格/矩形区域，TSV 格式，公式保留，支持撤销）**、键盘导航（Tab/方向键/Enter）。
+- **交互**：点击选中（绿色边框）、**点击行号选中整行 / 点击列号选中整列**（§2.18）、**Shift+点击范围选择**（从锚点到目标格的矩形选区）、**键入即编辑（type-to-edit：选中后直接键入即进入编辑并替换原值）**、双击/Enter 编辑、右键上下文菜单、拖拽选择范围、**填充柄拖拽填充（数字序列/日期序列/文本复制/公式相对引用平移）**、**双击填充柄自动填充（按源选区朝向填到「相邻连续数据」边界：横向线向右到行尾、纵向线/单格向下到列底；步长/类型/合并全部复用 `apply_fill`，详见 §2.12）**、**Ctrl+C/Ctrl+V 复制粘贴（单格/矩形区域，TSV 格式，公式保留，支持撤销）**、键盘导航（Tab/方向键/Enter）。
 - **编辑与重算**：原位编辑器（透明无边框，直接在单元格内编辑）、数据有效性校验、日期字符串 ↔ 序列号转换、触发 `excel::formula` 增量/全量公式重算；填充柄填充走 `excel::fill::apply_fill`（见 §2.12）。
 - **性能优化**：累积尺寸数组 + 二分查找定位、`HashSet` 隐藏行列去重、`Cow` 避免无谓克隆。
 
@@ -252,6 +252,38 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 
 > **编辑态放行**：当处于原位编辑（`editing_cell.is_some()`）或公式栏/名称框获焦时，`text_edit_focused()` 为真，本节不拦截 `Event::Copy`/`Event::Paste`，交由对应 `TextEdit` 处理——即在编辑文本时 Ctrl+C/V 作用于正在编辑的文本本身（与 Excel 一致）。
 
+### 2.18 行号/列号点击选中整行/整列
+
+仿 Excel 交互：点击左侧行号区域（`col == 0`）选中整行，点击顶部列号区域（`row == 0`）选中整列。
+
+**触发条件**：`response.clicked()` 且无校验弹窗时，二分定位到 `(col, row)` → 进入以下分支：
+
+> **命中检测修复要点**：`clicked_col` 的计算原为 `col_idx > 1`（过滤 `col=0` 行号列），
+> 导致行号点击返回 `None` 无法触发选中。已改为 `col_idx > 0`，使 `col_idx=1` 正确返回
+> `Some(0)`（行号列），`col_idx=0`（在表格左侧之外）仍返回 `None`。
+
+- **行号点击**（`col == 0 && row > 0`）：
+  - `selected_range = Some((1, row, max_col, row))` ——从第 1 列到最后一列
+  - `selected_cell` 设为该行首列 `(1, row)`；若首列是合并格则取 `get_merged_range(1, row).start_col` 为锚点列，避免绿框展开覆盖合并区域
+  - `shift_click_anchor` 同理取合并锚点
+  - 清除 `editing_cell`（整行选中状态下不可编辑）
+
+- **列号点击**（`row == 0 && col > 0`）：
+  - `selected_range = Some((col, 1, col, max_row))` ——从第 1 行到最后一行
+  - `selected_cell` 设为该列首行 `(col, 1)`；若首行是合并格则取 `get_merged_range(col, 1).start_row` 为锚点行，**避免绿框展开到合并区域宽度误导用户以为是合并格选中而非整列选中**
+  - `shift_click_anchor` 同理取合并锚点
+  - 清除 `editing_cell`
+
+- **普通单元格点击**（`col > 0 && row > 0`）：保持原有逻辑不变（单格选中 / Shift+范围 / 双击编辑）。
+
+**与现有交互的协调**：
+- 行号/列号点击**不触发双击编辑**（`editing_cell` 被显式清空）。
+- 行号/列号点击会**清除已有的 `selected_range`**并以新的整行/整列选区覆盖。
+- 整行/整列选中后，Delete 键和右键"清空选中范围"走现有的范围清空路径，正确清空范围内所有单元格。
+- 冻结窗格场景下，行号/列号点击同样可用（坐标参考系已在点击检测前正确切换）。
+
+**实现位置**：`draw_table_content` 的点击处理分支，位于普通单元格点击的 `if col > 0 && row > 0` 之前，对 `col == 0` 和 `row == 0` 分别做早期返回处理。
+
 ### 2.14 性能相关处理汇总
 
 | 技术 | 位置 | 作用 |
@@ -369,6 +401,8 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 │   └── Event::Paste → 解析 TSV → paste_request
 ├── 点击处理
 │   ├── 普通点击 → 更新 selected_cell + shift_click_anchor + 双击编辑
+│   ├── 行号点击(col=0) → 选中整行 → selected_range = (1, row, max_col, row)
+│   ├── 列号点击(row=0) → 选中整列 → selected_range = (col, 1, col, max_row)
 │   └── Shift+点击 → 计算锚点到目标格的矩形范围 → selected_range
 ├── 保存编辑 → sheet.validate_cell / formula::evaluate_sheet|evaluate_dependents
 ├── [闭包] screen_to_cell                       [拖拽/框选: 屏幕坐标→单元格]

@@ -1085,8 +1085,9 @@ impl eframe::App for ExcelViewer {
 
                 ui.separator();
 
-                // 记录调用前的选中单元格，用于检测变化后清除选中范围
+                // 记录调用前的选中单元格/范围，用于检测变化后清除选中范围
                 let prev_selected = self.selected_cell;
+                let prev_range = self.selected_range;
                 // 本帧成功提交（保存）的编辑单元格 (row, col)：由 draw_table_content 写入，
                 // 此处据此把编辑入撤销栈（无值＝本帧无提交 / 取消 / 校验失败）
                 let mut committed_edit: Option<(u32, u32)> = None;
@@ -1129,7 +1130,12 @@ impl eframe::App for ExcelViewer {
 
                         // 检测 selected_cell 变化 → 清除选中范围（用户点击了新单元格）
                         // 拖拽选择期间不清除范围（drag_anchor 非 None）
-                        if self.selected_cell != prev_selected && self.drag_anchor.is_none() {
+                        // 若 draw_table_content 已将 selected_range 设为新值（行/列号点击、Shift+点击等），
+                        // 则不覆盖——避免刚设的整行/整列选区被误清
+                        if self.selected_cell != prev_selected
+                            && self.selected_range == prev_range
+                            && self.drag_anchor.is_none()
+                        {
                             self.selected_range = None;
                         }
 

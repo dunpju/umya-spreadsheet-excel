@@ -379,7 +379,9 @@ let col = col_cumulative_width.partition_point(|&w| w <= click_x) - 1;
 
 | 事件 | 检测 | 行为 |
 |------|------|------|
-| 左键单击 | `response.clicked()` | 更新 `selected_cell`（`col,row>0` 才有效）；`request_focus`；同时更新 `shift_click_anchor` |
+| 左键单击（数据格） | `response.clicked()` | 更新 `selected_cell`（`col>0 && row>0`）；`request_focus`；同时更新 `shift_click_anchor`；双击进入编辑 |
+| **左键单击行号** | `response.clicked()` + `col==0` | 选中整行：`selected_range = (1, row, max_col, row)`；`selected_cell = (1, row)`；清除编辑态 |
+| **左键单击列号** | `response.clicked()` + `row==0` | 选中整列：`selected_range = (col, 1, col, max_row)`；`selected_cell = (col, 1)`；清除编辑态 |
 | Shift+左键单击 | `response.clicked()` + `modifiers.shift` | 从 `shift_click_anchor` 到目标格计算矩形范围 → `selected_range`；活动单元格保持不变；不触发双击编辑 |
 | 左键双击 | `response.double_clicked()` | 进入编辑：合并格取左上角；`edit_value` 取公式或显示值；保存原始数据备恢复 |
 | 右键单击 | `response.secondary_clicked()` | 打开右键菜单，记录 `target_cell` 与默认插入数（`default_insert_count`） |
