@@ -101,6 +101,7 @@ parse_comparison  ( = <> < <= > >= )   最低
 - `extract_dependencies(node)`：递归收集 AST 引用的所有单元格。**超大范围（>50000 格）仅标记四角**，避免 `A1:Z100000` 导致依赖集爆炸。
 - `build_formula_graph(sheet)`：解析所有公式单元格为 AST，构建 `formula_positions`、正向依赖 `forward_deps`（仅公式间依赖）、反向依赖 `reverse_deps`（任意单元格→依赖它的公式）。
 - `topo_eval(...)`：Kahn 拓扑排序——在待求值子集内统计入度，入度为 0 者入队，求值后通过反向表递减后继入度。按拓扑顺序求值并写回 `cell.value`；**未出队的（循环依赖）标记 `#CIRC!`**。
+- **性能日志**：`build_formula_graph` 输出 `📦 cache HIT/MISS`（含公式数、反向依赖条目数）；`evaluate_dependents_many` 输出 `⚡ evaluate_dependents_many: 0 affected`（无依赖时跳过）或 `⚡ topo_eval N formulas: Xus`（有依赖时显示求值耗时）。
 
 ### 2.8 顶层 API
 
@@ -123,26 +124,28 @@ parse_comparison  ( = <> < <= > >= )   最低
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `formula_cells` | `HashMap<(u32,u32), FormulaNode>` | 公式坐标 → 已解析的 AST |
-| `forward_deps` | `HashMap<(u32,u32), HashSet<(u32,u32)>>` | 公式 → 它依赖的公式（仅公式间依赖） |
-| `reverse_deps` | `HashMap<(u32,u32), HashSet<(u32,u32)>>` | 任意单元格 → 依赖它的公式集合 |
+| `formula_cells` | `Arc<HashMap<(u32,u32), FormulaNode>>` | 公式坐标 → 已解析的 AST |
+| `forward_deps` | `Arc<HashMap<(u32,u32), HashSet<(u32,u32)>>>` | 公式 → 它依赖的公式（仅公式间依赖） |
+| `reverse_deps` | `Arc<HashMap<(u32,u32), HashSet<(u32,u32)>>>` | 任意单元格 → 依赖它的公式集合 |
+
+> **变更（v0.1.4+）**：三个 HashMap 均用 `Arc` 包裹，缓存命中时 `Arc::clone` = 引用计数 +1（O(1)），替代原深拷贝 O(公式数+反向依赖条目数) ≈ 6.5ms 的开销。`formula_positions` 字段已从结构中移除（改为每次缓存命中时从 `sheet.formula_positions` 轻量快照 ^100μs）。
 
 **存储方式**：缓存在 `SheetData.cached_graph: Option<Box<dyn Any + Send + Sync>>`，使用类型擦除（type erasure）以避免 `formula.rs` 与 `reader.rs` 之间的循环类型依赖。
 
 **缓存有效性**：`cached_graph_dirty: bool` 标志控制缓存有效性。
 
-**`build_formula_graph` 两级缓存逻辑**：
+**`build_formula_graph` 两级缓存 + Arc 共享逻辑**：
 
 ```
 build_formula_graph(sheet):
   formula_positions_dirty? → rebuild_formula_positions() → dirty=false
-  cached_graph_dirty?      → parse all formula cells, build graph, cache it → dirty=false
-  both clean               → downcast cached graph, clone and return
+  cached_graph_dirty?      → parse all formula cells, build graph, Arc::new → cache → dirty=false
+  both clean               → downcast cached graph, Arc::clone (O(1)) return
 ```
 
-- **L1 缓存（`formula_positions`）**：`HashSet<(u32,u32)>`，记录所有含公式的单元格坐标。通过 `mark_formula(sheet, row, col)` / `unmark_formula(sheet, row, col)` 增量维护。L1 脏时需全量扫描重建 `formula_positions`。
-- **L2 缓存（完整依赖图）**：`CachedFormulaGraph`。L1 干净但 L2 脏时，从 `formula_positions` 出发解析所有公式单元格并构建完整图。L2 脏标记会阻止直接使用缓存图。
-- **两级均命中**：直接 `downcast` 缓存图，`clone` 并返回。性能从 ~300ms 降至 ~5ms（25 万公式单元格场景）。
+- **L1 缓存（`formula_positions`）**：`HashSet<(u32,u32)>`，记录所有含公式的单元格坐标。加载时在单元格解析阶段预标记（`formula_positions_dirty = false`），后续由 `mark_formula`/`unmark_formula` 增量维护。
+- **L2 缓存（完整依赖图）**：`CachedFormulaGraph`（内部用 `Arc`）。构建时 ≈300ms（25 万公式），缓存命中时 ≈0μs（Arc clone）。
+- **两级均命中**：`Arc::clone` 后直接返回。从原 6.5ms 深拷贝降至 ~0μs。
 
 **`invalidate_formula_graph(sheet)`**：将 `cached_graph_dirty` 置为 `true`，使 L2 缓存失效。由 `fill.rs`、`table.rs`、`viewer.rs` 在公式修改时调用，确保下次 `build_formula_graph` 重建依赖图。
 
@@ -239,9 +242,9 @@ flowchart LR
 | `adjust_formula_by_mapping` | `(formula, mapping, fb_col, fb_row) -> String` | 按映射表调整引用（迁移） |
 | `shift_formula_relative` | `(formula, d_col, d_row) -> String` | 填充柄复制：仅平移相对引用，绝对引用 `$A`/`$1` 不变 |
 | `invalidate_formula_graph` | `(sheet: &mut SheetData)` | 使 L2 依赖图缓存失效（`cached_graph_dirty = true`），由 fill/table/viewer 在公式修改时调用 |
-| `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式；并置位 `cf_dirty` |
-| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式（单格）；委托 `evaluate_dependents_many`；并置位 `cf_dirty` |
-| `evaluate_dependents_many` | `(sheet, changed: IntoIterator<Item=(u32,u32)>)` | **批量**增量求值（多格改动一次建图）；填充/粘贴值路径用；并置位 `cf_dirty` |
+| `evaluate_sheet` | `(sheet: &mut SheetData)` | 全量拓扑求值所有公式；置位 `cf_dirty`（全量 CF 重算） |
+| `evaluate_dependents` | `(sheet, changed_row, changed_col)` | 增量求值受影响公式（单格）；委托 `evaluate_dependents_many`；通过后者写入增量 `cf_dirty_cells` |
+| `evaluate_dependents_many` | `(sheet, changed: IntoIterator<Item=(u32,u32)>)` | **批量**增量求值（多格改动一次建图）；填充/粘贴值路径用；仅变更格落入 CF 范围时写入 `cf_dirty_cells`（增量 CF）而非置位全量 `cf_dirty` |
 
 ### 4.3 关键内部函数（私有 fn）
 

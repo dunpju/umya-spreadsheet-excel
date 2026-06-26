@@ -22,6 +22,7 @@
 | 内部模块 | `crate::excel::formula::shift_formula_relative` | 公式相对引用平移（复制语义，绝对 `$` 不变） |
 | 内部模块 | `crate::excel::formula::invalidate_formula_graph` | 含公式填充时使公式依赖图 L2 缓存失效 |
 | 内部模块 | `crate::excel::reader::{CellData, ExcelData, SheetData}` | 数据模型、日期解析/格式化、`is_date_format`、`get_cell`/`get_merged_range` |
+| SheetData 新字段 | `cf_dirty_cells`, `cf_col_index`, `cf_col_index_dirty` | 条件格式增量重算 + 列级规则索引缓存（详见 [`reader.md`](./reader.md)） |
 | 标准库 | `std` | 基本类型 |
 | 标准库 | `std::collections::HashSet` | 隐藏行/列集合（双击自动填充边界扫描时透明跳过） |
 

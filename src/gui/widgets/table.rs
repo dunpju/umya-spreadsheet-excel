@@ -2628,12 +2628,15 @@ pub fn draw_table_content(
 
     // ========== 粘贴提交：将剪贴板内容写入单元格、重算、更新选区、通知撤销 ==========
     if let Some((rows, (start_col, start_row))) = paste_request {
+        let t0 = std::time::Instant::now();
+        let paste_cell_count = rows.iter().map(|r| r.len()).sum::<usize>();
         let prev_selected = *selected_cell;
         let prev_range = *selected_range;
 
         // 保存旧单元格数据（用于撤销）
+        let t_undo = std::time::Instant::now();
         let old_cells = if let Some(sheet) = excel_data.get_sheet(current_sheet) {
-            let mut cells = Vec::new();
+            let mut cells = Vec::with_capacity(paste_cell_count);
             for (dr, row_vals) in rows.iter().enumerate() {
                 for dc in 0..row_vals.len() {
                     let tc = start_col + dc as u32;
@@ -2647,19 +2650,19 @@ pub fn draw_table_content(
         };
 
         // 写入粘贴数据
+        let t_write = std::time::Instant::now();
         let mut has_formula = false;
-        for (dr, row_vals) in rows.iter().enumerate() {
-            for (dc, val) in row_vals.iter().enumerate() {
-                let tc = start_col + dc as u32;
-                let tr = start_row + dr as u32;
-                let is_formula = val.starts_with('=');
-                if is_formula { has_formula = true; }
-                if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+        if let Some(sheet) = excel_data.sheets.get_mut(current_sheet) {
+            for (dr, row_vals) in rows.iter().enumerate() {
+                for (dc, val) in row_vals.iter().enumerate() {
+                    let tc = start_col + dc as u32;
+                    let tr = start_row + dr as u32;
+                    let is_formula = val.starts_with('=');
+                    if is_formula { has_formula = true; }
                     let cell = sheet.cells.entry((tr, tc)).or_insert_with(CellData::default);
                     if is_formula {
                         cell.formula = val.clone();
                         sheet.mark_formula(tr, tc);
-                        // value 将由公式求值填充
                     } else {
                         cell.value = val.clone();
                         cell.formula.clear();
@@ -2670,6 +2673,7 @@ pub fn draw_table_content(
         }
 
         // 公式重算
+        let t_recalc = std::time::Instant::now();
         if has_formula {
             // 粘贴含公式 → 依赖图缓存失效
             crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[current_sheet]);
@@ -2685,6 +2689,15 @@ pub fn draw_table_content(
             );
         }
         *dirty = true;
+        let t_total = t0.elapsed();
+        log::info!(
+            "📋 Paste {} cells: undo={:.0}us write={:.0}us recalc={:.0}us total={:.0}us",
+            paste_cell_count,
+            t_undo.duration_since(t0).as_micros(),
+            t_write.duration_since(t_undo).as_micros(),
+            t_recalc.elapsed().as_micros(),
+            t_total.as_micros(),
+        );
 
         // 更新选中范围（覆盖粘贴区域）
         let paste_rows = rows.len() as u32;

@@ -686,12 +686,19 @@ impl eframe::App for ExcelViewer {
             }
             if let Some(sheet) = excel.sheets.get_mut(self.current_sheet) {
                 if sheet.cf_dirty {
+                    let t_cf = std::time::Instant::now();
                     ExcelData::reapply_conditional_formatting(sheet);
                     if !self.cond_format_popup.rules.is_empty() {
                         let user_rules = self.cond_format_popup.rules.clone();
                         ExcelData::apply_user_cond_format_rules(sheet, &user_rules);
                     }
                     sheet.cf_dirty = false;
+                    log::info!(
+                        "  🎨 CF reapply: {:.0}us cells={} rules={}",
+                        t_cf.elapsed().as_micros(),
+                        sheet.cells.len(),
+                        sheet.conditional_rules.len(),
+                    );
                 }
             }
         }
@@ -903,6 +910,7 @@ impl eframe::App for ExcelViewer {
         }
 
         // 主内容区域
+        let t_frame = std::time::Instant::now();
         egui::CentralPanel::default().show_inside(ui, |ui| {
             // Ctrl+Z 撤销：在借用 excel_data 之前取出 undo action
             // 编辑模式下不触发单元格级撤销：把 Ctrl+Z 留给输入框做文本内撤销，
@@ -2014,6 +2022,10 @@ impl eframe::App for ExcelViewer {
                 ctx.request_repaint();
             }
         });
+        let t_frame_us = t_frame.elapsed().as_micros();
+        if t_frame_us > 10_000 {
+            log::info!("  🐌 Slow frame: {:.0}us", t_frame_us);
+        }
 
         // ========== 分批跨帧填充：每帧写入 FILL_BATCH_SIZE 格 ==========
         // 由 draw_table_content 在大填充（> FILL_SYNC_THRESHOLD）时创建 PendingFill，

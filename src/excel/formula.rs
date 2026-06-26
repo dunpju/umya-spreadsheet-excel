@@ -1752,11 +1752,11 @@ fn extract_dependencies(node: &FormulaNode) -> HashSet<(u32, u32)> {
 #[derive(Clone)]
 pub struct CachedFormulaGraph {
     /// 公式单元格 AST（pos → parsed AST）
-    pub formula_cells: HashMap<(u32, u32), FormulaNode>,
+    pub formula_cells: std::sync::Arc<HashMap<(u32, u32), FormulaNode>>,
     /// 正向依赖：公式单元格 → 其引用的公式单元格集合
-    pub forward_deps: HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    pub forward_deps: std::sync::Arc<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     /// 反向依赖：任意被引用的单元格 → 引用它的公式单元格集合
-    pub reverse_deps: HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    pub reverse_deps: std::sync::Arc<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
 }
 
 /// 标记公式依赖图缓存为脏（公式内容变更时调用）。
@@ -1782,23 +1782,31 @@ pub fn invalidate_formula_graph(sheet: &mut crate::excel::reader::SheetData) {
 ///   避免 O(F × parse_formula) 的全量 AST 解析（~300ms）。
 /// - 对于 250 万格、无公式的数据表，直接返回空图，耗时 ~0ms。
 fn build_formula_graph(sheet: &mut SheetData) -> (
-    HashMap<(u32, u32), FormulaNode>,   // ASTs
-    HashSet<(u32, u32)>,                 // formula_positions
-    HashMap<(u32, u32), HashSet<(u32, u32)>>, // forward: cell -> its formula deps
-    HashMap<(u32, u32), HashSet<(u32, u32)>>, // reverse: any cell -> formula cells depending on it
+    std::sync::Arc<HashMap<(u32, u32), FormulaNode>>,
+    std::sync::Arc<HashSet<(u32, u32)>>,
+    std::sync::Arc<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
+    std::sync::Arc<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
 ) {
     // 若索引脏或为首次构建，扫描全部 cells 重建索引（O(cells)，否则直接用缓存
     if sheet.formula_positions_dirty {
         sheet.rebuild_formula_positions(); // 全表扫描 → 填入 formula_positions + dirty=false
     }
 
-    // L2 缓存命中：直接返回已构建的完整图（避免 O(F × parse_formula) 全量 AST 解析）
+    // L2 缓存命中：Arc clone = ref-count 递增（O(1)），避免深拷贝 O(F+rev) 的 6ms+ 开销
     if !sheet.cached_graph_dirty {
         if let Some(ref cached) = sheet.cached_graph {
             if let Some(cached) = cached.downcast_ref::<CachedFormulaGraph>() {
+                // 当前 positions 的快照（O(F) clone ≈ ~100us for 2.7K），
+                // 避免 HashSet 全量相等比较（O(F) 遍历 + 哈希 ≈ ~1ms）
+                let formula_positions = std::sync::Arc::new(sheet.formula_positions.clone());
+                log::debug!(
+                    "  📦 build_formula_graph cache HIT: F={} rev={}",
+                    cached.formula_cells.len(),
+                    cached.reverse_deps.len(),
+                );
                 return (
                     cached.formula_cells.clone(),
-                    sheet.formula_positions.clone(),
+                    formula_positions,
                     cached.forward_deps.clone(),
                     cached.reverse_deps.clone(),
                 );
@@ -1806,6 +1814,7 @@ fn build_formula_graph(sheet: &mut SheetData) -> (
         }
     }
 
+    let t_build = std::time::Instant::now();
     let positions = &sheet.formula_positions;
 
     let formula_cells: HashMap<(u32, u32), FormulaNode> = positions
@@ -1838,15 +1847,26 @@ fn build_formula_graph(sheet: &mut SheetData) -> (
         }
     }
 
-    // 写入 L2 缓存（下次调用直接返回，避免 O(F × parse_formula) 重解析）
+    let fc: std::sync::Arc<HashMap<_, _>> = std::sync::Arc::new(formula_cells);
+    let fd: std::sync::Arc<HashMap<_, _>> = std::sync::Arc::new(forward_deps);
+    let rd: std::sync::Arc<HashMap<_, _>> = std::sync::Arc::new(reverse_deps);
+    let fp: std::sync::Arc<HashSet<_>> = std::sync::Arc::new(sheet.formula_positions.clone());
+
+    // 写入 L2 缓存（下次调用直接返回，Arc clone = O(1) 共享）
+    log::info!(
+        "  🔨 build_formula_graph cache MISS: build={:.0}us F={} rev={}",
+        t_build.elapsed().as_micros(),
+        fc.len(),
+        rd.len(),
+    );
     sheet.cached_graph = Some(Box::new(CachedFormulaGraph {
-        formula_cells: formula_cells.clone(),
-        forward_deps: forward_deps.clone(),
-        reverse_deps: reverse_deps.clone(),
+        formula_cells: fc.clone(),
+        forward_deps: fd.clone(),
+        reverse_deps: rd.clone(),
     }));
     sheet.cached_graph_dirty = false;
 
-    (formula_cells, positions.clone(), forward_deps, reverse_deps)
+    (fc, fp, fd, rd)
 }
 
 /// 对给定的公式单元格集合进行拓扑排序并求值
@@ -1941,8 +1961,25 @@ pub fn evaluate_dependents_many<I>(sheet: &mut SheetData, changed: I)
 where
     I: IntoIterator<Item = (u32, u32)>,
 {
-    // 单元格值变化 → 标记条件格式需重算（事件驱动，替代每帧重算）
-    sheet.cf_dirty = true;
+    // 收集变更格到 Vec（同时用于 CF 范围检查和后续 BFS）
+    let changed_cells: Vec<(u32, u32)> = changed.into_iter().collect();
+
+    // 单元格值变化 → 仅当变更格位于任意 CF 规则范围内时才标记条件格式需重算
+    // 使用增量脏格集合替代全表脏标志，CF 重算时仅处理受影响的少量单元格（O(1) vs O(10万格)）
+    let mut cf_affected: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for &(col, row) in &changed_cells {
+        if sheet.conditional_rules.iter().any(|r| {
+            r.ranges.iter().any(|range| range.contains(col, row))
+        }) {
+            cf_affected.insert((col, row));
+        }
+    }
+    if !cf_affected.is_empty() {
+        match &mut sheet.cf_dirty_cells {
+            Some(existing) => { existing.extend(cf_affected); }
+            None => { sheet.cf_dirty_cells = Some(cf_affected); }
+        }
+    }
     let (formula_cells, _, forward_deps, reverse_deps) = build_formula_graph(sheet);
     if formula_cells.is_empty() {
         return;
@@ -1951,7 +1988,7 @@ where
     // BFS 查找所有受影响的公式单元格（从这批变更格出发）
     let mut affected: HashSet<(u32, u32)> = HashSet::new();
     let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    for changed_cell in changed {
+    for &changed_cell in &changed_cells {
         // 从变更单元格出发，找到直接依赖它的公式单元格
         if let Some(direct_deps) = reverse_deps.get(&changed_cell) {
             for &dep in direct_deps {
@@ -1974,10 +2011,13 @@ where
     }
 
     if affected.is_empty() {
+        log::debug!("  ⚡ evaluate_dependents_many: 0 affected (no formula deps)");
         return;
     }
 
+    let t_eval = std::time::Instant::now();
     topo_eval(sheet, &formula_cells, &affected, &forward_deps, &reverse_deps);
+    log::debug!("  ⚡ topo_eval {} formulas: {:.0}us", affected.len(), t_eval.elapsed().as_micros());
 }
 
 // ========== 单元格引用解析工具 ==========

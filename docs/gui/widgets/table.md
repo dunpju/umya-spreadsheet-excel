@@ -249,6 +249,7 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 - **选区更新**：粘贴多行或多列时，`selected_range` 更新为覆盖粘贴区域的包围盒；单格粘贴不改变选区。
 - **撤销**：通过 `committed_paste: &mut Option<PasteCommit>` 出参通知调用方，viewer 据此构造 `UndoAction::RangeClear` 入撤销栈（保存被覆盖格的原始数据 + 选区）。
 - **事件消费**：`events.retain` 移除 `Event::Paste`，防止 TextEdit 等控件二次处理。
+- **性能日志**：粘贴完成后输出 `📋 Paste N cells: undo=Xus write=Xus recalc=Xus total=Xus`，方便定位各阶段耗时。
 
 > **编辑态放行**：当处于原位编辑（`editing_cell.is_some()`）或公式栏/名称框获焦时，`text_edit_focused()` 为真，本节不拦截 `Event::Copy`/`Event::Paste`，交由对应 `TextEdit` 处理——即在编辑文本时 Ctrl+C/V 作用于正在编辑的文本本身（与 Excel 一致）。
 

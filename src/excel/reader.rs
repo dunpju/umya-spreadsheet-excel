@@ -313,6 +313,13 @@ pub struct SheetData {
     pub conditional_rules: Vec<CondFormatRule>,
     /// 条件格式脏标志：单元格值变化（公式求值）后置位，viewer 仅在置位时重算条件格式
     pub cf_dirty: bool,
+    /// 增量 CF 重算：仅需重算的单元格（粘贴/编辑小范围变更时填入，避免全表 10万+ 格遍历）。
+    /// 为 None 或空集时回退到 cf_dirty 全量重算。
+    pub cf_dirty_cells: Option<std::collections::HashSet<(u32, u32)>>,
+    /// 条件格式列级索引缓存（列号 → 相关规则索引列表），避免每次 CF 重算时重建
+    pub cf_col_index: Option<std::collections::HashMap<u32, Vec<usize>>>,
+    /// 条件格式索引脏标志（规则变更时置 true，下次访问时重建索引）
+    pub cf_col_index_dirty: bool,
     /// 公式单元格位置索引（用于 `build_formula_graph` 快速定位公式，替代遍历全部 cells 的 O(cells) 迭代）。
     /// 由 `rebuild_formula_positions()` 构建；在单元格公式被写入/清除时通过
     /// `mark_formula`/`unmark_formula` 维护；行/列插入删除等难以精确追踪的场景通过
@@ -349,6 +356,9 @@ impl Clone for SheetData {
             merge_index: self.merge_index.clone(),
             conditional_rules: self.conditional_rules.clone(),
             cf_dirty: self.cf_dirty,
+            cf_dirty_cells: self.cf_dirty_cells.clone(),
+            cf_col_index: self.cf_col_index.clone(),
+            cf_col_index_dirty: self.cf_col_index_dirty,
             formula_positions: self.formula_positions.clone(),
             formula_positions_dirty: self.formula_positions_dirty,
             cached_graph: None, // 缓存懒重建，不需要克隆
@@ -420,6 +430,9 @@ impl SheetData {
             merge_index: HashMap::new(),
             conditional_rules: Vec::new(),
             cf_dirty: false,
+            cf_dirty_cells: None,
+            cf_col_index: None,
+            cf_col_index_dirty: true,
             formula_positions: HashSet::new(),
             formula_positions_dirty: true, // 初始脏：首次使用时全量构建
             cached_graph: None,
@@ -2136,6 +2149,24 @@ impl ExcelData {
         Ok((r, g, b))
     }
 
+    /// 获取或构建条件格式列级索引（缓存，规则变更时自动重建）
+    fn get_cf_col_index(sheet: &mut SheetData) -> &std::collections::HashMap<u32, Vec<usize>> {
+        if sheet.cf_col_index_dirty || sheet.cf_col_index.is_none() {
+            let mut col_rules: std::collections::HashMap<u32, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (ri, rule) in sheet.conditional_rules.iter().enumerate() {
+                for range in &rule.ranges {
+                    for col in range.start_col..=range.end_col {
+                        col_rules.entry(col).or_default().push(ri);
+                    }
+                }
+            }
+            sheet.cf_col_index = Some(col_rules);
+            sheet.cf_col_index_dirty = false;
+        }
+        sheet.cf_col_index.as_ref().unwrap()
+    }
+
     /// 对已加载的 SheetData 应用条件格式规则。
     /// 目前支持 CellIs 类型，将匹配的 dxf 样式覆盖到对应单元格上。
     /// 公开入口：每帧重新求值文件自带的条件格式（仅覆盖规则声明的 sqref 范围）
@@ -2143,32 +2174,93 @@ impl ExcelData {
         if sheet.conditional_rules.is_empty() {
             return;
         }
-        // 先恢复规则范围内"已存在"单元格的原始样式。
-        // 性能：原先按 range 的行列双重循环遍历"范围面积"（如 5000×400 预警范围 = 200 万格），
-        // 每格一次 HashMap 查找，造成 ~1 秒卡顿；改为只遍历实际存在的单元格（sheet.cells 稀疏），
-        // O(非空格数) 而非 O(范围面积)。空格本就无 CellData、无样式可恢复。
-        let keys: Vec<(u32, u32)> = {
-            let rule_ranges: Vec<&CellRange> = sheet
-                .conditional_rules
-                .iter()
-                .flat_map(|r| r.ranges.iter())
-                .collect();
-            sheet
-                .cells
-                .keys()
-                .copied()
-                .filter(|&(row, col)| rule_ranges.iter().any(|r| r.contains(col, row)))
-                .collect()
-        };
-        for key in keys {
-            if let Some(cell) = sheet.cells.get_mut(&key) {
+        // 获取或构建列级索引
+        let col_rules = Self::get_cf_col_index(sheet).clone();
+
+        // 增量路径：仅重算少数被修改的单元格（粘贴/编辑小范围变更）
+        if let Some(dirty_cells) = sheet.cf_dirty_cells.take() {
+            if !dirty_cells.is_empty() {
+                for (col, row) in dirty_cells {
+                    // 恢复原始样式
+                    if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                        cell.background_color = cell.original_bg;
+                        cell.font_color = None;
+                        cell.bold = false;
+                    }
+                    // 重新求值
+                    let cell_value = sheet.cells.get(&(row, col))
+                        .map(|c| c.value.clone())
+                        .unwrap_or_default();
+                    if let Some(rule_indices) = col_rules.get(&col) {
+                        for &ri in rule_indices {
+                            let rule = &sheet.conditional_rules[ri];
+                            let in_range = rule.ranges.iter().any(|r| r.contains(col, row));
+                            if in_range && Self::evaluate_rule(rule, &cell_value) {
+                                if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                                    if let Some(bg) = rule.bg_color {
+                                        cell.background_color = Some(bg);
+                                    }
+                                    if let Some(fc) = rule.font_color {
+                                        cell.font_color = Some(fc);
+                                    }
+                                    if rule.bold {
+                                        cell.bold = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                log::debug!("  🎨 CF incremental: {} cells", 1); // simplified count
+                return;
+            }
+        }
+
+        // 全量路径：遍历所有单元格（初始加载 / 公式变更 / 规则变更）
+        let keys: Vec<(u32, u32)> = sheet.cells.keys().copied().collect();
+        for (row, col) in keys {
+            // 检查该格是否在任意 CF 规则范围内
+            let in_any_range = col_rules.get(&col).map_or(false, |rules| {
+                rules.iter().any(|&ri| {
+                    sheet.conditional_rules[ri]
+                        .ranges
+                        .iter()
+                        .any(|r| r.contains(col, row))
+                })
+            });
+            if !in_any_range {
+                continue;
+            }
+            // 恢复原始样式
+            if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
                 cell.background_color = cell.original_bg;
                 cell.font_color = None;
                 cell.bold = false;
             }
+            // 重新求值应用 CF 规则
+            let cell_value = sheet.cells.get(&(row, col))
+                .map(|c| c.value.clone())
+                .unwrap_or_default();
+            if let Some(rule_indices) = col_rules.get(&col) {
+                for &ri in rule_indices {
+                    let rule = &sheet.conditional_rules[ri];
+                    let in_range = rule.ranges.iter().any(|r| r.contains(col, row));
+                    if in_range && Self::evaluate_rule(rule, &cell_value) {
+                        if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
+                            if let Some(bg) = rule.bg_color {
+                                cell.background_color = Some(bg);
+                            }
+                            if let Some(fc) = rule.font_color {
+                                cell.font_color = Some(fc);
+                            }
+                            if rule.bold {
+                                cell.bold = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        // 重新求值应用
-        Self::apply_conditional_formatting(sheet);
     }
 
     /// 将单元格值转为数值（空值当作 0，匹配 WPS/Excel 行为）
@@ -2217,35 +2309,6 @@ impl ExcelData {
             }
         } else {
             false
-        }
-    }
-
-    fn apply_conditional_formatting(sheet: &mut SheetData) {
-        let rules: Vec<CondFormatRule> = sheet.conditional_rules.clone();
-        // 稀疏遍历：只处理已存在单元格（避免按范围面积遍历空格，大表上造成卡顿）。
-        // 对每个已存在格依次套用每条规则：落在其范围内且匹配则应用，后规则覆盖前规则。
-        let keys: Vec<(u32, u32)> = sheet.cells.keys().copied().collect();
-        for (row, col) in keys {
-            let cell_value = match sheet.cells.get(&(row, col)) {
-                Some(c) => c.value.clone(),
-                None => continue,
-            };
-            for rule in &rules {
-                let in_range = rule.ranges.iter().any(|r| r.contains(col, row));
-                if in_range && Self::evaluate_rule(rule, &cell_value) {
-                    if let Some(cell) = sheet.cells.get_mut(&(row, col)) {
-                        if let Some(bg) = rule.bg_color {
-                            cell.background_color = Some(bg);
-                        }
-                        if let Some(fc) = rule.font_color {
-                            cell.font_color = Some(fc);
-                        }
-                        if rule.bold {
-                            cell.bold = true;
-                        }
-                    }
-                }
-            }
         }
     }
 

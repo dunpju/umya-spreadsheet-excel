@@ -45,12 +45,16 @@
 
 `SheetData` 是工作表的内存表示，字段包括：单元格表 `cells: HashMap<(row,col), CellData>`、合并列表 `merged_cells` 与**合并索引 `merge_index`**（O(1) 查找替代 O(n) 扫描）、`max_row`/`max_col`、`column_widths`/`row_heights`、`frozen_rows`/`frozen_cols`、`data_validations`、`conditional_rules`，以及条件格式脏标志 `cf_dirty`（见 [2.7 事件驱动刷新机制](#27-条件格式求值)）。
 
-公式相关字段（用于增量公式求值优化）：
+公式与条件格式相关字段（用于增量求值优化）：
 
-- `formula_positions: HashSet<(u32, u32)>` —— 公式单元格位置索引，供 `build_formula_graph` 快速定位公式格（替代遍历全部 cells 的 O(cells) 迭代）。由 `rebuild_formula_positions` 构建，在单元格公式被写入/清除时通过 `mark_formula`/`unmark_formula` 精确维护。
-- `formula_positions_dirty: bool` —— 公式位置索引脏标志。为 true 时下次 `build_formula_graph` 先重建索引。由 `rebuild_formula_positions` 置 false。行/列插入删除等结构性操作置 true（坐标偏移后索引失效）。
-- `cached_graph: Option<Box<dyn std::any::Any + Send + Sync>>` —— 缓存的公式依赖图（AST + 正向/反向依赖边），由 `build_formula_graph` 构建后写入。类型擦除为 `dyn Any` 以避免 reader.rs ↔ formula.rs 循环类型依赖（`CachedFormulaGraph` 定义在 formula.rs 中）。
-- `cached_graph_dirty: bool` —— 图缓存脏标志。由 `invalidate_formula_graph` 置 true。公式变更时通过此标志失效缓存。
+- `formula_positions: HashSet<(u32, u32)>` —— 公式单元格位置索引，加载时在单元格解析阶段预标记（`dirty = false`），后续由 `mark_formula`/`unmark_formula` 精确维护。
+- `formula_positions_dirty: bool` —— 公式位置索引脏标志。行/列插入删除等结构性操作置 true（坐标偏移后索引失效）。
+- `cached_graph: Option<Box<dyn Any + Send + Sync>>` —— 缓存的公式依赖图（AST + 正/反向依赖边，内部用 `Arc` 共享，缓存命中时 O(1) clone）。类型擦除为 `dyn Any` 避免循环依赖。
+- `cached_graph_dirty: bool` —— 图缓存脏标志。公式变更时置 true。
+- `cf_dirty: bool` —— 全量条件格式脏标志（加载/公式变更时设置）。
+- `cf_dirty_cells: Option<HashSet<(u32,u32)>>` —— 增量 CF 脏格集合（粘贴/编辑小范围变更时填入）。非空时 `reapply_conditional_formatting` 走增量路径（仅重算受影响的单元格）。
+- `cf_col_index: Option<HashMap<u32, Vec<usize>>>` —— 列级 CF 规则索引缓存（列号 → 相关规则列表），避免每格遍历全部 1000+ 规则。
+- `cf_col_index_dirty: bool` —— 列索引脏标志（规则变更时置 true，下次访问时重建）。
 
 > **手动 Clone 实现**：`SheetData` 的 Clone **不使用 derive**，而是手动实现。其中 `cached_graph` 克隆为 `None`（缓存不随克隆传播，下次使用时按需懒重建）；其余所有字段正常克隆。
 
@@ -93,24 +97,27 @@
 8. 工作表非空校验后，对每个 sheet 并行执行 `rebuild_merge_index` + `formula::evaluate_sheet`（多 sheet 时用 `std::thread::scope` 并行求值，单 sheet 顺序执行）。
 9. **条件格式延后求值**：`apply_conditional_formatting` 不再在加载阶段调用，改为首帧渲染时通过 `cf_dirty` 惰性触发（见 viewer 事件循环）。加载阶段公式求值已置 `cf_dirty = true`，渲染时自动补算。
 10. **公式位置预标记**：单元格解析阶段直接将公式格记录到 `sheet.formula_positions`，置 `formula_positions_dirty = false`，`build_formula_graph` 可跳过 O(cells) 全表扫描。
-11. **加载结束时自动输出性能汇总**：`log::info!` 记录总耗时、umya XML 解析耗时、并行 formula 评估耗时。
+11. **多 sheet 并行公式求值**：`sheets.len() > 1` 时用 `std::thread::scope` 并行执行各 sheet 的 `rebuild_merge_index` + `evaluate_sheet`，耗时 ≈max(sheet) 而非 sum(sheet)。
+12. **加载结束时自动输出性能汇总**：`log::info!` 记录总耗时、umya XML 解析耗时、并行 formula 评估耗时。
 
-**样式解析 `parse_style_from_argb` / `parse_style_raw`**：从 `umya_spreadsheet::Style` 提取样式信息。font/bg 颜色使用调用方预解析的 ARGB 字符串（避免 `argb_with_theme` 重复调用），对齐/垂直通过 `quick_h_align`/`quick_v_align` 枚举直接匹配（零字符串分配），边框颜色通过 `argb_with_theme` 一次性解析。旧版 `parse_style` 保留但已不再被调用（被 `parse_style_from_argb` 替代）。
+**样式解析 `parse_style_from_argb` / `parse_style_raw`**：从 `umya_spreadsheet::Style` 提取样式信息。font/bg 颜色使用调用方预解析的 ARGB 字符串（避免 `argb_with_theme` 重复调用），对齐/垂直通过 `quick_h_align`/`quick_v_align` 枚举直接 match（零字符串分配），边框颜色通过 `argb_with_theme` 一次性解析。旧版 `parse_style` 已移除。
 
 ### 2.7 条件格式求值
 
-- `apply_conditional_formatting(sheet)`：克隆规则后，**只遍历已存在的单元格**（`sheet.cells` 稀疏），按范围包含关系（`CellRange::contains`）过滤并用 `evaluate_rule` 判定，命中则覆盖背景/字色/加粗。**复杂度 O(非空格数) 而非 O(范围面积)**——避免对大范围（如 5000×400 预警范围 = 200 万格）逐格 HashMap 查找的卡顿。
+- `reapply_conditional_formatting(sheet)`：条件格式重算入口。**支持增量和全量两条路径**：
+  - **增量路径**（`cf_dirty_cells.is_some()`）：仅重算被修改的少数单元格（粘贴/编辑触发），O(变更单元格数) ≈ μs 级，避免全表 10万+ 格遍历。
+  - **全量路径**：遍历全部已存在单元格，单次循环完成"恢复原始样式 → 重新求值应用"（合并原双遍历为单次），配合**列级规则索引**（`get_cf_col_index`）避免每格遍历全部 1000+ 规则。列索引缓存在 `cf_col_index` 中，`cf_col_index_dirty` 控制重建。
+  - 由 viewer 在 `cf_dirty` 或 `cf_dirty_cells` 非空时调用，完成后复位。
 - `evaluate_rule(rule, cell_value)`：按 `rule_type`/`operator` 分支，支持 `ContainsText`（含 `extract_contains_text_from_formula` 从 `SEARCH("...")` 提取文本）、`Greater/Less/Equal/NotEqual/Between` 等比较。
-- `reapply_conditional_formatting(sheet)`：重算入口——先恢复范围内**已存在**单元格的原始样式（`original_bg`），再调用 `apply_conditional_formatting` 重新求值。**何时调用由 viewer 的事件驱动逻辑决定（见下）**，不再每帧无条件执行。
 - `apply_user_cond_format_rules(sheet, rules)`：应用用户 YAML 规则（`UserCondFormatRule`）。先经 `resolve_dynamic_range` 解析动态引用（`~行号`→行尾列、`列字母~`→列尾行、纯 `~`→右下角），再**只遍历该范围内已存在的单元格**用 `compare_equal` 等求值并着色（同样稀疏，避免按范围面积遍历空格）。
 
 #### 事件驱动刷新机制（`SheetData.cf_dirty`）
 
 条件格式（文件自带 + 用户规则）的重新求值是**较重的操作**（遍历每条规则 × 每个范围 × 每个单元格）。原先 viewer 每帧对所有工作表无条件重算，滚动/编辑间隙都在浪费。改为**事件驱动**：
 
-- **脏标志**：`SheetData.cf_dirty: bool`。置位表示"本表的条件格式需要重算（值或用户规则可能已变）"。
+- **脏标志**：`SheetData.cf_dirty`（全量）+ `cf_dirty_cells`（增量）。置位表示"本表的条件格式需要重算（值或用户规则可能已变）"。
 - **置位方（值变化的唯一 chokepoint）**：`crate::excel::formula::evaluate_sheet` 与 `evaluate_dependents` 在求值时置位 `sheet.cf_dirty = true`。由于本应用**所有**单元格值变化（编辑、撤销/重做、插入/删除行列、粘贴、加载）都经过这两个函数，置位点集中、可靠。
-- **消费方（viewer.rs 每帧）**：仅对**当前表**检查；若 `cf_dirty` 为真则执行 `reapply_conditional_formatting` +（有用户规则时）`apply_user_cond_format_rules`，完成后清零标志。用户规则若本轮被编辑（快照对比检测），则把所有表标记为脏，切换到对应表时再重算。
+- **消费方（viewer.rs 每帧）**：仅对**当前表**检查；若 `cf_dirty` 为真或 `cf_dirty_cells` 非空则执行 `reapply_conditional_formatting` +（有用户规则时）`apply_user_cond_format_rules`，完成后清零标志。增量脏格由 `evaluate_dependents_many`（粘贴/编辑）填入，全量脏标由 `evaluate_sheet`（加载/公式变更）设置。用户规则若本轮被编辑（快照对比检测），则把所有表标记为脏，切换到对应表时再重算。
 - **首帧/加载**：`load_from_file` 内部对每个表调用 `evaluate_sheet`，已将各表置脏，故加载后首帧会自动应用（含启动时从配置加载的用户规则）。
 
 | 场景 | 是否重算 CF | 说明 |
@@ -123,7 +130,7 @@
 | 切换工作表 | 目标表若脏则重算 | 仅当前表被处理 |
 | 滚动 / 闲置 | **否** | 无 evaluate，颜色保持（**主要收益**） |
 
-> 性能：对含条件格式的文件，滚动/闲置期间条件格式计算量下降约一个数量级；不含条件格式的表 `reapply_conditional_formatting` 本就走早返回快路径，收益较小。`cf_dirty` 是瞬时 UI 标志，不参与 xlsx 序列化。
+> 性能：含 1000+ 规则、10万+ 单元格的大表，CF 全量重算从 ~1.7s 降至 ~30ms（列级索引 + 单次遍历合并）。粘贴/编辑触发的增量 CF 重算 ≈ μs 级（仅处理变更格）。`cf_dirty`/`cf_dirty_cells` 是瞬时 UI 标志，不参与 xlsx 序列化。
 >
 > **稀疏遍历（性能关键）**：三个求值函数（`apply_conditional_formatting` / `reapply_conditional_formatting` / `apply_user_cond_format_rules`）都**遍历已存在的单元格 `sheet.cells`**（稀疏，仅非空格），而非按 `range.start..end` 的行列双重循环遍历"范围面积"。原因：`sheet.cells` 来自 OOXML，仅含非空格（稀疏）；而条件/预警范围常覆盖整张表（如 5000×400 = 200 万格），按面积遍历会每格做一次 HashMap 查找，单次重算可达 ~1 秒。稀疏遍历把复杂度从 O(范围面积) 降到 O(非空格数)。空格本就无 `CellData`、不会被着色/恢复，故稀疏遍历与原逻辑结果完全一致。修改 CF 求值时务必保持这一稀疏模式。
 
@@ -167,6 +174,9 @@ classDiagram
         +data_validations: Vec~DataValidationInfo~
         +conditional_rules: Vec~CondFormatRule~
         +cf_dirty: bool
+        +cf_dirty_cells: Option~HashSet~
+        +cf_col_index: Option~HashMap~
+        +cf_col_index_dirty: bool
         +formula_positions: HashSet~(u32,u32)~
         +formula_positions_dirty: bool
         +cached_graph: Option~Box~dyn Any + Send + Sync~~
