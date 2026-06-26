@@ -1084,6 +1084,17 @@ fn deep_copy_cell(
     if let Some(ref fmt) = cell_data.number_format {
         tgt_style.number_format_mut().set_format_code(fmt);
     }
+
+    // --- 批注（Comment） ---
+    if let Some(ref comment) = cell_data.comment {
+        if !comment.text.is_empty() || !comment.author.is_empty() {
+            let mut new_comment = umya_spreadsheet::structs::Comment::default();
+            new_comment.new_comment((tgt_col, tgt_row));
+            new_comment.set_author(comment.author.as_str());
+            new_comment.set_text_string(comment.text.as_str());
+            tgt_ws.add_comments(new_comment);
+        }
+    }
 }
 
 /// 将项目层的 CellBorder 应用到 umya Border（照搬 writer.rs）
