@@ -1179,10 +1179,11 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
     match (&rule.source_range, &rule.target_start) {
         (
             SourceRange::BatchColumns { col_start, col_end, row_start, row_end },
-            TargetPosition::BatchTarget { value_col, merge_col, row_start: tgt_row_start, row_end: _tgt_row_end },
+            TargetPosition::BatchTarget { value_col, merge_col, row_start: tgt_row_start, row_end: tgt_row_end },
         ) => {
             let merge_width = merge_col - value_col + 1;
             let num_cols = (*col_end - *col_start + 1) as usize;
+            let num_src_rows = (*row_end - *row_start + 1) as usize;
             let mut expanded = Vec::with_capacity(num_cols);
 
             for (i, col) in (*col_start..=*col_end).enumerate() {
@@ -1194,19 +1195,24 @@ fn expand_batch_rule(rule: &ParsedRule) -> Vec<ParsedRule> {
                     tgt_row, *merge_col,
                 );
 
-                // 自定义公式按 merge_width 步长向右扩充列引用
-                let col_shift = i as i32 * merge_width as i32;
+                // 公式横向填充：匹配目标行所属子规则，按源数据行数展开
                 let expanded_formulas: Vec<CustomFormula> = rule
                     .custom_formulas
                     .iter()
-                    .map(|cf| {
-                        let shifted = shift_formula_columns(&cf.raw_text, col_shift);
-                        // 目标单元格列也右移
-                        let new_tgt_col = (cf.target_cell.col as i32 + col_shift).max(1) as u32;
-                        CustomFormula {
-                            target_cell: CellRef::new(new_tgt_col, cf.target_cell.row),
-                            raw_text: shifted,
-                        }
+                    .filter(|cf| {
+                        cf.target_cell.row == tgt_row
+                        || (i == 0 && (cf.target_cell.row < *tgt_row_start || cf.target_cell.row > *tgt_row_end))
+                    })
+                    .flat_map(|cf| {
+                        (0..num_src_rows).map(move |j| {
+                            let col_shift = j as i32 * merge_width as i32;
+                            let shifted = shift_formula_columns(&cf.raw_text, col_shift);
+                            let new_tgt_col = (cf.target_cell.col as i32 + col_shift).max(1) as u32;
+                            CustomFormula {
+                                target_cell: CellRef::new(new_tgt_col, cf.target_cell.row),
+                                raw_text: shifted,
+                            }
+                        })
                     })
                     .collect();
 
@@ -2054,47 +2060,112 @@ N2:BW2->B14:-~;
 
     #[test]
     fn test_batch_rule_expands_custom_formulas() {
-        // 批量规则 + 自定义公式 → 每条展开规则获得列偏移后的公式
-        let text = "(A:C)3:(A:C)12->(B(1:3):C(1:3)),formula(B12=SUM(B15:B~),B13=SUM($C$15:$C$~)):-~;";
+        // 批量规则 + 自定义公式 → 公式按源数据行数横向展开到匹配的子规则
+        // (A:C)3:(A:C)12 → 3列 × 10行源数据，目标行1-3，公式在行1和行2
+        let text = "(A:C)3:(A:C)12->(B(1:3):C(1:3)),formula(B1=SUM(B15:B~),B2=SUM($C$15:$C$~)):-~;";
         let rules = parse_rules(text).unwrap();
         let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
         // A,B,C = 3 列 → 3 条展开规则
         assert_eq!(expanded.len(), 3);
 
-        // 第 1 条 (A, col_shift=0): 原公式不变
+        // 子规则 0 (A, tgt_row=1): B1 公式横向填充 10 份
         let r0 = &expanded[0];
-        assert_eq!(r0.custom_formulas.len(), 2);
-        assert_eq!(r0.custom_formulas[0].target_cell.col, 2); // B
+        assert_eq!(r0.custom_formulas.len(), 10); // 仅 B1，填充 10 列
+        assert_eq!(r0.custom_formulas[0].target_cell.col, 2); // B1
         assert_eq!(r0.custom_formulas[0].raw_text, "SUM(B15:B~)");
-        assert_eq!(r0.custom_formulas[1].raw_text, "SUM($C$15:$C$~)");
+        // 第 10 份 (j=9, col_shift=18): B+18=20=T1
+        assert_eq!(r0.custom_formulas[9].target_cell.col, 20); // T
+        assert_eq!(r0.custom_formulas[9].raw_text, "SUM(T15:T~)");
 
-        // 第 2 条 (B, col_shift=2): 列向右跳 2 列 (B→D, C→E)
+        // 子规则 1 (B, tgt_row=2): B2 公式横向填充 10 份
         let r1 = &expanded[1];
-        assert_eq!(r1.custom_formulas[0].target_cell.col, 4); // D
-        assert_eq!(r1.custom_formulas[0].raw_text, "SUM(D15:D~)");
-        assert_eq!(r1.custom_formulas[1].raw_text, "SUM($E$15:$E$~)");
+        assert_eq!(r1.custom_formulas.len(), 10); // 仅 B2，填充 10 列
+        assert_eq!(r1.custom_formulas[0].target_cell.col, 2); // B2
+        assert_eq!(r1.custom_formulas[0].raw_text, "SUM($C$15:$C$~)");
+        // 第 10 份 (j=9, col_shift=18): 目标列 B(2)+18=20=T2，公式引用 C(3)+18=21=U
+        assert_eq!(r1.custom_formulas[9].target_cell.col, 20); // T2
+        assert_eq!(r1.custom_formulas[9].raw_text, "SUM($U$15:$U$~)");
 
-        // 第 3 条 (C, col_shift=4): 列向右跳 4 列 (B→F, C→G)
-        let r2 = &expanded[2];
-        assert_eq!(r2.custom_formulas[0].target_cell.col, 6); // F
-        assert_eq!(r2.custom_formulas[0].raw_text, "SUM(F15:F~)");
-        assert_eq!(r2.custom_formulas[1].raw_text, "SUM($G$15:$G$~)");
+        // 子规则 2 (C, tgt_row=3): 无匹配公式
+        assert_eq!(expanded[2].custom_formulas.len(), 0);
     }
 
     #[test]
     fn test_batch_rule_with_13_cols_formula_expansion() {
-        // 完整 13 列场景
+        // 完整 13 列场景，公式在 B12/B13（在目标行范围 1-13 内）
+        // 源 10 行，公式横向填充 10 份
         let text = "(A:M)3:(A:M)12->(B(1:13):C(1:13)),formula(B12=SUM(B15:B~),B13=SUM($C$15:$C$~)):-~;";
         let rules = parse_rules(text).unwrap();
         let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
         assert_eq!(expanded.len(), 13);
 
-        // 第 13 条 (M, col_shift=24): B+24=26=Z, C+24=27=AA → 等下，B+24=2+24=26=Z, C+24=27=AA
-        // B(14行公式) → Z, D→AB
-        let last = &expanded[12];
-        assert_eq!(last.custom_formulas[0].target_cell.col, 26); // Z
-        // 公式中的 B→Z
-        assert!(last.custom_formulas[0].raw_text.contains("SUM(Z15:Z~)"),
-            "Expected Z in formula, got: {}", last.custom_formulas[0].raw_text);
+        // 子规则 11 (L, tgt_row=12): B12 公式横向填充 10 份
+        let r11 = &expanded[11];
+        assert_eq!(r11.custom_formulas.len(), 10);
+        assert_eq!(r11.custom_formulas[0].target_cell.col, 2); // B12
+        assert_eq!(r11.custom_formulas[9].target_cell.col, 20); // T = B(2) + 9*2 = 20
+        assert_eq!(r11.custom_formulas[0].raw_text, "SUM(B15:B~)");
+        assert!(r11.custom_formulas[9].raw_text.contains("SUM(T15:T~)"),
+            "Expected T in formula, got: {}", r11.custom_formulas[9].raw_text);
+
+        // 子规则 12 (M, tgt_row=13): B13 公式横向填充 10 份
+        let r12 = &expanded[12];
+        assert_eq!(r12.custom_formulas.len(), 10);
+        assert_eq!(r12.custom_formulas[0].target_cell.col, 2); // B13
+        assert_eq!(r12.custom_formulas[9].target_cell.col, 20); // T = B(2) + 9*2 = 20，公式引用 U = C(3) + 18 = 21
+        assert_eq!(r12.custom_formulas[0].raw_text, "SUM($C$15:$C$~)");
+        assert!(r12.custom_formulas[9].raw_text.contains("SUM($U$15:$U$~)"),
+            "Expected U in formula, got: {}", r12.custom_formulas[9].raw_text);
+
+        // 子规则 0-10 无匹配公式
+        for i in 0..11 {
+            assert_eq!(expanded[i].custom_formulas.len(), 0, "sub-rule {} should have no formulas", i);
+        }
+    }
+
+    #[test]
+    fn test_batch_rule_formula_horizontal_fill_matches_data_extent() {
+        // 模拟用户场景：公式横向填充应覆盖数据实际分布范围，而非批量列数
+        // (A:C)3:(A:C)5 -> 3列 × 3行源数据(行3,4,5)，目标行1-3
+        // 每列源数据有 3 行 → 横向填充 3 个单元格
+        // merge_width=2 → 列偏移 0, 2, 4 → 覆盖列 2,4,6 (B,D,F)
+        let text = "(A:C)3:(A:C)5->(B(1:3):C(1:3)),formula(B1=COLUMN()/2):-~;";
+        let rules = parse_rules(text).unwrap();
+        let expanded: Vec<ParsedRule> = rules.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        assert_eq!(expanded.len(), 3);
+
+        // 子规则 0 (A, tgt_row=1): B1 匹配 row=1，横向填充 3 份
+        let r0 = &expanded[0];
+        assert_eq!(r0.custom_formulas.len(), 3,
+            "公式应在子规则0中按源数据行数(3)横向填充");
+        // j=0: B1(col=2)
+        assert_eq!(r0.custom_formulas[0].target_cell.col, 2);
+        assert_eq!(r0.custom_formulas[0].target_cell.row, 1);
+        // j=1: D1(col=4)
+        assert_eq!(r0.custom_formulas[1].target_cell.col, 4);
+        assert_eq!(r0.custom_formulas[1].target_cell.row, 1);
+        // j=2: F1(col=6)
+        assert_eq!(r0.custom_formulas[2].target_cell.col, 6);
+        assert_eq!(r0.custom_formulas[2].target_cell.row, 1);
+
+        // 子规则 1,2: 无匹配公式 (公式仅在 row=1，不在 row=2,3)
+        assert_eq!(expanded[1].custom_formulas.len(), 0);
+        assert_eq!(expanded[2].custom_formulas.len(), 0);
+
+        // 关键验证：公式填充到了数据末尾列 F(6)，而非仅到批量列数边界 C(2) 或 D(4)
+        // 旧行为：公式仅填充 3 份(batch列数)，列偏移 0,2,4 → 最后到 F1(col=6)，碰巧和正确结果一致
+        // 但用更大的源行数验证：
+        // (A:C)3:(A:C)12 → 源 10 行，batch 3 列，公式应填充 10 份而非 3 份
+        let text2 = "(A:C)3:(A:C)12->(B(1:3):C(1:3)),formula(B1=COLUMN()/2):-~;";
+        let rules2 = parse_rules(text2).unwrap();
+        let expanded2: Vec<ParsedRule> = rules2.iter().flat_map(|r| expand_batch_rule(r)).collect();
+        assert_eq!(expanded2.len(), 3);
+
+        let r0_2 = &expanded2[0];
+        assert_eq!(r0_2.custom_formulas.len(), 10,
+            "公式应按源数据行数(10)填充，而非批量列数(3)");
+        // 最后一份在 col=2+9*2=20=T1
+        assert_eq!(r0_2.custom_formulas[9].target_cell.col, 20); // T1
+        assert_eq!(r0_2.custom_formulas[9].target_cell.row, 1);
     }
 }
