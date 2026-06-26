@@ -812,7 +812,10 @@ pub fn draw_table_content(
         let top_left = table_top_left;
 
         // 获取painter用于绘制
-        let painter = ui.painter_at(rect);
+        let mut painter = ui.painter_at(rect);
+
+        // 溢出单元格追踪：记录文本内容超出列宽的单元格，供悬停 tooltip 使用
+        let mut overflow_cells: HashSet<(u32, u32)> = HashSet::new();
 
         // 创建交互区域来处理点击事件（使用同一个rect）
         let response = ui.interact(rect, egui::Id::new("table_interaction"), egui::Sense::click_and_drag());
@@ -1332,6 +1335,25 @@ pub fn draw_table_content(
                             };
 
                             let font_id = font_size.map(|size| egui::FontId::proportional(size)).unwrap_or(egui::FontId::default());
+                            // 溢出检测：测量文本宽度与可用列宽对比
+                            let available_w = merged_col_width - 8.0;
+                            let galley = painter.layout_job(
+                                egui::text::LayoutJob::simple(
+                                    cell_content.clone(),
+                                    font_id.clone(),
+                                    font_color,
+                                    f32::INFINITY,
+                                ),
+                            );
+                            if galley.size().x > available_w {
+                                overflow_cells.insert((col, row));
+                            }
+                            // 裁剪到合并单元格边界，隐藏溢出列宽的部分
+                            let old_clip = painter.clip_rect();
+                            painter.set_clip_rect(egui::Rect::from_min_size(
+                                egui::Pos2::new(x, y),
+                                egui::vec2(merged_col_width, merged_row_height),
+                            ));
                             painter.text(
                                 text_pos,
                                 egui_align,
@@ -1339,6 +1361,7 @@ pub fn draw_table_content(
                                 font_id,
                                 font_color,
                             );
+                            painter.set_clip_rect(old_clip);
                         }
                     }
                     // 绘制普通单元格内容
@@ -1358,6 +1381,25 @@ pub fn draw_table_content(
                             };
 
                             let font_id = font_size.map(|size| egui::FontId::proportional(size)).unwrap_or(egui::FontId::default());
+                            // 溢出检测：测量文本宽度与可用列宽对比
+                            let available_w = cell_width - 8.0;
+                            let galley = painter.layout_job(
+                                egui::text::LayoutJob::simple(
+                                    cell_content.clone(),
+                                    font_id.clone(),
+                                    font_color,
+                                    f32::INFINITY,
+                                ),
+                            );
+                            if galley.size().x > available_w {
+                                overflow_cells.insert((col, row));
+                            }
+                            // 裁剪到单元格边界，隐藏溢出列宽的部分
+                            let old_clip = painter.clip_rect();
+                            painter.set_clip_rect(egui::Rect::from_min_size(
+                                egui::Pos2::new(x, y),
+                                egui::vec2(cell_width, cell_height),
+                            ));
                             painter.text(
                                 text_pos,
                                 egui_align,
@@ -1365,6 +1407,7 @@ pub fn draw_table_content(
                                 font_id,
                                 font_color,
                             );
+                            painter.set_clip_rect(old_clip);
                         }
                     }
                 }
@@ -1427,7 +1470,7 @@ pub fn draw_table_content(
         }
 
         // 辅助函数：在指定位置绘制数据单元格（背景+内容）
-        let draw_frozen_cell = |painter: &egui::Painter, col: u32, row: u32, x: f32, y: f32| {
+        let mut draw_frozen_cell = |painter: &mut egui::Painter, col: u32, row: u32, x: f32, y: f32| {
             let cell_width = get_col_width(col);
             let cell_height = get_row_height(row);
 
@@ -1495,7 +1538,26 @@ pub fn draw_table_content(
                                 egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + mw - 4.0, y + mh / 2.0),
                                 egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + mw - 4.0, y + mh - 4.0),
                             };
-                            painter.text(text_pos, egui_align, &display, font_id, font_color);
+                            // 溢出检测 + 裁剪（冻结合并格）
+                            let available_w = mw - 8.0;
+                            let display_str = display.into_owned();
+                            let galley = painter.layout_job(
+                                egui::text::LayoutJob::simple(
+                                    display_str.clone(),
+                                    font_id.clone(),
+                                    font_color,
+                                    f32::INFINITY,
+                                ),
+                            );
+                            if galley.size().x > available_w {
+                                overflow_cells.insert((col, row));
+                            }
+                            let old_clip = painter.clip_rect();
+                            painter.set_clip_rect(egui::Rect::from_min_size(
+                                egui::Pos2::new(x, y), egui::vec2(mw, mh),
+                            ));
+                            painter.text(text_pos, egui_align, &display_str, font_id, font_color);
+                            painter.set_clip_rect(old_clip);
                         }
                     }
                 }
@@ -1532,7 +1594,26 @@ pub fn draw_table_content(
                             egui::Align2::RIGHT_CENTER   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height / 2.0),
                             egui::Align2::RIGHT_BOTTOM   => egui::Pos2::new(x + cell_width - 4.0, y + cell_height - 4.0),
                         };
-                        painter.text(text_pos, egui_align, &display, font_id, font_color);
+                        // 溢出检测 + 裁剪（冻结普通格）
+                        let available_w = cell_width - 8.0;
+                        let display_str = display.into_owned();
+                        let galley = painter.layout_job(
+                            egui::text::LayoutJob::simple(
+                                display_str.clone(),
+                                font_id.clone(),
+                                font_color,
+                                f32::INFINITY,
+                            ),
+                        );
+                        if galley.size().x > available_w {
+                            overflow_cells.insert((col, row));
+                        }
+                        let old_clip = painter.clip_rect();
+                        painter.set_clip_rect(egui::Rect::from_min_size(
+                            egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height),
+                        ));
+                        painter.text(text_pos, egui_align, &display_str, font_id, font_color);
+                        painter.set_clip_rect(old_clip);
                     }
                 }
             }
@@ -1616,14 +1697,14 @@ pub fn draw_table_content(
             for col in 1..=fc {
                 if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
-                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+                draw_frozen_cell(&mut painter, col, row, fixed_x, fixed_y);
             }
             // 非冻结列部分（cols > fc）- scroll-dependent x，限可见范围
             for col in (fc + 1).max(visible_cols_start)..=visible_cols_end.min(sheet.max_col) {
                 if hidden_columns.contains(&col) { continue; }
                 let col_x = tl_x + border_width + col_cumulative_width[col as usize];
                 if col_x >= viewport_rect.max.x { break; }
-                draw_frozen_cell(&painter, col, row, col_x, fixed_y);
+                draw_frozen_cell(&mut painter, col, row, col_x, fixed_y);
             }
         }
 
@@ -1694,7 +1775,7 @@ pub fn draw_table_content(
             for col in 1..=fc {
                 if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
-                draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+                draw_frozen_cell(&mut painter, col, row, fixed_x, fixed_y);
             }
         }
 
@@ -1733,7 +1814,7 @@ pub fn draw_table_content(
             for col in 1..=fc {
                 if hidden_columns.contains(&col) { continue; }
                 let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
-                draw_frozen_cell(&painter, col, row, fixed_x, row_y);
+                draw_frozen_cell(&mut painter, col, row, fixed_x, row_y);
             }
         }
 
@@ -1801,7 +1882,7 @@ pub fn draw_table_content(
                 for col in 1..=fc {
                     if hidden_columns.contains(&col) { continue; }
                     let fixed_x = viewport_rect.min.x + col_cumulative_width[col as usize];
-                    draw_frozen_cell(&painter, col, row, fixed_x, fixed_y);
+                    draw_frozen_cell(&mut painter, col, row, fixed_x, fixed_y);
                 }
             }
         }
@@ -2133,6 +2214,75 @@ pub fn draw_table_content(
                                     text_y += author_h + gap;
                                 }
                                 painter.galley(egui::Pos2::new(bx + pad, text_y), body_galley, egui::Color32::BLACK);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ========== 溢出文本悬停提示：单元格内容超出列宽时完整展示 ==========
+        // 仅当非拖拽、非编辑、非校验错误时显示；若单元格已有批注气泡则不重复弹出
+        if !validation_error_active && editing_cell.is_none() && response.hovered() && !response.dragged() {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let in_frozen_left = pos.x < viewport_rect.min.x + frozen_left_width;
+                let in_frozen_top = pos.y < viewport_rect.min.y + frozen_top_height;
+                let rel_x = if in_frozen_left { pos.x - viewport_rect.min.x } else { pos.x - tl_x };
+                let rel_y = if in_frozen_top { pos.y - viewport_rect.min.y } else { pos.y - tl_y };
+                let col_idx = col_cumulative_width.partition_point(|&w| w <= rel_x);
+                let row_idx = row_cumulative_height.partition_point(|&h| h <= rel_y);
+                if col_idx > 1 && row_idx > 0 {
+                    let c = col_idx as u32 - 1;
+                    let r = row_idx as u32 - 1;
+                    if c > 0 && r > 0 {
+                        // 合并单元格：取左上角（溢出标记挂在左上角）
+                        let (tr, tc) = match sheet.get_merged_range(c, r) {
+                            Some(mr) => (mr.start_row, mr.start_col),
+                            None => (r, c),
+                        };
+                        // 仅在确实溢出且该格无批注时显示（避免与批注气泡重叠）
+                        if overflow_cells.contains(&(tc, tr))
+                            && !sheet.get_cell(tr, tc).map_or(false, |c| c.comment.is_some())
+                        {
+                            if let Some(cell) = sheet.get_cell(tr, tc) {
+                                let full_text = cell_display_text(cell).into_owned();
+                                if !full_text.is_empty() {
+                                    let body_galley = painter.layout_job(
+                                        egui::text::LayoutJob::simple(
+                                            full_text,
+                                            egui::FontId::proportional(13.0),
+                                            egui::Color32::BLACK,
+                                            400.0, // 最大宽度 400px 自动换行
+                                        ),
+                                    );
+                                    let pad = 8.0;
+                                    let box_w = body_galley.size().x + pad * 2.0;
+                                    let box_h = body_galley.size().y + pad * 2.0;
+                                    // 定位：指针右下方；越界则向左/上翻转，夹紧到视口
+                                    let clip = ui.clip_rect();
+                                    let mut bx = pos.x + 14.0;
+                                    let mut by = pos.y + 14.0;
+                                    if bx + box_w > clip.max.x { bx = pos.x - 14.0 - box_w; }
+                                    if by + box_h > clip.max.y { by = pos.y - 14.0 - box_h; }
+                                    let bx = bx.max(clip.min.x);
+                                    let by = by.max(clip.min.y);
+                                    let rect = egui::Rect::from_min_size(
+                                        egui::Pos2::new(bx, by),
+                                        egui::vec2(box_w, box_h),
+                                    );
+                                    // 浅灰底 + 灰色边框（与淡黄批注气泡区分）
+                                    painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(245, 245, 245));
+                                    painter.rect_stroke(
+                                        rect, 3.0,
+                                        egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                    painter.galley(
+                                        egui::Pos2::new(bx + pad, by + pad),
+                                        body_galley,
+                                        egui::Color32::BLACK,
+                                    );
+                                }
                             }
                         }
                     }

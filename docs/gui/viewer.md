@@ -387,9 +387,15 @@ let col = col_cumulative_width.partition_point(|&w| w <= click_x) - 1;
 | 右键单击 | `response.secondary_clicked()` | 打开右键菜单，记录 `target_cell` 与默认插入数（`default_insert_count`） |
 | 拖拽选择 | `drag_started()` / `dragged()` | 锚点扩展到所在合并区；拖动时锚点格与当前格各自展开到合并区边界取并集 → `selected_range` |
 | 校验弹窗在 | `validation_error_active` | 上述点击/右键/拖拽**全部禁用**，强制先处理校验错误 |
+| **悬停溢出单元格** | `response.hovered()` + `overflow_cells` | 若悬停格文本超出列宽且无批注，在指针旁弹出浅灰底 tooltip 完整展示文本内容（最大宽度 400px，自动换行） |
 
 > 合并单元格对齐：拖拽/选中遇到合并区域会"吸附"到整块边界（`expand_to_merge` / `get_merged_range`），
 > 避免选中半个合并块。
+
+> **溢出裁剪与 tooltip**：`draw_table_content` 在内容渲染 pass 中测量每个非空单元格文本宽度，
+> 超出 `cell_width - 8px` 记入 `overflow_cells` 集合；绘制时通过 `painter.set_clip_rect` 裁剪到
+> 单元格边界。悬停检测复用冻结感知坐标系统，与批注气泡共享同一检测块，合并单元格自动解
+> 析到左上角。详见 [`table.md`](widgets/table.md) §2.19。
 
 ### 4.2 键盘交互
 

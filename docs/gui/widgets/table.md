@@ -8,7 +8,7 @@
 
 该模块是整个 GUI 与用户交互的**核心枢纽**，承担：
 
-- **单元格渲染**：值/公式显示、背景色、字体大小/颜色、对齐方式、列/行标题（A,B,C… / 1,2,3…）。
+- **单元格渲染**：值/公式显示、背景色、字体大小/颜色、对齐方式、列/行标题（A,B,C… / 1,2,3…）、**内容溢出裁剪**（超出列宽自动截断）与**悬停 tooltip**（完整展示溢出文本，§2.19）。
 - **合并单元格**：坐标计算（跨越多行多列的宽高累加）与"仅左上角绘制"的去重绘制策略。
 - **冻结窗格（Frozen Panes）**：固定顶部行与左侧列不随滚动移动，通过多层覆盖消除重影。
 - **虚拟渲染（Virtual Rendering）**：仅绘制视口内可见的单元格，支持超大表。
@@ -284,6 +284,43 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 
 **实现位置**：`draw_table_content` 的点击处理分支，位于普通单元格点击的 `if col > 0 && row > 0` 之前，对 `col == 0` 和 `row == 0` 分别做早期返回处理。
 
+### 2.19 内容溢出裁剪与悬停提示
+
+当单元格文本宽度超出列宽时，自动裁剪隐藏溢出部分；鼠标悬停到被裁剪的单元格上时展示完整文本。
+
+#### 溢出检测
+
+在每个文本绘制点，用 `painter.layout_job` 以 `f32::INFINITY` 宽度排版（单行不换行），得到实际文本像素宽度。与可用宽度（`cell_width - 8.0`，8px 为左右 4px 内边距）比较：
+
+- `galley.size().x > available_width` → 文本溢出 → 将 `(col, row)` 记入 `overflow_cells: HashSet<(u32, u32)>`
+- 合并单元格的可用宽度为合并区域宽度（`mw - 8.0`）
+
+#### 内容裁剪
+
+绘制文本前通过 `painter.set_clip_rect(cell_rect)` 将裁剪区域设为单元格矩形边界，绘制后恢复原裁剪区域。egui 的 `set_clip_rect` 需要 `&mut Painter`，因此 `painter` 改为 `let mut`。
+
+覆盖所有 4 个文本绘制点：
+
+| 位置 | 描述 |
+|------|------|
+| 主网格合并格 | 第二遍内容 pass，`is_merged_top_left` 分支 |
+| 主网格普通格 | 第二遍内容 pass，`else` 分支 |
+| 冻结合并格 | `draw_frozen_cell` 闭包，`is_merged_top_left` 分支 |
+| 冻结普通格 | `draw_frozen_cell` 闭包，`else` 分支 |
+
+#### 悬停提示 Tooltip
+
+在渲染结束后、编辑输入框绘制前，新增独立的悬停检测块。触发条件：
+
+- 非校验错误、非编辑态、非拖拽
+- 悬停格（含合并单元格左上角解析）在 `overflow_cells` 中
+- 该格无批注（避免与批注气泡重叠）
+
+Tooltip 样式：
+- 浅灰底色（`#F5F5F5`）+ 灰色边框，与淡黄批注气泡区分
+- 最大宽度 400px，超出自动换行，支持多行文本展示
+- 定位在指针右下方；越界时向左/向上翻转并夹紧到视口内
+
 ### 2.14 性能相关处理汇总
 
 | 技术 | 位置 | 作用 |
@@ -353,7 +390,7 @@ style PASTE_DET fill:#c8e6c9,stroke:#388e3c
 ```mermaid
 flowchart TD
     L0["0. 灰色背景填充整个表格区"] --> L1["1. 第一遍: 非冻结单元格背景"]
-    L1 --> L2["2. 第二遍: 非冻结单元格内容"]
+    L1 --> L2["2. 第二遍: 非冻结单元格内容(含溢出裁剪+检测)"]
     L2 --> L2b["2b. 批注指示器(橙红色三角)"]
     L2b --> L3["3. 冻结覆盖白色填充(消除主网格透出)"]
     L3 --> L3a["3a. 冻结顶部区域(列标题+冻结数据行)"]
@@ -364,8 +401,9 @@ flowchart TD
     L4 --> L5["5. 选中高亮边框"]
     L5 --> L6["6. 选中范围半透明背景"]
     L6 --> L7["7. 填充柄(深灰方块)"]
-    L7 --> L8["8. 批注悬停气泡"]
-    L8 --> L9["9. 编辑输入框 TextEdit(最上层)"]
+    L7 --> L8["8. 批注悬停气泡(淡黄)"]
+    L8 --> L8b["8b. 溢出文本 tooltip(浅灰,无批注格)"]
+    L8b --> L9["9. 编辑输入框 TextEdit(最上层)"]
 
 style L0 fill:#eeeeee,stroke:#9e9e9e
 style L1 fill:#fff9c4,stroke:#f9a825
@@ -410,14 +448,15 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 ├── 拖拽选择 → selected_range
 ├── 绘制: painter.rect_filled / painter.text / painter.rect_stroke
 │   ├── 第一遍背景
-│   ├── 第二遍内容 → alignment_to_egui (gui::alignment)
+│   ├── 第二遍内容(含溢出裁剪: layout_job 测宽 + set_clip_rect 裁剪) → alignment_to_egui
 │   ├── 批注指示器 → draw_comment_indicator
 │   ├── 冻结覆盖初始白色填充(消除重影)
 │   ├── 冻结窗格四步覆盖 → draw_frozen_cell
 │   ├── 冻结分隔线
 │   ├── 选中高亮 / 选中范围
 │   ├── 填充柄渲染 + 拖拽预览 + 双击自动填充(compute_autofill_target)
-│   ├── 批注悬停气泡
+│   ├── 批注悬停气泡(淡黄)
+│   ├── 溢出文本 tooltip(浅灰，无批注格) → overflow_cells 检测 + painter.galley
 │   └── TextEdit 输入框（冻结覆盖之后绘制）
 ├── 实时重算 → formula::evaluate_sheet|evaluate_dependents
 ├── 填充柄: 拖拽(指针→目标格 cell_at) / 双击(compute_autofill_target 推断相邻数据边界) → fill_request
