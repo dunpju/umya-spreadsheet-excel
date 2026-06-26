@@ -1349,11 +1349,12 @@ pub fn draw_table_content(
                                 overflow_cells.insert((col, row));
                             }
                             // 裁剪到合并单元格边界，隐藏溢出列宽的部分
+                            // 必须与旧 clip 取交集，否则滚动时单元格可能渲染到 ScrollArea 之外
                             let old_clip = painter.clip_rect();
-                            painter.set_clip_rect(egui::Rect::from_min_size(
+                            painter.set_clip_rect(old_clip.intersect(egui::Rect::from_min_size(
                                 egui::Pos2::new(x, y),
                                 egui::vec2(merged_col_width, merged_row_height),
-                            ));
+                            )));
                             painter.text(
                                 text_pos,
                                 egui_align,
@@ -1395,11 +1396,12 @@ pub fn draw_table_content(
                                 overflow_cells.insert((col, row));
                             }
                             // 裁剪到单元格边界，隐藏溢出列宽的部分
+                            // 必须与旧 clip 取交集，否则滚动时单元格可能渲染到 ScrollArea 之外
                             let old_clip = painter.clip_rect();
-                            painter.set_clip_rect(egui::Rect::from_min_size(
+                            painter.set_clip_rect(old_clip.intersect(egui::Rect::from_min_size(
                                 egui::Pos2::new(x, y),
                                 egui::vec2(cell_width, cell_height),
-                            ));
+                            )));
                             painter.text(
                                 text_pos,
                                 egui_align,
@@ -1553,9 +1555,9 @@ pub fn draw_table_content(
                                 overflow_cells.insert((col, row));
                             }
                             let old_clip = painter.clip_rect();
-                            painter.set_clip_rect(egui::Rect::from_min_size(
+                            painter.set_clip_rect(old_clip.intersect(egui::Rect::from_min_size(
                                 egui::Pos2::new(x, y), egui::vec2(mw, mh),
-                            ));
+                            )));
                             painter.text(text_pos, egui_align, &display_str, font_id, font_color);
                             painter.set_clip_rect(old_clip);
                         }
@@ -1609,9 +1611,9 @@ pub fn draw_table_content(
                             overflow_cells.insert((col, row));
                         }
                         let old_clip = painter.clip_rect();
-                        painter.set_clip_rect(egui::Rect::from_min_size(
+                        painter.set_clip_rect(old_clip.intersect(egui::Rect::from_min_size(
                             egui::Pos2::new(x, y), egui::vec2(cell_width, cell_height),
-                        ));
+                        )));
                         painter.text(text_pos, egui_align, &display_str, font_id, font_color);
                         painter.set_clip_rect(old_clip);
                     }

@@ -297,7 +297,7 @@ Excel 风格的 Shift+点击扩展选区：按住 Shift 键并点击另一个单
 
 #### 内容裁剪
 
-绘制文本前通过 `painter.set_clip_rect(cell_rect)` 将裁剪区域设为单元格矩形边界，绘制后恢复原裁剪区域。egui 的 `set_clip_rect` 需要 `&mut Painter`，因此 `painter` 改为 `let mut`。
+绘制文本前通过 `painter.set_clip_rect(old_clip.intersect(cell_rect))` 将裁剪区域设为**单元格矩形与旧裁剪区域的交集**，绘制后恢复原裁剪区域。取交集而非直接替换，确保滚动时单元格内容不会渲染到 `ScrollArea` 可见区域之外（覆盖菜单栏、名称框、Sheet 标签栏等组件）。egui 的 `set_clip_rect` 需要 `&mut Painter`，因此 `painter` 改为 `let mut`。
 
 覆盖所有 4 个文本绘制点：
 
@@ -448,7 +448,7 @@ draw_table_content(ui, excel_data, current_sheet, ...)
 ├── 拖拽选择 → selected_range
 ├── 绘制: painter.rect_filled / painter.text / painter.rect_stroke
 │   ├── 第一遍背景
-│   ├── 第二遍内容(含溢出裁剪: layout_job 测宽 + set_clip_rect 裁剪) → alignment_to_egui
+│   ├── 第二遍内容(含溢出裁剪: layout_job 测宽 + set_clip_rect(old_clip.intersect(cell_rect)) 裁剪) → alignment_to_egui
 │   ├── 批注指示器 → draw_comment_indicator
 │   ├── 冻结覆盖初始白色填充(消除重影)
 │   ├── 冻结窗格四步覆盖 → draw_frozen_cell
