@@ -177,6 +177,13 @@ enum UndoAction {
 > `formula_positions`（基于旧值与新值的公式状态差异，逐格调用 `mark_formula` / `unmark_formula`），
 > 确保撤销后公式依赖图与实际数据一致。
 
+> **范围清空的公式图缓存失效**：`ClearCell` 范围清空分支在调用 `evaluate_sheet` 全量重算前，
+> 必须先调用 `invalidate_formula_graph` 失效 L2 缓存（`cached_graph_dirty = true`）。否则
+> `unmark_formula` 仅移除了 `formula_positions` 索引但未置脏缓存，`build_formula_graph` 会命中
+> 缓存的旧公式 AST——被清空格虽 `value`/`formula` 均已 `clear()`，但旧 AST 仍参与拓扑求值并
+> 将计算结果写回 `cell.value`，导致「公式已清空但数值残留」的 bug。此修复同时覆盖 Delete 键
+> 和右键菜单"清空选中范围"两条入口（二者共用同一确认执行链路）。
+
 ### 2.6 `impl ExcelViewer` 方法（加载/保存/撤销）
 
 | 方法 | 作用 |

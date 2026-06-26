@@ -1809,7 +1809,8 @@ impl eframe::App for ExcelViewer {
                                                                 }
                                                             }
                                                         }
-                                                        // 范围清空后触发全表公式重算
+                                                        // 范围清空后触发全表公式重算（先失效缓存，避免旧公式 AST 重新求值写回 cell.value）
+                                                        crate::excel::formula::invalidate_formula_graph(&mut excel_data.sheets[self.current_sheet]);
                                                         crate::excel::formula::evaluate_sheet(&mut excel_data.sheets[self.current_sheet]);
                                                         self.dirty = true;
                                                     }
