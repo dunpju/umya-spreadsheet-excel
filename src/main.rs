@@ -212,7 +212,28 @@ fn format_store_paths() -> String {
 fn main() -> eframe::Result<()> {
     // 初始化 env_logger：默认 info 级别（可用 RUST_LOG 覆盖，如 RUST_LOG=debug）。
     // debug 构建为控制台子系统，日志直接显示在 `cargo run` 的终端；release 为 GUI 子系统，日志默认无去处。
+    // 使用自定义格式将时间戳输出为东8区（UTC+8），替代默认的 UTC Z。
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use std::io::Write;
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() + 8 * 3600)
+                .unwrap_or(0);
+            let (y, m, d) = crate::util::date::days_to_ymd(secs / 86400);
+            let sod = secs % 86400;
+            writeln!(
+                buf,
+                "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+08:00 {} {}] {}",
+                y, m, d,
+                sod / 3600,
+                (sod % 3600) / 60,
+                sod % 60,
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
         .try_init();
 
     // 诊断 CLI 子命令（--uuid / --stores / --license）：仅 `diagnostic` feature 构建编译。

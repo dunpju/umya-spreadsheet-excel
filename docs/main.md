@@ -57,11 +57,32 @@ release 的 GUI 子系统意味着程序**默认没有标准控制台**，因此
 
 ```rust
 let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    .format(|buf, record| {
+        use std::io::Write;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() + 8 * 3600)
+            .unwrap_or(0);
+        let (y, m, d) = crate::util::date::days_to_ymd(secs / 86400);
+        let sod = secs % 86400;
+        writeln!(
+            buf,
+            "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+08:00 {} {}] {}",
+            y, m, d,
+            sod / 3600,
+            (sod % 3600) / 60,
+            sod % 60,
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    })
     .try_init();
 ```
 
 - **门面与实现**：代码用 `log` 门面的宏（`log::info!` / `log::warn!` / `log::error!` / `log::debug!`），`env_logger` 是其实现（`Cargo.toml` 新增 `env_logger = "0.11.8"` + `log = "0.4"`）。
 - **默认级别 info**：`default_filter_or("info")` —— 不设 `RUST_LOG` 时默认输出 info 及以上；设 `RUST_LOG=debug`（或 `=trace`、`my_excel=debug`）可看更细日志。
+- **自定义时间格式（东8区）**：`.format()` 闭包替代 env_logger 默认格式。通过 `SystemTime::now()` + 8 小时偏移（28800 秒）得到东8区 UTC+8 时间，复用 `util::date::days_to_ymd` 换算日期。输出格式为 `[2026-06-26T18:32:58+08:00 INFO module::path] message`，后缀 `+08:00` 替代默认 UTC 的 `Z`。全程不依赖 `chrono` crate。
 - **去往何处**：env_logger 写 stderr。debug 构建为控制台子系统（§2.1），`cargo run` 终端直接可见；release 为 GUI 子系统，stderr 无去处，日志默认不显示（如需 release 可见，后续可加文件 sink 或 `AllocConsole`）。
 - **替换了运行时 `eprintln!`**：`viewer.rs` 中备份失败、打开文件失败两条原 `eprintln!` 已改为 `log::warn!`，统一走日志门面、受 `RUST_LOG` 控制。`fill.rs` 的 `println!` 是 `#[cfg(test)]` 性能基准输出，保留不动。
 
