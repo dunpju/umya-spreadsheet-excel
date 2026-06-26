@@ -159,7 +159,7 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 
 - **选中边框**：2px **绿色** `rect_stroke`（`Color32::from_rgb(0,176,80)`，`StrokeKind::Outside`）覆盖**整段选区**——优先取 `selected_range` 的包围盒，否则退化为 `selected_cell`（单格时展开到所在合并区域）。与 Excel 一致：填充/框选后绿框覆盖整段选区（含目标格），而非仅活动格。冻结区/非冻结区用不同坐标参考系定位。绿框矩形同时存入 `selected_cell_rect` 返回（供数据有效性弹窗定位）。
 - **选中范围内部柔光**（`selected_range`）：半透明蓝色背景（`0,112,192`，α=40）。仅作选区内部提示，外缘边框已统一由绿色选中框绘制（不再单独描边，避免双重边框）。由拖拽选择/填充产生。
-- **填充柄（Fill Handle）**：选区右下角 5×5px 深灰方块（`Color32::from_rgb(80,80,80)`），位置取**整段选区右下角**：`selected_range` 优先，否则 `selected_cell` 并展开到所在合并区域（故水平合并 `D9:E9` 的柄落在末端格 `E9` 右下角，而非锚点 `D9`）。绿框为 2px + `StrokeKind::Outside`（画在选区外侧），柄相对选区矩形 `max` 外移 2px（= 绿框厚度），外缘与绿框外拐角对齐、横跨绿框线（Excel 式"压角"，非紧贴内侧）。独立 `ui.interact`（`Id::new("fill_handle")`，`Sense::click_and_drag()`）+ `on_hover_cursor(CursorIcon::Crosshair)`。拖拽它向相邻区域填充（见 §2.13）。
+- **填充柄（Fill Handle）**：选区右下角 5×5px 深灰方块（`Color32::from_rgb(80,80,80)`），位置取**整段选区右下角**：`selected_range` 优先，否则 `selected_cell` 并展开到所在合并区域（故水平合并 `D9:E9` 的柄落在末端格 `E9` 右下角，而非锚点 `D9`）。柄完全落在选区内部（`sel_rect.max - 5 .. sel_rect.max`），不伸出选区边界——修复前外移 2px 横跨绿框呈 Excel 式"压角"，但导致点击柄下半部时 `cell_at` 落入下一行、将水平拖拽误判为垂直填充（见 [`excel/fill`](../../excel/fill.md) §6.1）。独立 `ui.interact`（`Id::new("fill_handle")`，`Sense::click_and_drag()`）+ `on_hover_cursor(CursorIcon::Crosshair)`。拖拽它向相邻区域填充（见 §2.12）。
 
 ### 2.12 填充柄与填充（Fill Handle）
 

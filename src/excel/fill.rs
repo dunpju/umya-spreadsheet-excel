@@ -227,17 +227,38 @@ pub fn apply_fill(
     );
     let (tcol, trow) = target;
 
-    // 定轴与方向；target 落在源内则无操作
-    let (axis, forward) = if trow > sr1 {
-        (Axis::Vertical, true)
+    // 定轴与方向：按行列偏移量取大者作为填充方向（与 Excel 一致）。
+    // 优先取偏移更大的方向，避免填充柄微小垂直误触（填充柄 2px 伸出选区底部、
+    // 合并单元格场景下 cell_at 落入下一行）将水平拖拽误判为垂直填充。
+    let row_offset = if trow > sr1 {
+        trow - sr1
     } else if trow < sr0 {
-        (Axis::Vertical, false)
-    } else if tcol > sc1 {
-        (Axis::Horizontal, true)
-    } else if tcol < sc0 {
-        (Axis::Horizontal, false)
+        sr0 - trow
     } else {
-        return (Vec::new(), false);
+        0
+    };
+    let col_offset = if tcol > sc1 {
+        tcol - sc1
+    } else if tcol < sc0 {
+        sc0 - tcol
+    } else {
+        0
+    };
+    if row_offset == 0 && col_offset == 0 {
+        return (Vec::new(), false); // target 落在源内则无操作
+    }
+    let (axis, forward) = if row_offset >= col_offset {
+        if trow > sr1 {
+            (Axis::Vertical, true)
+        } else {
+            (Axis::Vertical, false)
+        }
+    } else {
+        if tcol > sc1 {
+            (Axis::Horizontal, true)
+        } else {
+            (Axis::Horizontal, false)
+        }
     };
 
     let mut old_cells: Vec<(u32, u32, Option<CellData>)> = Vec::new();
@@ -451,17 +472,37 @@ pub fn compute_fill_values(
     );
     let (tcol, trow) = target;
 
-    // 定轴与方向；target 落在源内则无操作
-    let (axis, forward) = if trow > sr1 {
-        (Axis::Vertical, true)
+    // 定轴与方向：按行列偏移量取大者作为填充方向（与 Excel 一致）。
+    // 优先取偏移更大的方向，避免填充柄微小垂直误触将水平拖拽误判为垂直填充。
+    let row_offset = if trow > sr1 {
+        trow - sr1
     } else if trow < sr0 {
-        (Axis::Vertical, false)
-    } else if tcol > sc1 {
-        (Axis::Horizontal, true)
-    } else if tcol < sc0 {
-        (Axis::Horizontal, false)
+        sr0 - trow
     } else {
-        return None;
+        0
+    };
+    let col_offset = if tcol > sc1 {
+        tcol - sc1
+    } else if tcol < sc0 {
+        sc0 - tcol
+    } else {
+        0
+    };
+    if row_offset == 0 && col_offset == 0 {
+        return None; // target 落在源内则无操作
+    }
+    let (axis, forward) = if row_offset >= col_offset {
+        if trow > sr1 {
+            (Axis::Vertical, true)
+        } else {
+            (Axis::Vertical, false)
+        }
+    } else {
+        if tcol > sc1 {
+            (Axis::Horizontal, true)
+        } else {
+            (Axis::Horizontal, false)
+        }
     };
 
     let mut has_formula = false;
@@ -1208,6 +1249,203 @@ mod tests {
         let _ = apply_fill(&mut s, (1, 1, 2, 1), (4, 1)); // 拖到 D1（C1:D1 的非左上角）
         assert_eq!(val(&s, 3, 1), "19"); // C1（左上角）= 19
         assert_eq!(val(&s, 4, 1), ""); // D1 不被写入
+    }
+
+    // ========== 报修：合并单元格填充柄越界到非目标行 ==========
+    // 场景：AH–AM 共6列两两合并（AH+AI、AJ+AK、AL+AM），每行独立合并。
+    // 第9行 AH9:AI9=49.19、AJ9:AK9=50.19；选中后向右拖拽填充柄至 AL9:AM9。
+    // Bug：AL11:AM11（第11行的合并单元格）也被错误填充为 51.19。
+    // 列号映射：AH=34, AI=35, AJ=36, AK=37, AL=38, AM=39
+
+    /// 辅助：存入含 raw_number 的数值格（模拟真实数据路径——编辑器存数值时会同时设 raw_number）
+    fn put_num(sheet: &mut SheetData, col: u32, row: u32, value: f64) {
+        let mut c = CellData::default();
+        c.value = format_num(value);
+        c.raw_number = Some(value);
+        sheet.cells.insert((row, col), c);
+    }
+
+    #[test]
+    fn fill_horizontal_merged_no_spill_to_other_rows_via_apply_fill() {
+        // 场景：AH9:AI9=49.19, AJ9:AK9=50.19（每行独立合并），向右拖拽至 AL9:AM9
+        let mut s = empty_sheet();
+        // 第9行合并：AH9:AI9, AJ9:AK9, AL9:AM9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 9, 35)); // AH9:AI9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 9, 37)); // AJ9:AK9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 38, 9, 39)); // AL9:AM9
+        // 第11行独立合并：AL11:AM11（应不被填充影响）
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 38, 11, 39)); // AL11:AM11
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19); // AH9
+        put_num(&mut s, 36, 9, 50.19); // AJ9
+
+        // 源选区 AH9:AK9(34..37)，向右拖拽至 AM9(39)
+        let (old_cells, has_formula) = apply_fill(&mut s, (34, 9, 37, 9), (39, 9));
+
+        // AL9（合并左上角）= 51.19（49.19→50.19→51.19，等差步长1）
+        assert_eq!(val(&s, 38, 9), "51.19", "AL9 应为 51.19");
+        // AM9（合并非左上角）应保持空
+        assert_eq!(val(&s, 39, 9), "", "AM9 不应被写入（合并非左上角）");
+        // AL11 和 AM11 应完全不受影响（它们是第11行的独立合并）
+        assert!(!s.cells.contains_key(&(11, 38)), "AL11 不应被填充");
+        assert!(!s.cells.contains_key(&(11, 39)), "AM11 不应被填充");
+        assert!(!has_formula, "纯数值填充不应标记 has_formula");
+        // old_cells 应只包含 AL9 的旧值（目标只写入一个单元格）
+        assert_eq!(old_cells.len(), 1, "应只覆盖一个目标格 AL9");
+        assert_eq!(old_cells[0].0, 9, "old_cells[0] row");
+        assert_eq!(old_cells[0].1, 38, "old_cells[0] col");
+        assert!(old_cells[0].2.is_none(), "old_cells[0] 原值应为空");
+    }
+
+    #[test]
+    fn fill_horizontal_merged_no_spill_to_other_rows_via_compute_fill_values() {
+        // 与上例相同场景，但走 compute_fill_values（实际运行时表.rs 使用的路径）
+        let mut s = empty_sheet();
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 9, 35)); // AH9:AI9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 9, 37)); // AJ9:AK9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 38, 9, 39)); // AL9:AM9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 38, 11, 39)); // AL11:AM11
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19); // AH9
+        put_num(&mut s, 36, 9, 50.19); // AJ9
+
+        let fv = compute_fill_values(&s, (34, 9, 37, 9), (39, 9));
+        assert!(fv.is_some(), "应产生填充值");
+        let fv = fv.unwrap();
+        assert!(!fv.has_formula);
+
+        // 应只生成一个目标格：AL9(row=9, col=38)
+        assert_eq!(fv.cells.len(), 1, "应只生成一个目标格（AL9），而非 {} 个", fv.cells.len());
+        let (row, col, ref cell) = fv.cells[0];
+        assert_eq!(row, 9, "目标行应为9");
+        assert_eq!(col, 38, "目标列应为38(AL)");
+        assert_eq!(cell.value, "51.19");
+
+        // 其他行不应出现任何目标格
+        let has_row11 = fv.cells.iter().any(|&(r, _, _)| r == 11);
+        assert!(!has_row11, "第11行不应出现任何目标格");
+    }
+
+    // ========== 报修变体：垂直合并（AH–AM 列两两合并，且各列合并跨越多行）==========
+    // 场景：AH9:AI11 合并=49.19，AJ9:AK11 合并=50.19，AL9:AM11 合并（待填充）。
+    // 选中两个合并格后向右拖拽填充柄 → 实际是水平填充，但源选区因合并感知而行车道=[9,10,11]，
+    // lanes 10/11 的 src_pos 全是 merged part 被 skip，仅 lane 9 产生 AL9。
+    // 但因为 AL9:AM11 是单个合并格，写入 AL9 即覆盖整列（包含 row 11），用户感知为"row11 被污染"。
+
+    #[test]
+    fn fill_horizontal_when_source_merges_span_three_rows() {
+        let mut s = empty_sheet();
+        // 列对合并（跨 rows 9-11）
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 11, 35)); // AH9:AI11
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 11, 37)); // AJ9:AK11
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 38, 11, 39)); // AL9:AM11（目标）
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19); // AH9（合并左上角）
+        put_num(&mut s, 36, 9, 50.19); // AJ9（合并左上角）
+
+        // 用户选中两个合并格，selected_range 展开到合并边界 → (34,9,37,11)
+        // 实际传给 apply_fill 的源是 selected_range 归一化后的值
+        let (old_cells, _) = apply_fill(&mut s, (34, 9, 37, 11), (39, 9));
+
+        // AL9（AL9:AM11 的左上角）= 51.19
+        assert_eq!(val(&s, 38, 9), "51.19", "AL9 应为 51.19");
+        // AM9（合并非左上角）不应被独立写入
+        assert_eq!(val(&s, 39, 9), "", "AM9 不应被独立写入");
+        // 关键：row 10/11 不应有独立的 cell 写入（它们属于同一合并，值由 AL9 体现）
+        assert!(!s.cells.contains_key(&(10, 38)), "AL10 不应被独立写入");
+        assert!(!s.cells.contains_key(&(11, 38)), "AL11 不应被独立写入");
+        // 仅一个目标格被写入
+        assert_eq!(old_cells.len(), 1, "只应覆盖 AL9 一个目标格");
+    }
+
+    // ========== 报修核心场景：填充柄拖拽误触垂直填充 ==========
+    // Bug 根因假设：填充柄位于选区右下角（AK9 底部边缘），其 5×5px 方块有 2px 伸出选区外
+    // （即 row 9 → row 10 边界外）。用户拖拽时 click 点落入 row 10，cell_at 返回 trow=10 或 11。
+    // 此时 trow > sr1（9），apply_fill 判为 Vertical 而非 Horizontal，导致向下方多行写入。
+
+    #[test]
+    fn fill_vertical_mistrigger_when_target_row_below_source() {
+        // 源 AH9:AI9=49.19, AJ9:AK9=50.19；每行独立合并（含 row 10/11）
+        let mut s = empty_sheet();
+        // row 9 合并
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 9, 35)); // AH9:AI9
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 9, 37)); // AJ9:AK9
+        // row 10 合并
+        s.merged_cells.push(crate::excel::reader::CellRange::new(10, 34, 10, 35)); // AH10:AI10
+        s.merged_cells.push(crate::excel::reader::CellRange::new(10, 36, 10, 37)); // AJ10:AK10
+        // row 11 合并（报修中提及的 AL11:AM11）
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 38, 11, 39)); // AL11:AM11
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19); // AH9
+        put_num(&mut s, 36, 9, 50.19); // AJ9
+
+        // 模拟拖拽到 row 10, col 38（填充柄延伸 2px 导致 cell_at 误解为行 10）
+        // apply_fill 会判为 Vertical forward
+        let (old_cells, _) = apply_fill(&mut s, (34, 9, 37, 9), (38, 10));
+
+        // row 10 应被填充：lane 34(AH) → AH10 = 49.19+1 = 50.19
+        assert_eq!(val(&s, 34, 10), "50.19", "AH10 应为 50.19（lane=AH, j=0）");
+        // lane 36(AJ) → AJ10 = 50.19+1 = 51.19
+        assert_eq!(val(&s, 36, 10), "51.19", "AJ10 应为 51.19（lane=AJ, j=0）");
+        // row 11 不应被填充（target 仅到 row 10）
+        assert!(!s.cells.contains_key(&(11, 34)), "AH11 不应被填充");
+        assert!(!s.cells.contains_key(&(11, 36)), "AJ11 不应被填充");
+        assert!(!s.cells.contains_key(&(11, 38)), "AL11 不应被填充（target 只到 row 10）");
+        // AL:AM 列的 row 9 不被填充（源不含 AL/AM 列）
+        assert_eq!(val(&s, 38, 9), "", "AL9 不应被填充（垂直填充不含 AL 列）");
+        // old_cells 应包含 AH10 和 AJ10（两个目标格）
+        assert_eq!(old_cells.len(), 2, "应覆盖 AH10 和 AJ10");
+    }
+
+    #[test]
+    fn fill_vertical_mistrigger_target_row_11() {
+        // 同上场景，但拖拽到 row 11, col 39 → 也会充填 row 10（range 10..=11）
+        let mut s = empty_sheet();
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 9, 35));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 9, 37));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(10, 34, 10, 35));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(10, 36, 10, 37));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 34, 11, 35));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 36, 11, 37));
+        s.merged_cells.push(crate::excel::reader::CellRange::new(11, 38, 11, 39)); // AL11:AM11
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19);
+        put_num(&mut s, 36, 9, 50.19);
+
+        // 拖拽到 row 11, col 39（落点即为 AM11，但 apply_fill 因竖向优先判为 Vertical）
+        let (old_cells, _) = apply_fill(&mut s, (34, 9, 37, 9), (39, 11));
+
+        // row 10 被填
+        assert_eq!(val(&s, 34, 10), "50.19", "AH10");
+        assert_eq!(val(&s, 36, 10), "51.19", "AJ10");
+        // row 11 被填
+        assert_eq!(val(&s, 34, 11), "51.19", "AH11 = 49.19+2");
+        assert_eq!(val(&s, 36, 11), "52.19", "AJ11 = 50.19+2");
+        // AL11 不受影响（AL 列不在源 lanes 34..=37 中）
+        assert!(!s.cells.contains_key(&(11, 38)), "AL11 不应被填充（源不含 AL 列）");
+        // 共 4 个目标格：AH10,AJ10,AH11,AJ11
+        assert_eq!(old_cells.len(), 4);
+    }
+
+    /// 验证 compute_fill_values 在垂直合并场景也不产生额外行的目标格
+    #[test]
+    fn compute_fill_values_when_source_merges_span_three_rows() {
+        let mut s = empty_sheet();
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 34, 11, 35)); // AH9:AI11
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 36, 11, 37)); // AJ9:AK11
+        s.merged_cells.push(crate::excel::reader::CellRange::new(9, 38, 11, 39)); // AL9:AM11（目标）
+        s.rebuild_merge_index();
+        put_num(&mut s, 34, 9, 49.19);
+        put_num(&mut s, 36, 9, 50.19);
+
+        let fv = compute_fill_values(&s, (34, 9, 37, 11), (39, 9)).unwrap();
+        assert_eq!(fv.cells.len(), 1, "应只生成一个目标格，实际 {} 个: {:?}", fv.cells.len(), fv.cells.iter().map(|(r,c,_)| format!("({},{})", r, c)).collect::<Vec<_>>());
+        assert_eq!(fv.cells[0].0, 9, "目标行应为 9");
+        assert_eq!(fv.cells[0].1, 38, "目标列应为 38(AL)");
+
+        // 不应出现 row 10/11 的目标格
+        let rows: Vec<u32> = fv.cells.iter().map(|(r, _, _)| *r).collect();
+        assert!(!rows.contains(&10) && !rows.contains(&11), "不应包含 row 10/11，实际行: {:?}", rows);
     }
 
     // ========== 双击自动填充目标推断（compute_autofill_target）==========

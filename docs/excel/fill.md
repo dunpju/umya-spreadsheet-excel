@@ -44,15 +44,17 @@ pub fn apply_fill(
 
 #### 轴向与方向
 
-由 `target` 相对源选区位置判定（优先级：行 > 列）：
+由 `target` 相对源选区位置判定——**按行列偏移量取大者**作为填充方向（与 Excel 一致）：
 
 | target 位置 | 轴 | 方向 | 目标格集合 |
 |-------------|----|----|-----------|
-| `row > src.end_row` | 垂直 | 前（下） | 各列 `end_row+1 ..= target.row` |
-| `row < src.start_row` | 垂直 | 后（上） | 各列 `target.row .. start_row-1` |
-| `col > src.end_col` | 水平 | 前（右） | 各行 `end_col+1 ..= target.col` |
-| `col < src.start_col` | 水平 | 后（左） | 各行 `target.col .. start_col-1` |
-| 落在源内 | — | — | 无操作（返回空） |
+| `row_offset > col_offset` 且 `row > src.end_row` | 垂直 | 前（下） | 各列 `end_row+1 ..= target.row` |
+| `row_offset > col_offset` 且 `row < src.start_row` | 垂直 | 后（上） | 各列 `target.row .. start_row-1` |
+| `col_offset > row_offset` 且 `col > src.end_col` | 水平 | 前（右）| 各行 `end_col+1 ..= target.col` |
+| `col_offset > row_offset` 且 `col < src.start_col` | 水平 | 后（左）| 各行 `target.col .. start_col-1` |
+| 落在源内（`row_offset==0 && col_offset==0`） | — | — | 无操作（返回空） |
+
+> **修复记录（2026-06-26）**：原判定为无条件**行优先**（先判行再判列），导致填充柄右下角 2px 伸出选区落入下一行时，`cell_at` 将水平拖拽误判为垂直填充——仅 1 行偏移即可覆盖大幅水平偏移。改为**偏移量比较**：`row_offset >= col_offset` 才走垂直；否则走水平。此修复与 Excel 填充柄行为一致（Excel 以拖拽主方向为准）。
 
 多列/多行源选区按**车道**独立填充：垂直填充按列、水平填充按行，每条车道各自取源序列扩展。
 
@@ -239,3 +241,51 @@ pub fn shift_formula_relative(formula: &str, col_shift: i32, row_shift: i32) -> 
 2. **虚拟滚动惰性填充**：只填充当前可视区 + 缓冲区，滚动到未填充区域时按需补填（惰性求值）。实现复杂（需脏标记 + 滚动钩子），且导出/重算时需保证全量已填，一般不必要。
 
 > 取舍：分批跨帧填充已实现且改动最小、收益最大、与现有撤销/选区模型兼容最好；`AUTO_FILL_MAX_CELLS` 上限使最坏批次也可控。当前实现已用上限兜底 + 分批跨帧填充，**多数场景无需启用上述进阶方案**。
+
+---
+
+## 6. Bug 记录与修复
+
+### 6.1 填充柄误触垂直填充导致填充范围越界到非目标行（2026-06-26）
+
+#### 报修场景
+
+表格 AH–AM 共 6 列两两合并（AH+AI、AJ+AK、AL+AM），每行独立合并。第 9 行数据：
+- AH9:AI9 合并 = 49.19
+- AJ9:AK9 合并 = 50.19
+
+操作：选中 AH9:AI9 和 AJ9:AK9，从 AK9 右下角填充柄**向右拖拽**至 AL9:AM9（合并单元格）。
+
+预期：仅 AL9:AM9 = 51.19（递增序列 49.19 → 50.19 → 51.19）。
+实际：AL9:AM9 = 51.19 的同时，AL11:AM11（第 11 行合并格）也被错误填充为 51.19，即填充范围意外扩展到了非目标行。
+
+#### 根因分析（两处交互缺陷）
+
+1. **填充柄 UI 定位（`table.rs`）**：填充柄为 5×5px 方块，原置于 `sel_rect.max - 5 + 2`（伸出选区底部 2px，用于压住绿框拐角）。当用户点击柄的下半部时，`cell_at` 将屏幕坐标映射到**下一行**（如 row 10 而非 row 9），导致 `drag_stopped` 获取的目标格 `(tcol, trow)` 行号偏大。
+
+2. **轴向判定无条件行优先（`fill.rs` 旧行为）**：`apply_fill` / `compute_fill_values` 原判定伪代码：
+   ```
+   if trow > sr1 → Vertical
+   else if trow < sr0 → Vertical
+   else if tcol > sc1 → Horizontal
+   ...
+   ```
+   即只要目标行与源行不同，**无条件判为垂直填充**——即使水平偏移远大于行偏移。当步骤 1 的 2px 误触使 `trow` 变为 10/11 时，用户原本的水平拖拽被误判为垂直填充，导致填充向下多行展开。
+
+   结合合并单元格的源选区展开（`expand_to_merge`），若选中涉及的合并跨行或列范围超出用户预期，垂直填充的车道遍历会覆盖 AL/AM 列，最终在非目标行产生写入。
+
+#### 修复方案
+
+| 文件 | 修改 | 说明 |
+|------|------|------|
+| `src/excel/fill.rs` | [`apply_fill`] / [`compute_fill_values`] 轴向判定改为**偏移量比较** | `row_offset = abs(trow - sr1/sr0)`、`col_offset = abs(tcol - sc1/sc0)`；`row_offset >= col_offset` 才走垂直，否则水平。与 Excel 一致（以拖拽主方向为准） |
+| `src/gui/widgets/table.rs` | 填充柄矩形改为完全落在选区内部 | 从 `sel_rect.max - 5 + 2` 改为 `sel_rect.max - 5`，不伸出选区边界，消除 `cell_at` 误判行的根源 |
+
+#### 测试覆盖
+
+- `fill_horizontal_merged_no_spill_to_other_rows_via_apply_fill`：报修场景 apply_fill 路径（每行独立合并，水平填充不污染 row 11）
+- `fill_horizontal_merged_no_spill_to_other_rows_via_compute_fill_values`：同上 compute_fill_values 路径
+- `fill_horizontal_when_source_merges_span_three_rows`：垂直合并场景（源跨 3 行，target 仅影响 row 9）
+- `compute_fill_values_when_source_merges_span_three_rows`：同上预计算路径
+- `fill_vertical_mistrigger_when_target_row_below_source`：垂直误触场景（target 落在 row 10），验证仅填充源列
+- `fill_vertical_mistrigger_target_row_11`：垂直误触场景（target 落在 row 11），验证填充行 10–11 但不污染 AL 列
