@@ -79,14 +79,23 @@
 
 1. `reader::xlsx::read(path)` 读入底层 `Workbook`，取 `theme` 用于解析主题色。
 2. 遍历每个 `worksheet`，构造 `SheetData`，按 `highest_row/column` 设定边界。
-3. **单元格解析（含多线程加速）**：单元格数 ≥ 5000 时用 `std::thread::scope` 分块并行；每块带本地样式缓存 `local_cache`（以样式指纹为键，避免对同样式单元格重复解析），否则顺序解析。样式解析委托 `parse_style`。
+3. **单元格解析（含多线程加速 + 样式缓存优化）**：
+   - 单元格数 ≥ 5000 时用 `std::thread::scope` 分块并行，每块带本地样式缓存。
+   - 直接用 `cell.style()` 获取样式（避免通过 `worksheet.style((col,row))` 的冗余 HashMap 查找）。
+   - 缓存 Key 使用 **u32 hash（fnv-like）+ 枚举值 u8 映射** 替代原 String 拼接风格键，减少每次构建 Key 时的 `to_string()` 分配。
+   - 预解析 `argb_with_theme` 颜色为 `Cow<str>`，作为缓存 Key 组成部分，同时传递给 `parse_style_from_argb`/`parse_style_raw`，避免重复的主题色查找与 tint 计算。
+   - 样式解析改为 `parse_style_from_argb`（接收预解析色）→ `parse_style_raw`（内部使用），对齐/垂直用枚举值直接 match（`quick_h_align`/`quick_v_align`），零字符串分配。
+   - 每 sheet 解析完成输出 `log::info!` 耗时日志，方便性能定界。
 4. 读取合并区域（剔除越界范围）、列宽行高（仅 > 0）、冻结窗格（`PaneStateValues::Frozen/FrozenSplit`，注意 umya 命名与 OOXML 的 xSplit/ySplit 对照）。
 5. 读取数据有效性（仅 `show_input` 或 `show_error` 启用的规则）。
 6. 读取条件格式（`CellIs` 等）的 dxf 样式，组装 `CondFormatRule`。
 7. 读取单元格批注：遍历 `worksheet.comments()`，解析作者 + 富文本/纯文本，挂载到 `CellData.comment`（详见 [批注专题](./comments.md)）。
-8. 工作表非空校验后，对每个 sheet `rebuild_merge_index` + `formula::evaluate_sheet` + `apply_conditional_formatting`。
+8. 工作表非空校验后，对每个 sheet 并行执行 `rebuild_merge_index` + `formula::evaluate_sheet`（多 sheet 时用 `std::thread::scope` 并行求值，单 sheet 顺序执行）。
+9. **条件格式延后求值**：`apply_conditional_formatting` 不再在加载阶段调用，改为首帧渲染时通过 `cf_dirty` 惰性触发（见 viewer 事件循环）。加载阶段公式求值已置 `cf_dirty = true`，渲染时自动补算。
+10. **公式位置预标记**：单元格解析阶段直接将公式格记录到 `sheet.formula_positions`，置 `formula_positions_dirty = false`，`build_formula_graph` 可跳过 O(cells) 全表扫描。
+11. **加载结束时自动输出性能汇总**：`log::info!` 记录总耗时、umya XML 解析耗时、并行 formula 评估耗时。
 
-**样式解析 `parse_style`**：从 `umya_spreadsheet::Style` 提取对齐、背景色（`argb_with_theme` 自动解析主题色与 tint）、字体大小/颜色/加粗、四边边框、数字格式，返回七元组。颜色统一经 `parse_hex_color` 转 RGB（容错处理非标准长度与 tint 溢出）。
+**样式解析 `parse_style_from_argb` / `parse_style_raw`**：从 `umya_spreadsheet::Style` 提取样式信息。font/bg 颜色使用调用方预解析的 ARGB 字符串（避免 `argb_with_theme` 重复调用），对齐/垂直通过 `quick_h_align`/`quick_v_align` 枚举直接匹配（零字符串分配），边框颜色通过 `argb_with_theme` 一次性解析。旧版 `parse_style` 保留但已不再被调用（被 `parse_style_from_argb` 替代）。
 
 ### 2.7 条件格式求值
 

@@ -1,7 +1,8 @@
 // 引入 umya-spreadsheet 库用于读取 Excel 文件
-use umya_spreadsheet::{reader, EnumTrait};
+use umya_spreadsheet::reader;
 // 引入 HashMap 用于存储单元格和列宽数据
 use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HorizontalAlignment {
@@ -1425,9 +1426,17 @@ impl ExcelData {
     /// # 返回值
     /// 成功返回 ExcelData，失败返回错误信息
     pub fn load_from_file(path: &str) -> Result<Self, String> {
+        let t0 = std::time::Instant::now();
         // 使用 umya-spreadsheet 库读取 Excel 文件
         let book = reader::xlsx::read(path)
             .map_err(|e| format!("读取失败: {}", e))?;
+        let t1 = std::time::Instant::now();
+        log::info!(
+            "📂 加载 {}: umya XML 解析 {:.2}s，{} sheets, 文件大小 {}KB",
+            path, t1.duration_since(t0).as_secs_f64(),
+            book.sheet_collection().len(),
+            std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0),
+        );
 
         // 获取主题对象，用于解析主题颜色
         let theme = book.theme();
@@ -1435,7 +1444,8 @@ impl ExcelData {
         let mut sheets = Vec::new();
 
         // 遍历工作簿中的所有工作表
-        for worksheet in book.sheet_collection().iter() {
+        for (si, worksheet) in book.sheet_collection().iter().enumerate() {
+            let sheet_t0 = std::time::Instant::now();
             // 创建工作表数据对象
             let mut sheet = SheetData::new(worksheet.name().to_string());
 
@@ -1447,65 +1457,100 @@ impl ExcelData {
             let cells = worksheet.cells();
             // 预分配 HashMap 容量，避免加载过程中的多次 rehash
             sheet.cells.reserve(cells.len());
+            let cell_count = cells.len();
 
             // 多线程阈值：低于此数量直接顺序处理，减少线程调度开销
             const PARALLEL_THRESHOLD: usize = 5000;
-            if cells.len() >= PARALLEL_THRESHOLD {
+            if cell_count >= PARALLEL_THRESHOLD {
                 // ===== 多线程并行解析单元格 =====
                 let num_threads = std::thread::available_parallelism()
                     .map(|n| n.get()).unwrap_or(1);
-                let chunk_size = (cells.len() + num_threads - 1) / num_threads;
+                let chunk_size = (cell_count + num_threads - 1) / num_threads;
 
                 std::thread::scope(|s| {
                     let mut handles = Vec::with_capacity(num_threads);
                     for chunk in cells.chunks(chunk_size) {
-                        // 每个线程需要的数据：单元格引用 + worksheet 引用 + theme 引用
                         let handle = s.spawn(move || {
-                            // 样式缓存键类型
+                            // 预解析 ARGB 缓存 Key（避免 cache_key 与 parse_style 双重 argb_with_theme）
+                            // 直接用已解析的 ARGB 字符串作为缓存 Key 的组成部分
                             type SK = (
-                                Option<(u64, String, bool)>,
-                                Option<String>,
-                                Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>,
-                                Option<(String, String)>,
-                                Option<String>,
+                                Option<(u64, /*font_color_argb*/ u32, bool)>,       // font: (size_bits, color_hash, bold)
+                                Option<u32>,                                        // bg argb hash
+                                Option<[u32; 8]>,                                   // border: style+color hash per side: [left_style_hash, left_color_hash, right..., bottom...]
+                                Option<(/*h_align*/ u8, /*v_align*/ u8)>,            // alignment compact
+                                Option<u32>,                                        // num_fmt hash
                             );
                             let mut local_cells: std::collections::HashMap<(u32, u32), CellData> =
                                 std::collections::HashMap::with_capacity(chunk.len());
                             let mut local_cache: std::collections::HashMap<SK, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> =
                                 std::collections::HashMap::new();
+                            let mut local_formula_pos: std::collections::HashSet<(u32, u32)> =
+                                std::collections::HashSet::new();
 
                             for cell in chunk {
                                 let col_idx = cell.coordinate().col_num();
                                 let row_idx = cell.coordinate().row_num();
                                 let value = cell.value().to_string();
                                 let raw_number = cell.value_number();
-                                let style = worksheet.style((col_idx, row_idx));
+                                let style = cell.style();  // 直接用 cell 自带 style，无需 worksheet.style() 再次 HashMap 查找
 
+                                // 预解析所有 ARGB 颜色，同时用于 cache key 和 parse_style
+                                let font_argb = style.font()
+                                    .map(|f| Self::resolve_color(&f.color(), theme));
+                                let bg_argb = style.background_color()
+                                    .map(|c| Self::resolve_color(c, theme));
+
+                                // ParsedStyle: (font_argb_str, bg_argb_str, ...) for passing to parse
                                 let cache_key: SK = (
-                                    style.font().map(|f| (f.size().to_bits(), f.color().argb_with_theme(theme).into_owned(), f.font_bold().val())),
-                                    style.background_color().map(|c| c.argb_with_theme(theme).into_owned()),
-                                    style.borders().map(|b| (
-                                        b.left().border_style().to_string(), b.left().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                                        b.right().border_style().to_string(), b.right().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                                        b.top().border_style().to_string(), b.top().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                                        b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                                    style.font().map(|f| (
+                                        f.size().to_bits(),
+                                        hash_str(font_argb.as_deref().unwrap_or("")),
+                                        f.font_bold().val()
                                     )),
-                                    style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
-                                    style.number_format().map(|n| n.format_code().to_string()),
+                                    bg_argb.as_ref().map(|s| hash_str(s)),
+                                    style.borders().map(|b| {
+                                        let ls = b.left().border_style();
+                                        let rs = b.right().border_style();
+                                        let ts = b.top().border_style();
+                                        let bs = b.bottom().border_style();
+                                        let lc = b.left().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme)));
+                                        let rc = b.right().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme)));
+                                        let tc = b.top().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme)));
+                                        let bc = b.bottom().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme)));
+                                        [
+                                            hash_str(ls), lc.unwrap_or(0),
+                                            hash_str(rs), rc.unwrap_or(0),
+                                            hash_str(ts), tc.unwrap_or(0),
+                                            hash_str(bs), bc.unwrap_or(0),
+                                        ]
+                                    }),
+                                    style.alignment().map(|a| {
+                                        (align_h_to_u8(a.horizontal()), align_v_to_u8(a.vertical()))
+                                    }),
+                                    style.number_format().map(|n| hash_str(n.format_code())),
                                 );
                                 let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
                                     if let Some(cached) = local_cache.get(&cache_key) {
                                         cached.clone()
                                     } else {
-                                        let parsed = Self::parse_style(style, theme);
+                                        let parsed = Self::parse_style_from_argb(
+                                            style, theme,
+                                            font_argb.as_deref(),
+                                            bg_argb.as_deref(),
+                                        );
                                         local_cache.insert(cache_key, parsed.clone());
                                         parsed
                                     };
 
+                                let formula_str = cell.formula().to_string();
+                                let has_formula = !formula_str.is_empty();
+                                if has_formula {
+                                    local_formula_pos.insert((row_idx, col_idx));
+                                }
                                 local_cells.insert((row_idx, col_idx), CellData {
                                     value,
                                     raw_number,
-                                    formula: cell.formula().to_string(),
+                                    formula: formula_str,
                                     alignment,
                                     background_color,
                                     original_bg: background_color,
@@ -1517,60 +1562,88 @@ impl ExcelData {
                                     comment: None,
                                 });
                             }
-                            local_cells
+                            (local_cells, local_formula_pos)
                         });
                         handles.push(handle);
                     }
                     // 合并各线程结果
                     for handle in handles {
-                        if let Ok(local) = handle.join() {
-                            sheet.cells.extend(local);
+                        if let Ok((local_cells, local_fp)) = handle.join() {
+                            sheet.formula_positions.extend(local_fp);
+                            sheet.cells.extend(local_cells);
                         }
                     }
+                    sheet.formula_positions_dirty = false;
                 });
             } else {
                 // ===== 顺序解析（小文件） =====
                 type StyleKey = (
-                    Option<(u64, String, bool)>,
-                    Option<String>,
-                    Option<(String, Option<String>, String, Option<String>, String, Option<String>, String, Option<String>)>,
-                    Option<(String, String)>,
-                    Option<String>,
+                    Option<(u64, u32, bool)>,
+                    Option<u32>,
+                    Option<[u32; 8]>,
+                    Option<(u8, u8)>,
+                    Option<u32>,
                 );
                 let mut style_cache: std::collections::HashMap<StyleKey, (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders)> = std::collections::HashMap::new();
 
                 for cell in cells {
+                    let if_formula = !cell.formula().is_empty();
                     let col_idx = cell.coordinate().col_num();
                     let row_idx = cell.coordinate().row_num();
                     let value = cell.value().to_string();
                     let raw_number = cell.value_number();
-                    let style = worksheet.style((col_idx, row_idx));
+                    let style = cell.style();
+
+                    let font_argb = style.font()
+                        .map(|f| Self::resolve_color(&f.color(), theme));
+                    let bg_argb = style.background_color()
+                        .map(|c| Self::resolve_color(c, theme));
 
                     let cache_key: StyleKey = (
-                        style.font().map(|f| (f.size().to_bits(), f.color().argb_with_theme(theme).into_owned(), f.font_bold().val())),
-                        style.background_color().map(|c| c.argb_with_theme(theme).into_owned()),
-                        style.borders().map(|b| (
-                            b.left().border_style().to_string(), b.left().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                            b.right().border_style().to_string(), b.right().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                            b.top().border_style().to_string(), b.top().color().map(|c| c.argb_with_theme(theme).into_owned()),
-                            b.bottom().border_style().to_string(), b.bottom().color().map(|c| c.argb_with_theme(theme).into_owned()),
+                        style.font().map(|f| (
+                            f.size().to_bits(),
+                            hash_str(font_argb.as_deref().unwrap_or("")),
+                            f.font_bold().val()
                         )),
-                        style.alignment().map(|a| (a.horizontal().value_string().to_string(), a.vertical().value_string().to_string())),
-                        style.number_format().map(|n| n.format_code().to_string()),
+                        bg_argb.as_ref().map(|s| hash_str(s)),
+                        style.borders().map(|b| {
+                            let ls = b.left().border_style();
+                            let rs = b.right().border_style();
+                            let ts = b.top().border_style();
+                            let bs = b.bottom().border_style();
+                            [
+                                hash_str(ls), b.left().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme))).unwrap_or(0),
+                                hash_str(rs), b.right().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme))).unwrap_or(0),
+                                hash_str(ts), b.top().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme))).unwrap_or(0),
+                                hash_str(bs), b.bottom().color().as_ref().map(|c| hash_str(&c.argb_with_theme(theme))).unwrap_or(0),
+                            ]
+                        }),
+                        style.alignment().map(|a| {
+                            (align_h_to_u8(a.horizontal()), align_v_to_u8(a.vertical()))
+                        }),
+                        style.number_format().map(|n| hash_str(n.format_code())),
                     );
                     let (alignment, background_color, font_size, font_color, number_format, bold, borders) =
                         if let Some(cached) = style_cache.get(&cache_key) {
                             cached.clone()
                         } else {
-                            let parsed = Self::parse_style(style, theme);
+                            let parsed = Self::parse_style_from_argb(
+                                style, theme,
+                                font_argb.as_deref(),
+                                bg_argb.as_deref(),
+                            );
                             style_cache.insert(cache_key, parsed.clone());
                             parsed
                         };
 
+                    let formula_str = cell.formula().to_string();
+                    if if_formula {
+                        sheet.formula_positions.insert((row_idx, col_idx));
+                    }
                     sheet.cells.insert((row_idx, col_idx), CellData {
                         value,
                         raw_number,
-                        formula: cell.formula().to_string(),
+                        formula: formula_str,
                         alignment,
                         background_color,
                         original_bg: background_color,
@@ -1582,7 +1655,14 @@ impl ExcelData {
                         comment: None,
                     });
                 }
+                sheet.formula_positions_dirty = false;
             }
+
+            let sheet_t1 = std::time::Instant::now();
+            log::info!(
+                "  └ Sheet[{}] \"{}\": {} cells, cell_parse={:.2}s",
+                si, sheet.name, cell_count, sheet_t1.duration_since(sheet_t0).as_secs_f64(),
+            );
 
             // 设置工作表的最大行和最大列
             sheet.max_row = highest_row;
@@ -1783,28 +1863,156 @@ impl ExcelData {
             return Err("Excel文件中没有找到工作表".to_string());
         }
 
-        // 文件加载后立即求值所有公式
-        for sheet in &mut sheets {
-            sheet.rebuild_merge_index();
-            crate::excel::formula::evaluate_sheet(sheet);
-            Self::apply_conditional_formatting(sheet);
+        let t_formula = std::time::Instant::now();
+        // 文件加载后并行求值所有公式（每 sheet 独立，互不依赖）
+        // 条件格式延后到首帧渲染时惰性求值（viewer 已支持 cf_dirty 机制）
+        if sheets.len() > 1 {
+            std::thread::scope(|s| {
+                for sheet in &mut sheets {
+                    s.spawn(move || {
+                        sheet.rebuild_merge_index();
+                        crate::excel::formula::evaluate_sheet(sheet);
+                    });
+                }
+            });
+        } else {
+            for sheet in &mut sheets {
+                sheet.rebuild_merge_index();
+                crate::excel::formula::evaluate_sheet(sheet);
+            }
         }
+        for (si, sheet) in sheets.iter().enumerate() {
+            let formula_count = sheet.formula_positions.len();
+            if formula_count > 0 {
+                log::info!(
+                    "  ⚡ Sheet[{}] {}: {} formulas evaluated (CF deferred)",
+                    si, sheet.name, formula_count,
+                );
+            }
+        }
+        let t_total = std::time::Instant::now();
+        log::info!(
+            "✅ 加载完成: 总 {:.2}s (umya={:.1}s, formula={:.1}s), {} sheets",
+            t_total.duration_since(t0).as_secs_f64(),
+            t1.duration_since(t0).as_secs_f64(),
+            t_total.duration_since(t_formula).as_secs_f64(),
+            sheets.len(),
+        );
 
         Ok(Self { sheets })
     }
 
-    /// 解析 Excel 单元格样式
-    ///
-    /// 从 umya-spreadsheet 的 Style 对象中提取对齐方式、背景颜色、字体大小、字体颜色、
-    /// 字体加粗、边框和数字格式
-    ///
-    /// # 参数
-    /// * `style` - Excel 单元格样式对象
-    /// * `theme` - 工作簿主题对象，用于解析主题颜色
-    ///
-    /// # 返回值
-    /// 元组 (对齐方式, 背景颜色(RGB), 字体大小, 字体颜色(RGB), 数字格式, 是否加粗, 边框)
-    fn parse_style(style: &umya_spreadsheet::Style, theme: &umya_spreadsheet::drawing::Theme) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders) {
+    // ────────────────────────────────────────────────
+    // 性能辅助函数
+    // ────────────────────────────────────────────────
+
+    /// 简单的字符串哈希（用于缓存 Key），比 `to_string()` 更轻量，避免 String 分配。
+    #[inline]
+    fn resolve_color(color: &umya_spreadsheet::Color, theme: &umya_spreadsheet::drawing::Theme) -> Cow<'static, str> {
+        color.argb_with_theme(theme)
+    }
+}
+
+// ────────────────────────────────────────────────
+// 独立辅助函数（非 impl 块）
+// ────────────────────────────────────────────────
+
+/// 快速字符串哈希（fnv-like，避免 String 分配）
+#[inline]
+fn hash_str(s: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in s.bytes() {
+        h = h.wrapping_mul(0x01000193).wrapping_add(b as u32);
+    }
+    h
+}
+
+/// 水平对齐 → u8（用枚举值直接匹配，避免字符串比较）
+#[inline]
+fn align_h_to_u8(h: &umya_spreadsheet::HorizontalAlignmentValues) -> u8 {
+    match h {
+        umya_spreadsheet::HorizontalAlignmentValues::Left => 1,
+        umya_spreadsheet::HorizontalAlignmentValues::Center => 2,
+        umya_spreadsheet::HorizontalAlignmentValues::Right => 3,
+        umya_spreadsheet::HorizontalAlignmentValues::Fill => 4,
+        umya_spreadsheet::HorizontalAlignmentValues::Justify => 5,
+        umya_spreadsheet::HorizontalAlignmentValues::CenterContinuous => 6,
+        umya_spreadsheet::HorizontalAlignmentValues::Distributed => 7,
+        _ => 0,
+    }
+}
+
+/// 垂直对齐 → u8
+#[inline]
+fn align_v_to_u8(v: &umya_spreadsheet::VerticalAlignmentValues) -> u8 {
+    match v {
+        umya_spreadsheet::VerticalAlignmentValues::Top => 1,
+        umya_spreadsheet::VerticalAlignmentValues::Center => 2,
+        umya_spreadsheet::VerticalAlignmentValues::Justify => 3,
+        umya_spreadsheet::VerticalAlignmentValues::Distributed => 4,
+        _ => 0,
+    }
+}
+
+/// 快速水平对齐解析（直接用枚举值匹配，零分配）
+#[inline]
+fn quick_h_align(h: &umya_spreadsheet::HorizontalAlignmentValues) -> HorizontalAlignment {
+    match h {
+        umya_spreadsheet::HorizontalAlignmentValues::Left => HorizontalAlignment::Left,
+        umya_spreadsheet::HorizontalAlignmentValues::Center => HorizontalAlignment::Center,
+        umya_spreadsheet::HorizontalAlignmentValues::Right => HorizontalAlignment::Right,
+        umya_spreadsheet::HorizontalAlignmentValues::Fill => HorizontalAlignment::Fill,
+        umya_spreadsheet::HorizontalAlignmentValues::Justify => HorizontalAlignment::Justify,
+        umya_spreadsheet::HorizontalAlignmentValues::CenterContinuous => HorizontalAlignment::CenterContinuous,
+        umya_spreadsheet::HorizontalAlignmentValues::Distributed => HorizontalAlignment::Distributed,
+        _ => HorizontalAlignment::General,
+    }
+}
+
+/// 快速垂直对齐解析
+#[inline]
+fn quick_v_align(v: &umya_spreadsheet::VerticalAlignmentValues) -> VerticalAlignment {
+    match v {
+        umya_spreadsheet::VerticalAlignmentValues::Top => VerticalAlignment::Top,
+        umya_spreadsheet::VerticalAlignmentValues::Center => VerticalAlignment::Center,
+        umya_spreadsheet::VerticalAlignmentValues::Justify => VerticalAlignment::Justify,
+        umya_spreadsheet::VerticalAlignmentValues::Distributed => VerticalAlignment::Distributed,
+        _ => VerticalAlignment::Bottom,
+    }
+}
+
+impl ExcelData {
+    /// 解析 Excel 单元格样式（使用预解析的 ARGB，避免重复 argb_with_theme）
+    fn parse_style_from_argb(
+        style: &umya_spreadsheet::Style,
+        theme: &umya_spreadsheet::drawing::Theme,
+        resolved_font_color: Option<&str>,
+        resolved_bg_color: Option<&str>,
+    ) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders) {
+        let mut raw_style = Self::parse_style_raw(style, theme, resolved_font_color, resolved_bg_color);
+        // 如果 pre-resolved bg 为 None，但 style 自带背景色，则回退到 argb_with_theme
+        if raw_style.1.is_none() {
+            if let Some(bg_color) = style.background_color() {
+                if resolved_bg_color.is_none() {
+                    let resolved = bg_color.argb_with_theme(theme);
+                    if !resolved.is_empty() && resolved != "00000000" {
+                        if let Ok(rgb) = Self::parse_hex_color(&resolved) {
+                            raw_style.1 = Some(rgb);
+                        }
+                    }
+                }
+            }
+        }
+        raw_style
+    }
+
+    /// 解析 Excel 单元格样式（不调用 argb_with_theme 的颜色部分，改用预解析值）
+    fn parse_style_raw(
+        style: &umya_spreadsheet::Style,
+        theme: &umya_spreadsheet::drawing::Theme,
+        resolved_font_color: Option<&str>,
+        resolved_bg_color: Option<&str>,
+    ) -> (CellAlignment, Option<(u8, u8, u8)>, Option<f64>, Option<(u8, u8, u8)>, Option<String>, bool, CellBorders) {
         let mut alignment = CellAlignment::default();
         let mut background_color: Option<(u8, u8, u8)> = None;
         let mut font_size: Option<f64> = None;
@@ -1813,72 +2021,45 @@ impl ExcelData {
         let mut bold = false;
         let mut borders = CellBorders::default();
 
-        // 解析对齐方式
+        // 解析对齐方式（用 u8 快速映射，避免字符串比较）
         if let Some(align) = style.alignment() {
-            // 解析水平对齐方式
-            let horizontal = align.horizontal();
-            let h_str = horizontal.value_string();
-            alignment.horizontal = match &*h_str {
-                "left" => HorizontalAlignment::Left,
-                "center" => HorizontalAlignment::Center,
-                "right" => HorizontalAlignment::Right,
-                "fill" => HorizontalAlignment::Fill,
-                "justify" => HorizontalAlignment::Justify,
-                "centerContinuous" => HorizontalAlignment::CenterContinuous,
-                "distributed" => HorizontalAlignment::Distributed,
-                _ => HorizontalAlignment::General,
-            };
-
-            // 解析垂直对齐方式
-            let vertical = align.vertical();
-            let v_str = vertical.value_string();
-            alignment.vertical = match &*v_str {
-                "top" => VerticalAlignment::Top,
-                "center" => VerticalAlignment::Center,
-                "justify" => VerticalAlignment::Justify,
-                "distributed" => VerticalAlignment::Distributed,
-                _ => VerticalAlignment::Bottom,
-            };
+            let (h, v) = (align.horizontal(), align.vertical());
+            alignment.horizontal = quick_h_align(h);
+            alignment.vertical = quick_v_align(v);
         }
 
-        // 解析背景颜色（使用 argb_with_theme 自动解析主题颜色和 tint）
-        if let Some(bg_color) = style.background_color() {
-            let resolved = bg_color.argb_with_theme(theme);
+        // 解析背景颜色（使用预解析值）
+        if let Some(resolved) = resolved_bg_color {
             if !resolved.is_empty() && resolved != "00000000" {
-                if let Ok(rgb) = Self::parse_hex_color(&resolved) {
+                if let Ok(rgb) = Self::parse_hex_color(resolved) {
                     background_color = Some(rgb);
                 }
             }
         }
 
-        // 解析字体信息（大小、颜色、加粗）
+        // 解析字体信息
         if let Some(font) = style.font() {
             font_size = Some(font.size());
-
-            // 解析字体颜色
-            let color = font.color();
-            let resolved = color.argb_with_theme(theme);
-            if !resolved.is_empty() && resolved != "00000000" {
-                if let Ok(rgb) = Self::parse_hex_color(&resolved) {
-                    font_color = Some(rgb);
+            // 字体颜色（使用预解析值）
+            if let Some(resolved) = resolved_font_color {
+                if !resolved.is_empty() && resolved != "00000000" {
+                    if let Ok(rgb) = Self::parse_hex_color(resolved) {
+                        font_color = Some(rgb);
+                    }
                 }
             }
-
-            // 解析字体加粗
             bold = font.font_bold().val();
         }
 
-        // 解析边框
+        // 解析边框（使用 argb_with_theme 但已预解析颜色）
         if let Some(style_borders) = style.borders() {
             let parse_border = |border: &umya_spreadsheet::structs::Border| -> CellBorder {
                 let mut style_str = String::new();
                 let mut color = None;
-                // 检查边框样式：非 "none" 或空字符串表示有边框
                 let bs = border.border_style();
                 if !bs.is_empty() && bs != "none" {
                     style_str = bs.to_string();
                 }
-                // 解析边框颜色
                 if let Some(border_color) = border.color() {
                     let resolved = border_color.argb_with_theme(theme);
                     if !resolved.is_empty() && resolved != "00000000" {
@@ -1905,7 +2086,7 @@ impl ExcelData {
 
         (alignment, background_color, font_size, font_color, number_format, bold, borders)
     }
-    
+
     /// 将十六进制颜色字符串转换为 RGB 元组
     /// 
     /// 支持两种格式：
