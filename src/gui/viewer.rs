@@ -1480,22 +1480,29 @@ impl eframe::App for ExcelViewer {
                                         };
                                         let max_row = excel_data.get_sheet(self.current_sheet).map(|s| s.max_row).unwrap_or(row);
                                         let max_col = excel_data.get_sheet(self.current_sheet).map(|s| s.max_col).unwrap_or(col);
+                                        // 解析合并单元格锚点：右键在合并区域内时，以合并区域边界作为选中计算的基准，
+                                        // 避免从非左上角位置开始选中导致遗漏合并单元格的实际起始列/行
+                                        let mr = excel_data.get_sheet(self.current_sheet)
+                                            .and_then(|s| s.get_merged_range(col, row));
+                                        let (anchor_col, anchor_row, anchor_end_col, anchor_end_row) = mr
+                                            .map(|m| (m.start_col, m.start_row, m.end_col, m.end_row))
+                                            .unwrap_or((col, row, col, row));
                                         let (start_col, start_row, end_col, end_row) = match action {
                                             ContextAction::SelectDown => {
-                                                let er = if n == 0 { max_row } else { (row + n).min(max_row) };
-                                                (col, row, col, er)
+                                                let er = if n == 0 { max_row } else { (anchor_end_row + n).min(max_row) };
+                                                (anchor_col, anchor_row, anchor_end_col, er)
                                             }
                                             ContextAction::SelectUp => {
-                                                let sr = if n == 0 { 1 } else { row.saturating_sub(n).max(1) };
-                                                (col, sr, col, row)
+                                                let sr = if n == 0 { 1 } else { anchor_row.saturating_sub(n).max(1) };
+                                                (anchor_col, sr, anchor_end_col, anchor_end_row)
                                             }
                                             ContextAction::SelectRight => {
-                                                let ec = if n == 0 { max_col } else { (col + n).min(max_col) };
-                                                (col, row, ec, row)
+                                                let ec = if n == 0 { max_col } else { (anchor_end_col + n).min(max_col) };
+                                                (anchor_col, anchor_row, ec, anchor_end_row)
                                             }
                                             ContextAction::SelectLeft => {
-                                                let sc = if n == 0 { 1 } else { col.saturating_sub(n).max(1) };
-                                                (sc, row, col, row)
+                                                let sc = if n == 0 { 1 } else { anchor_col.saturating_sub(n).max(1) };
+                                                (sc, anchor_row, anchor_end_col, anchor_end_row)
                                             }
                                             _ => (col, row, col, row),
                                         };
