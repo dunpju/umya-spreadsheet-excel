@@ -1968,11 +1968,7 @@ impl eframe::App for ExcelViewer {
                 // 未加载文件，显示相应状态
                 match &self.load_state {
                     LoadState::Loading => {
-                        // 加载中，显示 spinner
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("正在解析 Excel 样式与公式，请稍候...");
-                        });
+                        // 加载中 - 仅维持 repaint，覆盖层在 if/else 之后统一渲染
                         ctx.request_repaint();
                     }
                     LoadState::Failed(_) => {
@@ -1984,6 +1980,38 @@ impl eframe::App for ExcelViewer {
                         draw_empty_state(ui);
                     }
                 }
+            }
+
+            // ────── 加载覆盖层（初次导入 & 重新导入统一走此处）──────
+            // 放在 if/else 之后渲染，确保 excel_data 为 Some（重新导入）时
+            // 也能遮住旧表格内容，展示统一的居中 spinner。
+            if matches!(self.load_state, LoadState::Loading) {
+                let viewport = ctx.viewport_rect();
+                let screen_center = viewport.center();
+                {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static LOGGED: AtomicBool = AtomicBool::new(false);
+                    if !LOGGED.swap(true, Ordering::Relaxed) {
+                        log::info!(
+                            "Loading 居中指示器: viewport=({:.0},{:.0})-({:.0},{:.0}), center=({:.0},{:.0})",
+                            viewport.left(), viewport.top(),
+                            viewport.right(), viewport.bottom(),
+                            screen_center.x, screen_center.y,
+                        );
+                    }
+                }
+                egui::Area::new(egui::Id::new("loading_centered"))
+                    .fixed_pos(screen_center)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .interactable(false)
+                    .show(&ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("正在解析 Excel 样式与公式，请稍候...").color(egui::Color32::GREEN));
+                        });
+                    });
+                ctx.request_repaint();
             }
         });
 
