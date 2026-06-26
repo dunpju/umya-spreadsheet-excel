@@ -428,13 +428,13 @@ pub fn draw_search_config_dialog(ctx: &egui::Context, sp: &mut SettingsPanelStat
                                 ui.add(
                                     egui::TextEdit::singleline(&mut sp.search_column_input)
                                         .desired_width(f32::INFINITY)
-                                        .hint_text("例如: A1-A13 或 A1,A3"),
+                                        .hint_text("例如: A1-A13 或 A1,A3 或 A(1:+2):A13"),
                                 );
                             });
                             ui.add_space(4.0);
                             ui.colored_label(
                                 egui::Color32::GRAY,
-                                egui::RichText::new("支持范围格式（A1-A13）和离散格式（A1,A3）").size(11.0),
+                                egui::RichText::new("支持范围格式(A1-A13)、离散格式(A1,A3)与步长语法(A(1:+2):A13)，`~`=末尾").size(11.0),
                             );
                         });
                     });
@@ -447,13 +447,13 @@ pub fn draw_search_config_dialog(ctx: &egui::Context, sp: &mut SettingsPanelStat
                                 ui.add(
                                     egui::TextEdit::singleline(&mut sp.search_row_input)
                                         .desired_width(f32::INFINITY)
-                                        .hint_text("例如: A14,B14 或 D14-F14"),
+                                        .hint_text("例如: A14,B14 或 D14-F14 或 (B:+2)14:~14"),
                                 );
                             });
                             ui.add_space(4.0);
                             ui.colored_label(
                                 egui::Color32::GRAY,
-                                egui::RichText::new("支持单元格引用（A14）、范围格式（D14-F14）和离散格式（A14,B14）").size(11.0),
+                                egui::RichText::new("支持单元格引用(A14)、范围(D14-F14)、离散(A14,B14)与步长语法((B:+2)14:~14)，`~`=末尾").size(11.0),
                             );
                         });
                     });

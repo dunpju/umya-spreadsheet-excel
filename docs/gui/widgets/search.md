@@ -9,17 +9,17 @@
 
 `search.rs` 是 Excel 查看器 GUI 层的**搜索/筛选窗口组件**，隶属于 `gui::widgets` 模块。它负责：
 
-- **读取配置驱动搜索范围**：从用户主目录下 `~/.MyExcel/my-excel.yaml` 的 `search.column` 与 `search.row` 两个键，解析出若干单元格引用（支持单格、范围、混合格式），将它们的值作为"可选列"与"行筛选配置项"。
+- **读取配置驱动搜索范围**：从用户主目录下 `~/.MyExcel/my-excel.yaml` 的 `search.column` 与 `search.row` 两个键，解析出若干可选的段（支持单格、普通范围、离散、**步长语法** `(:+N)` 以及 `~` 末尾占位），将它们的值作为"列可选范围"与"行可选范围"。
 - **两类独立的筛选维度**：
-  - **列筛选（Column Filter）**：以某个表头单元格为基准，在其所在行的**右侧所有列**中模糊匹配关键字，**隐藏不匹配的列**。
-  - **行筛选（Row Filter）**：以某个表头单元格为基准，在其所在列的**下方所有行**中匹配关键字，**隐藏不匹配的行**。
-- **多条件 AND/OR 组合**：两类筛选都支持动态增删多条条件，遵循 **MySQL 风格的运算符优先级——AND 优先级高于 OR**。
+  - **列筛选（Column Filter）**：以某组锚点单元格为基准，在其所在行的**右侧所有列**中按运算符匹配关键字，**隐藏不匹配的列**。步长段（纵向步进）覆盖多个锚点行，对各行取 OR。
+  - **行筛选（Row Filter）**：以某组锚点单元格为基准，在其所在列的**下方所有行**中按运算符匹配关键字，**隐藏不匹配的行**。步长段（横向步进）覆盖多个锚点列，对各列取 OR。
+- **多条件 AND/OR 组合**：两类筛选都支持动态增删多条条件（行筛选与列筛选同构），遵循 **MySQL 风格的运算符优先级——AND 优先级高于 OR**。
 - **性能优化**：自适应地在「二分查找 / 多线程并行扫描 / 串行线性扫描」三种路径间选择，并对已排序、跨行/跨列合并单元格做了专门处理。
 - **非模态窗口**：`draw_search_window` 绘制一个可折叠、可关闭、独立于主窗口操作的浮层。
 
 依赖关系上，它只向上暴露：
-- 结构体：`SearchColumnOption`、`RowFilterState`、`ColumnFilter`、`FilterLogic`、`SearchWindowState`；
-- 公开函数：`load_column_options`、`load_row_filter_configs`、`execute_multi_column_search`、`execute_row_search`、`draw_search_window`，以及配置解析工具 `parse_search_range`。
+- 结构体：`RangeOption`、`ColumnFilter`、`RowFilterCondition`、`FilterLogic`、`CompareOp`、`SearchWindowState`；
+- 公开函数：`load_column_options`、`load_row_options`、`execute_multi_column_search`、`execute_row_search`、`draw_search_window`。
 
 > 注：`execute_search`、`search_sorted`、`execute_column_filter` 等被标注 `#[allow(dead_code)]`，是**早期单条件实现/历史保留**，当前 UI 统一走 `execute_multi_column_search` + `execute_row_search`。
 
@@ -38,19 +38,23 @@
 
 ### 2.2 配置项结构
 
-**`SearchColumnOption`** —— 列下拉框的一个选项（`search.column` 解析结果）：
-- `title: String`：显示文本（单元格的值，如 "序号"）。
-- `cell_ref: String`：坐标字符串，如 `"A1"`。
-- `col: u32` / `row: u32`：1-based 列号、行号。
+**`RangeOption`** —— 列筛选 / 行筛选共用的一个可选范围（`search.column` / `search.row` 每个逗号段对应一个选项）：
+- `title: String`：显示文本（首个锚点单元格的值，如 "序号"、"入库"）。
+- `cell_ref: String`：首个锚点坐标字符串，如 `"A1"`、`"B14"`。
+- `cells: Vec<(u32, u32)>`：展开后的**全部**锚点单元格 (col, row)，1-based。普通范围长度为 1；步长语法范围含按步长展开的全部锚点。
+- `is_step: bool`：是否步长语法范围（决定 `display()` 是否追加 `(expr)`）。
+- `expr: String`：原始段表达式文本（步长项显示用，如 `"(B:+2)14"`）。
+- `display() -> String`：`is_step` 时返回 `` `值(expr)` ``（如 `入库((B:+2)14)`）；否则返回 `` `值 (cell_ref)` ``（如 `入库 (A14)`）。
+- `first_col() -> u32` / `first_row() -> u32`：首个锚点的列号 / 行号（便捷访问器）。
 
-**`RowFilterState`** —— 行筛选项（`search.row` 解析结果，每个单元格一项）：
-- `title` / `cell_ref` / `col` / `row`：同上；**搜索从此行 `+1` 开始向下**。
+**`RowFilterCondition`** —— 动态行筛选条件（与 `ColumnFilter` 同构）：
+- `range_index: usize`：选中项在 `row_options` 中的下标。
 - `keyword: String`：用户输入的关键字。
-- `logic: FilterLogic`：**与下一条筛选项**的组合逻辑（最后一条无意义）。
-- `op: CompareOp`：比较运算符（默认 `包含`），决定值与关键字的匹配方式。
+- `logic: FilterLogic`：**与下一条条件**的组合逻辑（最后一条无意义）。
+- `op: CompareOp`：比较运算符（默认 `包含`）。
 - `is_active()`：关键字 trim 后非空即激活。
 
-**`ColumnFilter`** —— 动态列筛选条件：
+**`ColumnFilter`** —— 动态列筛选条件（现有，不变）：
 - `column_index: usize`：选中项在 `column_options` 中的下标。
 - `filter_value: String`：筛选关键字。
 - `logic: FilterLogic`：与下一条条件的组合逻辑。
@@ -78,7 +82,7 @@ pub enum CompareOp {
 ```
 - 提供 `Default::default() → Contains`、`label()` 返回下拉文案（`包含/不包含/=/!=/>/</>=/<=`）、常量数组 `ALL`（下拉渲染顺序）。
 - **字符串类**（`Contains`/`NotContains`）为大小写不敏感子串；**精确类**（`Equal`/`NotEqual`）忽略大小写比较；**数值类**（`>`/`<`/`>=`/`<=`）优先按 `f64` 比较，任一端不可解析为数值时**降级为字符串字典序比较**。
-- 下拉框宽度固定 `60.0`，插入位置：列筛选行在「列下拉框」与「输入框」之间，行筛选项在「标题标签」与「输入框」之间。
+- 下拉框宽度固定 `60.0`，插入位置：列筛选行 / 行筛选行的「范围 ComboBox」与「关键字输入框」之间。
 
 ### 2.3 状态聚合 `SearchWindowState`
 
@@ -87,12 +91,12 @@ pub enum CompareOp {
 | 分组 | 字段 | 作用 |
 |------|------|------|
 | 窗口控制 | `visible`、`collapsed` | 窗口可见性 / 折叠状态（默认展开） |
-| 下拉框数据 | `column_options`、`selected_index`、`options_loaded` | 可选列、当前选中索引、是否已加载（避免每帧重解析） |
+| 下拉框数据 | `column_options: Vec<RangeOption>`、`row_options: Vec<RangeOption>`、`selected_index`、`options_loaded` | 列/行可选范围、当前选中索引、是否已加载（避免每帧重解析） |
 | 搜索输入/状态 | `search_keyword`、`is_searching`、`matched_count`、`total_searched`、`use_binary_search`、`debug_info` | 列搜索关键字、是否生效、匹配/总数、是否走了二分、诊断文本 |
-| 行筛选 | `row_filters`、`is_row_searching`、`row_matched_count`、`row_total_searched`、`row_debug_info` | 行筛选配置与结果 |
-| 多条件列筛选 | `column_filters`、`filter_logic`（`#[allow(dead_code)]` 兼容保留） | 动态列条件列表 |
+| 行筛选 | `row_filters: Vec<RowFilterCondition>`、`is_row_searching`、`row_matched_count`、`row_total_searched`、`row_debug_info` | 行筛选动态条件（与列筛选同构，可增删） |
+| 多条件列筛选 | `column_filters: Vec<ColumnFilter>`、`filter_logic`（`#[allow(dead_code)]` 兼容保留） | 动态列条件列表 |
 
-`Default` 初始化：`visible=false`、`collapsed=false`，并预置一条空的 `ColumnFilter{column_index:0, filter_value:"", logic:And, op:Contains}`。
+`Default` 初始化：`visible=false`、`collapsed=false`，并预置一条空的 `ColumnFilter{column_index:0, filter_value:"", logic:And, op:Contains}`。`row_filters` 在首次加载 `row_options` 非空时初始化一条 `RowFilterCondition{range_index:0, keyword:"", logic:And, op:Contains}`。
 
 ---
 
@@ -103,23 +107,29 @@ pub enum CompareOp {
 **`parse_cell_ref(s) -> Option<(col,row)>`**
 将 `"A1"` 转为 `(1,1)`：取前导字母段做 26 进制累加（`A=1…Z=26, AA=27`），取后续数字段解析行号；`col==0||row==0` 视为非法。
 
-**`parse_one_segment(s) -> Vec<(col,row)>`**
-解析**单段**：
-- 若含 `-` 且**其后的首字符是字母** → 判定为范围：
-  - 同列不同行（`A1-A13`）→ 展开为同列的行区间；
-  - 同行不同列（`A1-C1`）→ 展开为同行的列区间；
-  - 自动按 `lo..=hi` 归一化方向。
-- 否则 → 按单格 `parse_cell_ref` 返回。
+**`parse_cell_ref_bound(s, max_col, max_row) -> Option<(col,row)>`**
+扩展 `parse_cell_ref`，支持 `~` 末尾占位（与 `alert_notify.rs` / `reader.rs` 的 `resolve_dynamic_range` 约定一致）：
+- `"~14"`（`~` 在列位）→ `(max_col, 14)`
+- `"A~"`（`~` 在行位）→ `(1, max_row)`
+- `"~"` → `(max_col, max_row)`
+- 无 `~` 时等价于 `parse_cell_ref`。
 
-> "其后首字符是字母"这一判定，确保像 `A1-A13`（范围）与纯字母坐标的语义区分。
+**`parse_search_segments(input, max_col, max_row) -> Vec<RangeSegment>`**（总入口）
+按 `,` 分段，每段产出若干 `RangeSegment{cells, expr, is_step}`：
+- **步长语法段**（含 `(`...`:+N`...`)`）：`parse_step_segment` 解析 → 产出 **1 个**分组段（`is_step=true`，`cells` 含按步长展开的全部锚点）。
+- **普通段**（单格 / `-` 范围）：`parse_one_segment_resolved` 解析（含 `~`）→ 按 **每个单元格一个段** 扁平产出（`is_step=false`）。
 
-**`parse_search_range(input) -> Vec<(col,row)>`**
-**总入口**：含逗号则逐段 `parse_one_segment` 后扁平化；否则整段解析。支持 `"A1-A13"`、`"A1,A3,B5"`、`"A1-A13,A15"` 等混合格式。
+**`parse_step_segment(seg, max_col, max_row) -> Option<RangeSegment>`**
+由 `(:+N)` 位置决定步进方向：
+- **纵（步进行）**：`字母(起始行:+步长)[:终止单元格]`，如 `A(1:+2):A13`、`A(1:+2)`（无 `:end` 默认至 `max_row`）。
+- **横（进列）**：`(起始列:+步长)行[:终止单元格]`，如 `(B:+2)14:~14`、`(B:+2)14`（无 `:end` 默认至 `max_col`）。
+- `step==0` 视为非法返回 `None`。
 
-`load_column_options` / `load_row_filter_configs` 复用该入口：读 `search.column` / `search.row` → 解析单元格 → 用 `cell_search_value` 取显示值组装选项。配置文件不存在或键为空则返回空 `Vec`。
+**`read_search_config(key) -> String`** / **`build_range_options(sheet, range_str) -> Vec<RangeOption>`**
+共享辅助：从 yaml 读 `search.column`/`search.row` → `parse_search_segments` → 每个段组装 `RangeOption`（`title` 取首个锚点单元格值，`expr` 存原始段文本）。
 
 **`cell_search_value(cell)` —— 搜索用显示值**
-与表格渲染保持一致：若 `number_format` 是日期格式且 `value` 可解析为 `f64` 序列号，返回 `format_date` 结果（如 `"2028/7/14"`）；否则返回 `value` 原值。这保证搜索体验与用户所见一致。
+与表格渲染保持一致：若 `number_format` 是日期格式且 `value` 可解析为 `f64` 序列号，返回 `format_date` 结果（如 `"2028/7/14"`）；否则返回 `value` 原值。
 
 ### 3.2 关键字解析（行筛选）`parse_row_keywords`
 
@@ -136,42 +146,37 @@ pub enum CompareOp {
 
 1. **收集激活条件** `active = column_filters.filter(is_active)`，为空则直接返回。
 2. **向后兼容**：把第一条条件的 `column_index` / `filter_value` 同步到 `state.selected_index` / `state.search_keyword`。
-3. **逐条计算匹配列集合**（调用 `compute_column_matches`，传入 `f.op`，见 §5），同时累加 `max_total` 与 `any_binary`。`compute_column_matches` 内部仅当「数据已排序 **且** `op==Contains`」时启用二分查找；其他运算符走线性 `compare_value` 比较。
-4. **AND 优先于 OR 的分组组合**：维护 `current_and_group: Option<HashSet<u32>>` 与 `or_groups: Vec<HashSet<u32>>`：
-   - 条件 `i` 的**前驱运算符** = `active[i-1].logic`（首条无前驱，按 AND 组起始）；
-   - 前驱为 **AND** → 与当前组取**交集**（`intersection`，缩小范围）；
-   - 前驱为 **OR** → 关闭当前 AND 组推入 `or_groups`，以本条为新组起点。
-   - 循环结束把最后一个 AND 组也推入。
-5. **组间并集**：`visible = or_groups` 的 `extend` 合并。
-6. **写回隐藏集合**：`hidden_columns.clear()`，对 `1..=max_col` 中不在 `visible` 的列 `insert`；再确保所有激活条件的目标列自身不被隐藏（`hidden_columns.remove(opt.col)`）。
-7. **更新状态与诊断**：`total_searched/max_total`、`matched_count/visible.len()`、`use_binary_search/any_binary`、`is_searching=true`，并拼装 `debug_info`。
+3. **逐条计算匹配列集合**（调用 `compute_column_matches(sheet, opt, …)`，传 `&RangeOption`，见 §5）：
+   - **单锚点**（普通段）：收集该行右侧列值，已排序且 `op==Contains` 时二分；
+   - **多锚点**（纵向步长段）：线性扫描，任一锚点行命中即该列可见（OR）。
+   同时累加 `max_total` 与 `any_binary`。
+4. **AND 优先于 OR 的分组组合**：维护 `current_and_group` 与 `or_groups`（与旧实现一致）。
+5. **组间并集**、**写回隐藏集合**、**更新状态与诊断**（同旧流程）。
 
 > 示例：`C1 OR C2 AND C3 AND C4 OR C5` → 分组 `[C1] [C2∩C3∩C4] [C5]` → 结果 `C1 ∪ (C2∩C3∩C4) ∪ C5`。
 
-单条件旧实现 `execute_search`/`search_sorted`（`#[allow(dead_code)]`）逻辑同构，区别在于直接写入 `hidden_columns` 且合并了对齐走 `expand_hidden_for_merged_cells`。
+单条件旧实现 `execute_search`（`#[allow(dead_code)]`）仅改用 `RangeOption` 访问器，逻辑不变。
 
-### 3.4 行筛选流程（多条件 + 自适应路径）
+### 3.4 行筛选流程（多条件 + 自适应路径，含 cond_match 预计算）
 
 入口 `execute_row_search(state, sheet, hidden_rows)`：
 
-1. `hidden_rows.clear()`；空配置 / 无激活项则写诊断后返回。
-2. 记 `start_row = active_filters[0].row`、`max_row`；`row_total_searched = max_row - start_row`；无数据行则返回。
-3. **解析所有筛选器关键字**为 owned 的 `ParsedFilter{ col, keywords, is_range, op }`（线程安全）。
-4. **运算符序列** `logic_seq`（即各 `active[i].logic`），并预先求 `has_or = logic_seq[..len-1]` 中是否存在 `Or`（最后一条 logic 不参与运算）。
-5. **P1 预收集首列** `first_col_data`，检测是否单调非递减（`is_sorted`）。
+1. `hidden_rows.clear()`；空 `row_options` / 无激活项则写诊断后返回。
+2. `start_row` 取首个激活条件所选范围的首个锚点行号；`row_count = max_row - start_row`。
+3. **ParsedFilter** 改为 `{ cols: Vec<u32>, keywords, is_range, op }`——`cols` 为该条件锚点列的**去重升序**集合（步长段覆盖多列，匹配时取 OR）。
+4. **cond_match 预计算**：`cond_match[fi][idx] = parsed[fi].cols.iter().any(|c| match_filter_value(cell(row,c), kw, is_range, op))`——多列 OR 在此一次性收敛为单 bool。预计算后并行/串行热循环 **不再 get_cell**，且统一多列处理。
+5. 运算符序列 `logic_seq` / `has_or`（同上）。
 6. **路径选择**：
 
    | 条件 | 路径 | `search_mode` |
    |------|------|---------------|
-   | `!has_or && is_sorted && 首列(范围\|包含)` | **二分查找**（P0）：`find_rows_in_sorted` 在首列取候选行；多筛选器时对候选行验证其余列 | `"二分"` |
-   | `row_count > PARALLEL_ROW_THRESHOLD (1000)` | **多线程并行线性扫描**（P2）：`std::thread::scope` 分块 | `"并行"` |
-   | 否则 | **串行线性扫描** | `"串行"` |
+   | `!has_or && 首条件单列 && 已排序 && (范围\|包含)` | **二分**（P0）：首列 `find_rows_in_sorted` 取候选行，其余条件用 `cond_match` 校验 | `"二分"` |
+   | `row_count > PARALLEL_ROW_THRESHOLD (1000)` | **并行**（P2）：`std::thread::scope` 分块，直接读 `cond_match` | `"并行"` |
+   | 否则 | **串行线性**，直接读 `cond_match` | `"串行"` |
 
-   二分路径仅适用于**纯 AND、首列已排序、且首列运算符为「范围」或「包含」**（`find_rows_in_sorted` 仅支持这两种语义）——OR 语义或其他运算符（`=/!=/>/<` 等）下首列未必匹配却仍可能命中，故回退线性扫描。多筛选器时二分先缩小候选集，再对每个候选行用 `match_filter_value`（携带各自 `op`）验证其余列（按需 `get_cell`，已被候选集大幅缩小）。
-
-7. **跨行合并对齐**：对每个 `ParsedFilter.col` 调用 `expand_hidden_rows_for_merged_cells`。
-8. **保证配置行可见**：`hidden_rows.remove(&f.row)`。
-9. **状态与诊断**：`row_matched_count = total - hidden`、`is_row_searching=true`、拼装含 `search_mode` 与各列标签的 `row_debug_info`。
+   二分路径追加门槛 `parsed[0].cols.len()==1`（首条件须单列），多列时必走线性/并行。
+7. **跨行合并对齐**：对每个条件**每个锚点列**调用 `expand_hidden_rows_for_merged_cells`。
+8. **配置行可见**：对每个激活条件的每个锚点 `hidden_rows.remove(&r)`。
 
 ---
 
@@ -179,42 +184,30 @@ pub enum CompareOp {
 
 `hidden_rows` 是搜索结果的全局隐藏行集合，写入最终结果；`local_hidden` 仅存在于**并行路径**的每个工作线程内部。
 
-### 4.1 `local_hidden` 的填充（并行路径）
+### 4.1 `cond_match` 预计算与并行/串行路径
 
-并行扫描的关键片段（`search.rs:1397-1422`）：
+回退扫描前统一预计算 `cond_match: Vec<Vec<bool>>`（条件 × 数据行），每条条件调用 `columns.iter().any(|c| match_filter_value(cell(row,c),kw,is_range,op))`，多列 OR 在此一次性收敛为单 bool。**并行/串行热循环直接读 `cond_match`，不再 get_cell**，且统一多列处理。
+
+并行扫描的关键片段（合并前 `cond_match` 后简化）：
 
 ```rust
 let mut local_hidden = HashSet::new();
 for idx in start_idx..end_idx {
-    let row = all_col_data_ref[0][idx].0;          // 行号取自第 0 列预收集值
-    let hide = if use_or {                          // use_or == has_or
-        // 多条件 AND/OR：逐条件求值，再按运算符整体求值
-        let matches: Vec<bool> = parsed_ref.iter().enumerate()
-            .map(|(fi, pf)| match_filter_value(
-                &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range, pf.op))
-            .collect();
-        !row_matches_expr(&matches, logic_seq_ref) // 不满足表达式 → 隐藏
+    let row = start_row + 1 + idx as u32;
+    let hide = if use_or {
+        let matches: Vec<bool> = cond_match_ref.iter().map(|cm| cm[idx]).collect();
+        !row_matches_expr(&matches, logic_seq_ref)
     } else {
-        // 纯 AND：任一条件不匹配即隐藏
-        !parsed_ref.iter().enumerate().all(|(fi, pf)| match_filter_value(
-            &all_col_data_ref[fi][idx].1, &pf.keywords, pf.is_range, pf.op))
+        !cond_match_ref.iter().all(|cm| cm[idx])
     };
     if hide { local_hidden.insert(row); }
 }
-local_hidden  // 作为线程返回值
+local_hidden
 ```
 
-- 每个 chunk 线程只负责自己的行区间 `[start_idx, end_idx)`，结果放进**线程私有** `local_hidden`，无锁无竞争。
-- 线程 `join` 后，主线程 `hidden_rows.extend(set)` 合并各线程结果。
+### 4.2 线程间共享
 
-### 4.2 与 `use_or`、`logic_seq_ref` 的关联
-
-并行闭包显式捕获了三个共享引用（`&all_col_data`、`&parsed`、`&logic_seq`）和一个拷贝 `use_or = has_or`：
-
-- **`use_or`（=`has_or`）**：决定**分支策略**。无 OR 时走 `all(...)` 短路（更快）；有 OR 时必须逐条件求值成 `Vec<bool>` 再交给 `row_matches_expr` 解析运算符优先级——因为 OR 改变了"全部匹配才可见"的前提。
-- **`logic_seq_ref`（=`&logic_seq`）**：仅在 `use_or` 分支被 `row_matches_expr` 消费，用于还原 AND/OR 的分组优先级（见 §5.3）。
-- **`all_col_data_ref`**：P1 预收集的所有列值，按 `[筛选器下标 fi][行下标 idx]` 取值，避免循环内重复 `HashMap` 查找与重复日期格式化。
-- **`parsed_ref`**：各筛选器的 `col/keywords/is_range`。
+并行闭包显式捕获 `cond_match_ref: &Vec<Vec<bool>>`（只读，无锁）与 `logic_seq_ref: &[FilterLogic]`，以及拷贝 `use_or = has_or`。每个 chunk 线程产出私有 `local_hidden`，`join` 后由主线程 `hidden_rows.extend` 合并。
 
 ### 4.3 合并单元格对齐 `expand_hidden_rows_for_merged_cells`
 
@@ -304,38 +297,38 @@ fn compare_value(value, keyword, op: CompareOp) -> bool {
 ### 5.4 `parsed_ref` / `parsed` 的构建与使用
 
 `parsed: Vec<ParsedFilter>` 在 `execute_row_search` 内构建：
-- 从 `active_filters` 映射：`parse_row_keywords(&f.keyword)` → `(keywords, is_range)`，连同 `f.col` 打包。
-- **owned 数据**（`String`/`Vec`），可安全地被 `&parsed`（`parsed_ref`）跨线程借用，无需 `Arc`。
-- 消费点：
-  - 二分路径：`find_rows_in_sorted(&first_col_data, &parsed[0].keywords, parsed[0].is_range)`，再对候选行用 `parsed[1..].iter().all(|pf| match_filter_value(&value, &pf.keywords, pf.is_range, pf.op))` 验证（候选集已被二分缩小，按需 `get_cell`）；
-  - 串行/并行路径：每行每条件取 `all_col_data[fi][idx].1`，配合 `parsed[fi].{keywords,is_range,op}` 调 `match_filter_value`。
+- 从 `active_filters` 映射：`parse_row_keywords(&f.keyword)` → `(keywords, is_range)`，连同 `state.row_options[f.range_index].cells` 去重列集合打包为 `cols`。
+- **owned 数据**（`Vec<u32>` / `Vec<String>`），可安全地跨线程借用。
+- 消费点：`cond_match` 预计算（每个条件对其 `cols` 取 OR，每个数据行一个 bool）；二分路径（首条件须 `cols.len()==1` 时可用）。
 
 ### 5.5 调用链总览
 
 ```
 draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
  │
- ├─ load_column_options ──► parse_search_range ──► parse_one_segment ──► parse_cell_ref
+ ├─ load_column_options ──► build_range_options ──► parse_search_segments
+ │                       │                           ├► parse_step_segment  (步长: `(:+N)`)
+ │                       │                           └► parse_one_segment_resolved (普通 + `~`)
  │                       └► cell_search_value
- ├─ load_row_filter_configs（同上解析链）
+ ├─ load_row_options（同上解析链）
  │
- ├─【列筛选有输入】execute_multi_column_search ──► compute_column_matches(op)
- │                                                  ├► find_sorted_column_matches（已排序 && op==Contains）
- │                                                  └► 线性 compare_value（其他 op / 未排序）
+ ├─【列筛选有输入】execute_multi_column_search ──► compute_column_matches(option: &RangeOption, op)
+ │                                                  ├► 单锚点: find_sorted_column_matches（已排序&&Contains）
+ │                                                  └► 多锚点: 线性 OR 各锚点行
  │                                                  写入 hidden_columns
  │
  ├─【行筛选有输入】execute_row_search
- │   ├─ parse_row_keywords → parsed (ParsedFilter, 含 op)
+ │   ├─ parse_row_keywords + row_options[*].cells 去重 → parsed.cols
  │   ├─ logic_seq / has_or / first_binary_compatible
- │   ├─ collect_column_values (P1 预收集)
+ │   ├─ cond_match 预计算（每条件对其 cols 取 OR，每行一个 bool）
  │   ├─ 路径选择：
- │   │   ├─ find_rows_in_sorted（二分，首列须 范围|包含）
- │   │   ├─ std::thread::scope + local_hidden + row_matches_expr（并行）
- │   │   └─ 串行 + row_matches_expr
- │   ├─ expand_hidden_rows_for_merged_cells（合并对齐）
+ │   │   ├─ find_rows_in_sorted（二分，首条件单列+排序+范围|包含）
+ │   │   ├─ std::thread::scope + cond_match + row_matches_expr（并行）
+ │   │   └─ 串行 + cond_match + row_matches_expr
+ │   ├─ expand_hidden_rows_for_merged_cells（每列对齐）
  │   └─ 写入 hidden_rows
  │
- └─ match_filter_value(op) ──► compare_value（统一单值判定核心，数值类经 try_f64_cmp）
+ └─ match_filter_value(op) / compare_value / try_f64_cmp（统一比较核心）
 ```
 
 ### 5.6 二分查找的细节（`find_sorted_column_matches` / `find_rows_in_sorted` / `search_sorted`）
@@ -374,19 +367,17 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 - 执行后 `response.surrender_focus()` 收起键盘焦点。
 
 ### 6.4 动态增删与编辑
-- **列筛选**：`添加筛选条件` 按钮追加空 `ColumnFilter`；每行有列下拉、比较运算符下拉、关键字输入、AND/OR 下拉、删除按钮（`can_delete = count>1`）；删除用 `delete_idx` **延迟到循环外** `remove`，避免迭代中越界。
-- **行筛选**：配置项数量由 `search.row` 决定，不可增删，但可编辑 `keyword`、`logic` 与 `op`。
+- **列筛选**：`添加筛选条件` 按钮追加空 `ColumnFilter`；每行有范围 ComboBox（`RangeOption::display()`）、比较运算符下拉、关键字输入、AND/OR 下拉、删除按钮（`can_delete = count>1`）；删除用 `delete_idx` **延迟到循环外** `remove`。
+- **行筛选**：与列筛选**完全同构**——头部 `添加筛选条件` 按钮追加 `RowFilterCondition{range_index:0,…}`；每行有行范围 ComboBox（从 `row_options` 选）、比较运算符、关键字、AND/OR、删除 `X`。
 
 ### 6.5 自动还原（行筛选特有）
-当某行筛选输入被改空（`response.changed() && keyword.trim().is_empty() && is_row_searching`）时，自动 `hidden_rows.clear()` 并重置行筛选状态——用户清空输入即恢复全表显示，无需点重置。
+当某行筛选输入被改空（`response.changed() && keyword.trim().is_empty() && is_row_searching`）时，自动 `hidden_rows.clear()` 并重置行筛选状态。
 
 ### 6.6 重置按钮与关闭按钮共享还原逻辑
 三个入口共用同一个 `reset_search(state, hidden_columns, hidden_rows)` 私有函数：
-- **🔄 重置按钮**：用户点击后调用 `reset_search`。
-- **✖ 关闭按钮**：调用 `reset_search` 后置 `visible=false`，关闭弹窗的同时恢复表格。
-- **egui 内置关闭**（`!keep_open`）：同上，覆盖 Escape 等关闭路径。
+- **🔄 重置按钮** / **✖ 关闭按钮** / **egui 内置关闭**：均调用 `reset_search`。
 
-`reset_search` 统一清空：`hidden_columns`/`hidden_rows`、列搜索状态（`is_searching/matched_count/total_searched/search_keyword`/`debug_info`）、行筛选状态（`is_row_searching/matched_count/total_searched/`debug_info`）、所有 `row_filters[i].keyword` 与 `row_filters[i].op`（重置为 `包含`）、并把 `column_filters` 复位为一条空条件（`op=包含`，保留交互骨架）。模式与 `alert_notify.rs` 的 `reset_filter` 一致。
+`reset_search` 统一清空：`hidden_columns`/`hidden_rows`、列/行搜索状态、`debug_info`、`row_filters` 恢复为单条 `RowFilterCondition{range_index:0,…}`（仅当 `row_options` 非空）、`column_filters` 恢复为单条空 `ColumnFilter`。模式与 `alert_notify.rs` 的 `reset_filter` 一致。
 
 ### 6.7 反馈信息
 - **列筛选统计**：`is_searching` 时显示 `匹配 N/M 列`，走二分时附加 `(二分)` 标记。
@@ -403,72 +394,68 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 
 `draw_search_window` 绘制一个 **固定宽度 520px、自定义标题栏、非模态** 的 egui 浮窗。
 窗口从上到下分为四个区域：**标题栏 → 列筛选区 → 行筛选区 → 诊断/提示区**。
-标题栏左侧为可点击的折叠箭头与标题，右侧三个按钮（egui `right_to_left` 布局，越先添加越靠右）。
-列筛选条件行与行筛选项均在「输入框」前增加了一个 **比较运算符下拉框**（宽 60，选项见 `CompareOp`）。
+标题栏左侧为可点击的折叠箭头与标题，右侧三个按钮（egui `right_to_left` 布局）。
+列筛选 / 行筛选均在「范围 ComboBox」与「关键字输入框」之间插入了一个 **比较运算符下拉框**（宽 60，选项见 `CompareOp`）。
+行筛选与列筛选**同构**：范围 ComboBox（`RangeOption::display()` 步长项显示 `值((expr))` 否则 `值 (cell_ref)`）→ 比较运算符 → 关键字 → AND/OR → 删除 `X`；头部均有「添加筛选条件」按钮、均可动态增删（`delete_idx` 延迟删除）。
 
 ### 7.1 展开态整体布局
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                      │ ← egui::Window
-│  ▼  搜索                                        [🔄 重置]  [🔍 搜索]  [✖]            │   520px 宽
-│  └──┘点击折叠/展开                               └──────── 搜索触发 ──────────┘       │   title_bar=false
-│ ─────────────────────────────────────────────────────────────────────────────────── │ ← separator
+│                                                                                      │
+│  ▼  搜索                                        [🔄 重置]  [🔍 搜索]  [✖]            │ ← 标题栏
+│ ─────────────────────────────────────────────────────────────────────────────────── │
 │                                                                                      │
 │ 列筛选:          匹配 3/10 列 (二分)                        [添加筛选条件] ▶        │ ← 列标题行
 │                                                                                      │
-│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │ ← 条件行①
+│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │
 │ │ 序号 (A1)    ▾ │ │包含 ▾│ │ 输入搜索关键字...    │ │ AND ▾│ │ X │                  │   列166/运算符60
-│ └────────────────┘ └──────┘ └──────────────────────┘ └──────┘ └───┘                  │   输入180/逻辑50
-│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │ ← 条件行②
-│ │ 名称 (B1)    ▾ │ │  >  ▾│ │                      │ │ OR  ▾│ │ X │                  │   删除X
+│ └────────────────┘ └──────┘ └──────────────────────┘ └──────┘ └───┘                  │   输入180/逻辑50/删除
+│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │
+│ │ 名称 (B1)    ▾ │ │  >  ▾│ │                      │ │ OR  ▾│ │ X │                  │
 │ └────────────────┘ └──────┘ └──────────────────────┘ └──────┘ └───┘                  │
 │                                                                                      │
-│ ─────────────────────────────────────────────────────────────────────────────────── │ ← separator
+│ ─────────────────────────────────────────────────────────────────────────────────── │
 │                                                                                      │
-│ 行筛选:                              匹配 50/1000 行                                  │ ← 行标题行
+│ 行筛选:                              匹配 50/1000 行            [添加筛选条件] ▶    │ ← 行标题行
 │                                                                                      │
-│  日期 (A14): [包含 ▾] [ xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'        ] [AND ▾]          │ ← 行筛选项①
-│  入库 (D14): [  >  ▾] [                                            ] [OR ▾]          │   运算符60/输入250
+│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │
+│ │ 入库 (A14)   ▾ │ │包含 ▾│ │ xxxx 或 'xx1','xx2'  │ │ AND ▾│ │ X │                  │   行范围166/运算符60
+│ └────────────────┘ └──────┘ └──────────────────────┘ └──────┘ └───┘                  │   输入250/逻辑50/删除
+│ ┌────────────────┐ ┌──────┐ ┌──────────────────────┐ ┌──────┐ ┌───┐                  │
+│ │ 入库((B:+2)14)▾│ │  >  ▾│ │                      │ │ OR  ▾│ │ X │                  │   步长项显示 expr
+│ └────────────────┘ └──────┘ └──────────────────────┘ └──────┘ └───┘                  │
 │                                                                                      │
-│  行筛选[二分]: [日期=A] 行15→1000 共986行 | 匹配50行 隐藏936行                      │ ← row_debug_info
+│  行筛选[二分]: [入库=A] 行15→1000 共986行 | 匹配50行 隐藏936行                      │ ← row_debug_info
 │  选中A1 | 共10列 | 匹配3列 隐藏7列                                                 │ ← debug_info
-│                                                                                      │
-│ 💡 搜索选中列右侧所有列；已排序数据自动启用二分查找                                  │ ← 底部提示
+│ 💡 搜索选中列右侧所有列；已排序数据自动启用二分查找                                  │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 7.2 折叠态（`state.collapsed = true`）
 
-`p → 0.0` 动画过程中内容区渐隐，达到阈值（`p <= 0.001`）后**只渲染标题栏**：
-
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  ▶  搜索                                  [🔄 重置]  [🔍 搜索]  [✖]      │
 └──────────────────────────────────────────────────────────────────────────┘
-   ▲ 箭头变为 ▶，点击重新展开
 ```
 
 ### 7.3 区域与字段映射表
 
-| 区域 | UI 元素 | 绑定的状态字段 / 动作 | 宽度/约束 |
-|------|---------|----------------------|-----------|
-| 标题栏 | 折叠箭头 `▶/▼` + "搜索" | 点击切换 `state.collapsed` | — |
-| 标题栏 | `🔄 重置` | 调用 `reset_search` 清空全部（与关闭按钮共用） | — |
-| 标题栏 | `🔍 搜索` | 有激活输入时启用；执行列搜索 + 行筛选 | enabled = `has_col \|\| has_row` |
-| 标题栏 | `✖` | `reset_search(...)` 后置 `visible = false`，关闭时自动恢复表格 | — |
-| 列标题行 | "列筛选:" + `匹配 N/M 列 (二分)` | `is_searching` / `matched_count` / `total_searched` / `use_binary_search` | — |
-| 列标题行 | `添加筛选条件` | `column_filters.push(空 ColumnFilter)` | right_to_left |
-| 条件行 | 列下拉 ComboBox | `column_filters[idx].column_index` → `column_options` | 166 |
-| 条件行 | 比较运算符 ComboBox | `column_filters[idx].op`（默认 `包含`，见 `CompareOp::ALL`） | 60 |
-| 条件行 | 关键字 TextEdit | `column_filters[idx].filter_value`（Enter 触发搜索） | 180 |
-| 条件行 | AND/OR ComboBox | `column_filters[idx].logic` | 50 |
-| 条件行 | 删除 `X` | `column_filters.remove(idx)`（`count>1` 才可删） | — |
-| 行标题行 | "行筛选:" + `匹配 N/M 行` | `row_total_searched` / `row_matched_count` | — |
-| 行筛选项 | `标题 (cell_ref):` | 标签（取自单元格值） | — |
-| 行筛选项 | 比较运算符 ComboBox | `row_filters[idx].op`（默认 `包含`） | 60 |
-| 行筛选项 | 关键字 TextEdit | `row_filters[idx].keyword`（清空自动还原；Enter 触发搜索） | 250 |
-| 行筛选项 | AND/OR ComboBox | `row_filters[idx].logic` | 50 |
+| 区域 | UI 元素 | 绑定 | 宽度 |
+|------|---------|------|------|
+| 列标题行 | "列筛选:" + stats | `is_searching` / `matched_count` | — |
+| 列标题行 | `添加筛选条件` | push `ColumnFilter{column_index:0,…}` | right_to_left |
+| 列条件行 | 列范围 ComboBox | `RangeOption::display()`（步长 `值(expr)` 否则 `值 (ref)`） | 166 |
+| 列条件行 | 比较运算符 ComboBox | `column_filters[idx].op` | 60 |
+| 列条件行 | 关键字 TextEdit | `column_filters[idx].filter_value` | 180 |
+| 列条件行 | AND/OR ComboBox / 删除 `X` | `logic` / `remove(idx)` | 50 / — |
+| 行标题行 | "行筛选:" + stats | `row_total_searched` | — |
+| 行标题行 | `添加筛选条件` | push `RowFilterCondition{range_index:0,…}` | right_to_left |
+| 行条件行 | 行范围 ComboBox | `row_options[range_index].display()` | 166 |
+| 行条件行 | 比较运算符 ComboBox | `row_filters[idx].op` | 60 |
+| 行条件行 | 关键字 TextEdit | `row_filters[idx].keyword`（清空自动还原） | 250 |
+| 行条件行 | AND/OR ComboBox / 删除 `X` | `logic` / `remove(idx)` | 50 / — |
 | 诊断区 | 绿色/灰色文本 | `row_debug_info` / `debug_info` | size 10 |
 | 底部 | 💡 提示 | 固定文案 | size 10 |
 
@@ -496,13 +483,14 @@ draw_search_window  (UI：搜索按钮 / Enter 键 / 重置)
 | 手段 | 位置 | 作用 |
 |------|------|------|
 | 配置/选项一次性加载 | `options_loaded` | 避免每帧重读 yaml、重解析范围 |
-| P1 预收集列值 | `collect_column_values` | 消除搜索循环内重复 `HashMap` 查找与日期格式化 |
+| cond_match 预计算 | `execute_row_search` | 多列 OR 一次性收敛为 bool，热循环零 get_cell |
+| P1 预收集列值 | `collect_column_values` | 二分首列预收集，消除循环内 HashMap 查找 |
 | P0 二分查找 | `find_rows_in_sorted` / `find_sorted_column_matches` | 已排序数据 O(log n + k) |
-| P2 并行扫描 | `std::thread::scope` + `local_hidden` | >1000 行时分块并行，无锁合并 |
-| 自适应路径选择 | `execute_row_search` | 按排序性 / 行数自动选最优路径 |
+| P2 并行扫描 | `std::thread::scope` + `local_hidden` | >1000 行时分块并行，cond_match 只读无锁 |
+| 自适应路径选择 | `execute_row_search` | 按排序性 / 行数 / 首条件单列 自动选最优路径 |
 | 短路求值 | `row_matches_expr` 的 OR 短路 / `all(...)` | 命中即停，减少无效比较 |
 | 阈值常量 | `PARALLEL_ROW_THRESHOLD=1000`、`MIN_ROWS_PER_THREAD=500` | 控制并行粒度，避免线程过细 |
 
 ---
 
-*文档生成依据：`src/gui/widgets/search.rs`（master 分支 HEAD `26d55bc`；search.rs 最近变更 `fe77811`「添加比较运算符支持」，本文件已据此同步 `CompareOp` 相关说明）。如代码重构，请同步更新本文件中的行号与函数签名。*
+*本文件基于 `src/gui/widgets/search.rs`（最新 master），已同步步长语法 `(:+N)`、`~` 末尾占位、`RangeOption` / `RowFilterCondition` 重构、`cond_match` 预计算、行筛选动态 ComboBox 等所有变更。如代码重构，请同步更新本文件。*

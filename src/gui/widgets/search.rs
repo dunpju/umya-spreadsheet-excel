@@ -1,7 +1,8 @@
 //! 搜索窗口组件
 //!
-//! 提供列筛选搜索功能：从配置文件读取可选的列范围，通过模糊匹配
-//! 隐藏不匹配的列，支持合并单元格跨列感知。
+//! 提供列筛选与行筛选两类独立的筛选维度：从配置文件 `search.column` / `search.row`
+//! 读取可选范围（支持单格、普通范围、离散、以及**步长语法** `(:+N)` 与 `~` 末尾占位），
+//! 通过比较运算符与 AND/OR 多条件组合隐藏不匹配的行/列，支持合并单元格跨行/跨列感知。
 
 use eframe::egui;
 use std::collections::HashSet;
@@ -32,44 +33,68 @@ fn cell_search_value(cell: &CellData) -> String {
     cell.value.clone()
 }
 
-/// 单个下拉选项：title = 单元格显示值, cell_ref = 单元格坐标（如 "A1"）
+/// 一个可选范围（列筛选 / 行筛选共用）
+///
+/// - **普通段**（单格或普通范围扁平展开后）：`cells` 仅含一个锚点单元格；
+/// - **步长语法段**（如 `(B:+2)14:~14`）：作为一整组，`cells` 含按步长展开的全部锚点单元格，
+///   匹配时对这些锚点取 **OR（任一命中）**。
 #[derive(Debug, Clone)]
-pub struct SearchColumnOption {
-    /// 显示文本：单元格的值，如 "序号"、"名称"
+pub struct RangeOption {
+    /// 显示文本：首个锚点单元格的值（如 "序号"、"入库"）
     pub title: String,
-    /// 单元格引用字符串，如 "A1"、"A2"
+    /// 首个锚点单元格的坐标字符串，如 "A1"、"B14"（普通项显示用）
     pub cell_ref: String,
-    /// 列号（1-based）
-    pub col: u32,
-    /// 行号（1-based）
-    pub row: u32,
+    /// 展开后的全部锚点单元格 (col, row)，1-based，按展开顺序；普通项长度为 1
+    pub cells: Vec<(u32, u32)>,
+    /// 是否步长语法范围（决定 `display` 是否追加 `(expr)`）
+    pub is_step: bool,
+    /// 原始段表达式文本（步长项显示用，如 "(B:+2)14"）
+    pub expr: String,
 }
 
-/// 单个行筛选配置项
+impl RangeOption {
+    /// 下拉框显示文案
+    /// - 步长项：`值(expr)`，如 `入库((B:+2)14)`（expr 自带括号，外层再加一对）
+    /// - 普通项：`值 (cell_ref)`，如 `序号 (A1)`
+    pub fn display(&self) -> String {
+        if self.is_step {
+            format!("{}({})", self.title, self.expr)
+        } else {
+            format!("{} ({})", self.title, self.cell_ref)
+        }
+    }
+
+    /// 首个锚点列号（1-based），无锚点时返回 0
+    pub fn first_col(&self) -> u32 {
+        self.cells.first().map(|(c, _)| *c).unwrap_or(0)
+    }
+
+    /// 首个锚点行号（1-based），无锚点时返回 0
+    pub fn first_row(&self) -> u32 {
+        self.cells.first().map(|(_, r)| *r).unwrap_or(0)
+    }
+}
+
+/// 行筛选条件（支持多条动态增删，与列筛选 `ColumnFilter` 同构）
 ///
-/// 每个配置项对应 search.row 中一个单元格引用，包含
-/// 标题（单元格值）、坐标和用户输入的关键字。
+/// 每个条件通过 `range_index` 引用 `row_options` 中的一个可选范围：
+/// - 普通范围 → 单个锚点列；
+/// - 步长范围 → 一组锚点列，匹配时对这些列取 **OR（任一命中）**。
 #[derive(Debug, Clone)]
-pub struct RowFilterState {
-    /// 显示标题：单元格的值，如 "日期"、"入库"
-    pub title: String,
-    /// 单元格引用字符串，如 "A14"、"D14"
-    pub cell_ref: String,
-    /// 列号（1-based）
-    pub col: u32,
-    /// 行号（1-based），搜索从此行+1开始向下
-    pub row: u32,
+pub struct RowFilterCondition {
+    /// 选中的范围选项索引（0-based，对应 `SearchWindowState::row_options`）
+    pub range_index: usize,
     /// 用户输入的关键字
     pub keyword: String,
-    /// 该筛选项与下一条筛选项的组合逻辑（And 取交集，Or 取并集）
+    /// 该条件与下一条条件的组合逻辑（And 取交集，Or 取并集）
     /// 最后一条的 logic 无实际效果（无下一条可组合）。
     pub logic: FilterLogic,
     /// 比较运算符（默认 包含）
     pub op: CompareOp,
 }
 
-impl RowFilterState {
-    /// 该筛选项是否激活（用户输入了非空白关键字）
+impl RowFilterCondition {
+    /// 该条件是否激活（用户输入了非空白关键字）
     pub fn is_active(&self) -> bool {
         !self.keyword.trim().is_empty()
     }
@@ -180,8 +205,8 @@ pub struct SearchWindowState {
     pub collapsed: bool,
 
     // ========== 下拉框数据 ==========
-    /// 从配置 + 单元格数据解析出的下拉选项列表
-    pub column_options: Vec<SearchColumnOption>,
+    /// 列筛选可选范围列表（从 search.column 解析，每个段一个 `RangeOption`）
+    pub column_options: Vec<RangeOption>,
     /// 当前选中的选项索引（0-based）
     pub selected_index: usize,
     /// 下拉框选项是否已加载（避免每帧重新解析配置）
@@ -203,9 +228,11 @@ pub struct SearchWindowState {
     /// 诊断信息：搜索目标行/列 + 前几个搜索值的采样
     pub debug_info: String,
 
-    // ========== 行筛选（支持多列） ==========
-    /// 行筛选配置列表（从 search.row 解析的每个单元格对应一项）
-    pub row_filters: Vec<RowFilterState>,
+    // ========== 行筛选（支持多列、动态增删） ==========
+    /// 行筛选可选范围列表（从 search.row 解析，每个段一个 `RangeOption`）
+    pub row_options: Vec<RangeOption>,
+    /// 行筛选条件列表（动态增删，每条引用 `row_options` 中的一个范围）
+    pub row_filters: Vec<RowFilterCondition>,
     /// 行筛选是否已执行
     pub is_row_searching: bool,
     /// 行筛选匹配的行数
@@ -237,6 +264,7 @@ impl Default for SearchWindowState {
             total_searched: 0,
             use_binary_search: false,
             debug_info: String::new(),
+            row_options: Vec::new(),
             row_filters: Vec::new(),
             is_row_searching: false,
             row_matched_count: 0,
@@ -287,20 +315,155 @@ fn parse_cell_ref(s: &str) -> Option<(u32, u32)> {
     Some((col, row))
 }
 
-/// 解析单个段：可以是单格 "A1" 或范围 "A1-A13"
-fn parse_one_segment(s: &str) -> Vec<(u32, u32)> {
+/// 解析单元格引用，支持 `~` 末尾占位
+///
+/// 与 `alert_notify.rs` / `reader.rs` 的 `resolve_dynamic_range` 约定一致：
+/// - `"A1"` → `(1, 1)`（无 `~` 时等价于 [`parse_cell_ref`]）
+/// - `"~14"`（`~` 在列位）→ `(max_col, 14)`：该行最大列
+/// - `"A~"`（`~` 在行位）→ `(1, max_row)`：该列最大行
+/// - `"~"` → `(max_col, max_row)`：右下角
+fn parse_cell_ref_bound(s: &str, max_col: u32, max_row: u32) -> Option<(u32, u32)> {
     let s = s.trim();
     if s.is_empty() {
-        return Vec::new();
+        return None;
+    }
+    if !s.contains('~') {
+        return parse_cell_ref(s);
+    }
+    if s == "~" {
+        return Some((max_col.max(1), max_row.max(1)));
+    }
+    let upper = s.to_uppercase();
+    if upper.starts_with('~') {
+        // ~行号 → (max_col, row)
+        let row: u32 = upper[1..].trim().parse().ok()?;
+        if row == 0 {
+            return None;
+        }
+        Some((max_col.max(1), row))
+    } else if upper.ends_with('~') {
+        // 列字母~ → (col, max_row)
+        let col_part: String = upper.chars().take_while(|c| c.is_alphabetic()).collect();
+        if col_part.is_empty() {
+            return None;
+        }
+        let col = col_part
+            .chars()
+            .fold(0u32, |acc, c| acc * 26 + (c as u32 - 'A' as u32 + 1));
+        if col == 0 {
+            return None;
+        }
+        Some((col, max_row.max(1)))
+    } else {
+        // 形如 A~B 之类的异常片段，回退普通解析（通常解析失败返回 None）
+        parse_cell_ref(s)
+    }
+}
+
+/// 解析后的一个范围段（一个逗号分隔段）
+#[derive(Debug, Clone)]
+struct RangeSegment {
+    /// 展开后的锚点单元格 (col, row)，≥1
+    cells: Vec<(u32, u32)>,
+    /// 原始段表达式文本（步长项显示用）
+    expr: String,
+    /// 是否步长语法范围
+    is_step: bool,
+}
+
+/// 解析步长语法段
+///
+/// 由 `(:+N)` 的位置决定步进方向：
+/// - **纵向（步进行）**：`字母(起始行:+N)[:终止单元格]`，如 `A(1:+2):A13`、`A(1:+2)`
+/// - **横向（进列）**：`(起始列:+N)行[:终止单元格]`，如 `(B:+2)14:~14`、`(B:+2)14`
+///
+/// 终止单元格可省略（纵向默认至 `max_row`，横向默认至 `max_col`），可含 `~`（见 [`parse_cell_ref_bound`]）。
+/// 解析失败或步长为 0 时返回 `None`。
+fn parse_step_segment(seg: &str, max_col: u32, max_row: u32) -> Option<RangeSegment> {
+    let open = seg.find('(')?;
+    let close = seg.find(')').filter(|&c| c > open)?;
+    let before = seg[..open].trim(); // `(` 前：纵向时为列字母，横向时为空
+    let inner = seg[open + 1..close].trim(); // `(` `)` 之间：`X:+N`
+    let tail = seg[close + 1..].trim_start(); // `)` 之后
+
+    // 内层按 `:+` 拆出 (左, 步长)
+    let plus = inner.find(":+")?;
+    let left = inner[..plus].trim();
+    let step: u32 = inner[plus + 2..].trim().parse().ok()?;
+    if step == 0 {
+        return None;
     }
 
-    // 尝试范围格式 "A1-A13"
-    if let Some(idx) = s.find('-') {
-        let after_dash = &s[idx + 1..];
-        if after_dash.chars().next().map_or(false, |c| c.is_alphabetic()) {
-            let start_str = &s[..idx];
+    // 拆 tail 为 (前缀, 可选 end)：首个 `:` 之后为终止单元格
+    let (prefix, end_str) = match tail.find(':') {
+        Some(idx) => (tail[..idx].trim(), Some(tail[idx + 1..].trim())),
+        None => (tail.trim(), None),
+    };
+
+    let left_is_alpha = !left.is_empty() && left.chars().all(|c| c.is_alphabetic());
+
+    let mut cells = Vec::new();
+    if !before.is_empty() {
+        // 纵向：before=列字母，left=起始行（数字）
+        let col = parse_cell_ref(&format!("{}1", before))?.0;
+        let start_row: u32 = left.parse().ok()?;
+        let end_row = match end_str {
+            Some(s) => parse_cell_ref_bound(s, max_col, max_row)?.1,
+            None => max_row,
+        };
+        let mut r = start_row;
+        while r <= end_row {
+            cells.push((col, r));
+            r += step;
+        }
+    } else if left_is_alpha {
+        // 横向：left=起始列字母，prefix=行号（数字）
+        let row: u32 = prefix.parse().ok()?;
+        let start_col = parse_cell_ref(&format!("{}1", left))?.0;
+        let end_col = match end_str {
+            Some(s) => parse_cell_ref_bound(s, max_col, max_row)?.0,
+            None => max_col,
+        };
+        let mut c = start_col;
+        while c <= end_col {
+            cells.push((c, row));
+            c += step;
+        }
+    } else {
+        return None;
+    }
+
+    if cells.is_empty() {
+        return None;
+    }
+    Some(RangeSegment {
+        cells,
+        expr: seg.trim().to_string(),
+        is_step: true,
+    })
+}
+
+/// 解析普通段（单格或 `-` 范围），支持 `~` 末尾占位，返回扁平单元格列表
+fn parse_one_segment_resolved(seg: &str, max_col: u32, max_row: u32) -> Vec<(u32, u32)> {
+    let seg = seg.trim();
+    if seg.is_empty() {
+        return Vec::new();
+    }
+    // 范围格式 "A1-A13" / "A1-C1"（终点可含 `~`）
+    if let Some(idx) = seg.find('-') {
+        let after_dash = &seg[idx + 1..];
+        if after_dash
+            .trim()
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_alphabetic() || c == '~')
+        {
+            let start_str = &seg[..idx];
             let end_str = after_dash;
-            if let (Some(start), Some(end)) = (parse_cell_ref(start_str), parse_cell_ref(end_str)) {
+            if let (Some(start), Some(end)) = (
+                parse_cell_ref_bound(start_str, max_col, max_row),
+                parse_cell_ref_bound(end_str, max_col, max_row),
+            ) {
                 let mut result = Vec::new();
                 if start.0 == end.0 {
                     // 同列：行范围 A1-A13
@@ -327,86 +490,126 @@ fn parse_one_segment(s: &str) -> Vec<(u32, u32)> {
             }
         }
     }
-
     // 单个单元格
-    parse_cell_ref(s).into_iter().collect()
+    parse_cell_ref_bound(seg, max_col, max_row).into_iter().collect()
 }
 
-/// 解析搜索范围字符串
+/// 解析单个逗号段：步长段 → 1 个分组段；普通段 → 若干扁平单格段（每格一段）
+fn parse_one_range_segment(seg: &str, max_col: u32, max_row: u32) -> Vec<RangeSegment> {
+    let seg = seg.trim();
+    if seg.is_empty() {
+        return Vec::new();
+    }
+    // 步长语法段：含 `(` 且能解析为步长 → 一整组
+    if seg.contains('(') {
+        if let Some(rs) = parse_step_segment(seg, max_col, max_row) {
+            return vec![rs];
+        }
+        // 形似步长但解析失败：按普通段兜底（通常返回空）
+    }
+    // 普通段：扁平展开为单格
+    parse_one_segment_resolved(seg, max_col, max_row)
+        .into_iter()
+        .map(|(col, row)| {
+            let col_letter = crate::excel::reader::col_to_letter(col);
+            RangeSegment {
+                cells: vec![(col, row)],
+                expr: format!("{}{}", col_letter, row),
+                is_step: false,
+            }
+        })
+        .collect()
+}
+
+/// 解析搜索范围字符串为若干 [`RangeSegment`]
 ///
-/// 支持混合格式：
-/// - 范围格式: "A1-A13" → [(1,1), (1,2), ..., (1,13)]
-/// - 离散格式: "A1,A3,B5" → [(1,1), (1,3), (2,5)]
-/// - 混合格式: "A1-A13,A15" → [(1,1), ..., (1,13), (1,15)]
-pub fn parse_search_range(input: &str) -> Vec<(u32, u32)> {
+/// 按 `,` 分段：
+/// - **步长语法段**（含 `(`...`:+N`...`)`）作为**一整组**产出 1 个段（覆盖范围内所有单元格）；
+/// - **普通段**（单格 / 普通范围）**扁平展开**为若干单格段（每个单元格一个段，向后兼容）。
+///
+/// 普通格式：`A1`、`A1-A13`、`A1,A3`、`A1-A13,A15`（含 `~` 末尾占位）。
+/// 步长格式：`A(1:+2):A13`、`(B:+2)14:~14`、`A(1:+2)`、`(B:+2)14`。
+fn parse_search_segments(input: &str, max_col: u32, max_row: u32) -> Vec<RangeSegment> {
     let input = input.trim();
     if input.is_empty() {
         return Vec::new();
     }
-
-    // 逗号分隔：每段独立解析
-    if input.contains(',') {
-        return input
-            .split(',')
-            .flat_map(|s| parse_one_segment(s))
-            .collect();
-    }
-
-    // 无逗号：整段解析
-    parse_one_segment(input)
+    input
+        .split(',')
+        .flat_map(|seg| parse_one_range_segment(seg, max_col, max_row))
+        .collect()
 }
 
-/// 从配置文件和 Excel 数据加载下拉选项
+/// 读取 `my-excel.yaml` 中 `search` 节点下指定键（`column` / `row`）的字符串值
+fn read_search_config(key: &str) -> String {
+    let path = config_path();
+    if !path.exists() {
+        return String::new();
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+        .and_then(|doc| {
+            doc.get("search")
+                .and_then(|s| s.get(key))
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_default()
+}
+
+/// 将配置范围字符串解析为 [`RangeOption`] 列表
+///
+/// `title` 取首个锚点单元格的值；步长段的 `cells` 含按步长展开的全部锚点。
+fn build_range_options(sheet: &SheetData, range_str: &str) -> Vec<RangeOption> {
+    if range_str.trim().is_empty() {
+        return Vec::new();
+    }
+    parse_search_segments(range_str, sheet.max_col, sheet.max_row)
+        .into_iter()
+        .filter_map(|seg| {
+            let first = seg.cells.first().copied()?;
+            let title = sheet
+                .get_cell(first.1, first.0)
+                .map(|c| cell_search_value(c))
+                .unwrap_or_default();
+            let col_letter = crate::excel::reader::col_to_letter(first.0);
+            let cell_ref = format!("{}{}", col_letter, first.1);
+            Some(RangeOption {
+                title,
+                cell_ref,
+                cells: seg.cells,
+                is_step: seg.is_step,
+                expr: seg.expr,
+            })
+        })
+        .collect()
+}
+
+/// 从配置文件和 Excel 数据加载列筛选下拉选项（`search.column`）
 pub fn load_column_options(
     excel_data: &ExcelData,
     current_sheet: usize,
-) -> Vec<SearchColumnOption> {
+) -> Vec<RangeOption> {
     let sheet = match excel_data.get_sheet(current_sheet) {
         Some(s) => s,
         None => return Vec::new(),
     };
+    build_range_options(sheet, &read_search_config("column"))
+}
 
-    // 读取配置
-    let path = config_path();
-    let range_str = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
-            .and_then(|doc| {
-                doc.get("search")
-                    .and_then(|s| s.get("column"))
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
+/// 从配置文件和 Excel 数据加载行筛选可选范围（`search.row`）
+///
+/// 每个 [`RangeOption`] 对应 `search.row` 中的一个段：普通段为单个锚点列，
+/// 步长段为一组锚点列（匹配时取 OR）。
+pub fn load_row_options(
+    excel_data: &ExcelData,
+    current_sheet: usize,
+) -> Vec<RangeOption> {
+    let sheet = match excel_data.get_sheet(current_sheet) {
+        Some(s) => s,
+        None => return Vec::new(),
     };
-
-    if range_str.is_empty() {
-        return Vec::new();
-    }
-
-    // 解析范围字符串
-    let cells = parse_search_range(&range_str);
-
-    // 读取每个单元格的值构建选项
-    cells
-        .into_iter()
-        .map(|(col, row)| {
-            let title = sheet
-                .get_cell(row, col)
-                .map(|c| cell_search_value(c))
-                .unwrap_or_default();
-            let col_letter = crate::excel::reader::col_to_letter(col);
-            let cell_ref = format!("{}{}", col_letter, row);
-            SearchColumnOption {
-                title,
-                cell_ref,
-                col,
-                row,
-            }
-        })
-        .collect()
+    build_range_options(sheet, &read_search_config("row"))
 }
 
 /// 合并单元格列可见性对齐
@@ -588,60 +791,97 @@ fn find_sorted_column_matches(
 
 /// 计算单条列筛选条件匹配的列集合
 ///
-/// 在指定行的目标列右侧搜索，返回匹配关键字的列号集合。
-/// 与 `execute_search` 核心逻辑一致，但不修改任何状态，
-/// 用于多条件组合搜索时独立计算每条条件的匹配结果。
+/// 以 `option` 的锚点为基准，在锚点列**右侧的所有列**中匹配关键字：
+/// - **单锚点**（普通段）：保留「收集该行右侧列值 + (已排序 && Contains) 二分」优化；
+/// - **多锚点**（纵向步长段）：线性扫描，**任一锚点行**命中即该列可见（OR）。
 ///
 /// 返回：(匹配列集合, 搜索的列总数, 是否使用二分查找)
 fn compute_column_matches(
     sheet: &SheetData,
-    target_col: u32,
-    target_row: u32,
+    option: &RangeOption,
     keyword: &str,
     op: CompareOp,
 ) -> (HashSet<u32>, usize, bool) {
     let keyword = keyword.to_lowercase();
     let max_col = sheet.max_col;
-
-    let mut col_values: Vec<(u32, String)> = Vec::new();
-    for col in (target_col + 1)..=max_col {
-        let value = sheet
-            .get_cell(target_row, col)
-            .map(|c| cell_search_value(c).to_lowercase())
-            .unwrap_or_default();
-        col_values.push((col, value));
-    }
-
-    let total = col_values.len();
-    if total == 0 {
+    let start_col = option.first_col();
+    if start_col == 0 {
         return (HashSet::new(), 0, false);
     }
 
-    let is_sorted = col_values.windows(2).all(|w| w[0].1 <= w[1].1);
+    // 锚点行：去重升序（列筛选锚点同列，行集合即锚点行）
+    let mut anchor_rows: Vec<u32> = option.cells.iter().map(|(_, r)| *r).collect();
+    anchor_rows.sort_unstable();
+    anchor_rows.dedup();
 
-    // 二分查找仅对「包含」运算符正确（前缀/子串扩展）；其他运算符走线性比较
-    let used_binary = is_sorted && op == CompareOp::Contains;
+    if anchor_rows.len() == 1 {
+        // ── 单锚点：收集该行右侧列值，(已排序 && Contains) 时二分 ──
+        let target_row = anchor_rows[0];
+        let mut col_values: Vec<(u32, String)> = Vec::new();
+        for col in (start_col + 1)..=max_col {
+            let value = sheet
+                .get_cell(target_row, col)
+                .map(|c| cell_search_value(c).to_lowercase())
+                .unwrap_or_default();
+            col_values.push((col, value));
+        }
+        let total = col_values.len();
+        if total == 0 {
+            return (HashSet::new(), 0, false);
+        }
+        let is_sorted = col_values.windows(2).all(|w| w[0].1 <= w[1].1);
+        let used_binary = is_sorted && op == CompareOp::Contains;
+        let mut visible: HashSet<u32> = if used_binary {
+            find_sorted_column_matches(&col_values, &keyword)
+        } else {
+            col_values
+                .iter()
+                .filter(|(_, v)| compare_value(v, &keyword, op))
+                .map(|(col, _)| *col)
+                .collect()
+        };
+        align_visible_for_merged(sheet, &mut visible, &anchor_rows);
+        return (visible, total, used_binary);
+    }
 
-    let mut visible: HashSet<u32> = if used_binary {
-        find_sorted_column_matches(&col_values, &keyword)
-    } else {
-        col_values
-            .iter()
-            .filter(|(_, v)| compare_value(v, &keyword, op))
-            .map(|(col, _)| *col)
-            .collect()
-    };
+    // ── 多锚点（步长段）：线性扫描，任一锚点行命中即该列可见（OR） ──
+    let mut visible: HashSet<u32> = HashSet::new();
+    let mut total = 0usize;
+    for col in (start_col + 1)..=max_col {
+        total += 1;
+        let matched = anchor_rows.iter().any(|&r| {
+            let value = sheet
+                .get_cell(r, col)
+                .map(|c| cell_search_value(c).to_lowercase())
+                .unwrap_or_default();
+            compare_value(&value, &keyword, op)
+        });
+        if matched {
+            visible.insert(col);
+        }
+    }
+    align_visible_for_merged(sheet, &mut visible, &anchor_rows);
+    (visible, total, false)
+}
 
-    // 合并单元格跨列对齐（与 expand_hidden_for_merged_cells 对称，作用于可见列集合）
+/// 合并单元格跨列可见性对齐（作用于可见列集合）
+///
+/// 对跨列合并且**与任一锚点行重叠**的区域：以左上角是否可见为准，整段对齐。
+/// 与 `expand_hidden_for_merged_cells` 对称，区别在作用于可见集合而非隐藏集合。
+fn align_visible_for_merged(
+    sheet: &SheetData,
+    visible: &mut HashSet<u32>,
+    anchor_rows: &[u32],
+) {
     for mr in &sheet.merged_cells {
         if mr.start_col == mr.end_col {
             continue;
         }
-        if target_row < mr.start_row || target_row > mr.end_row {
+        let overlaps = anchor_rows.iter().any(|&r| r >= mr.start_row && r <= mr.end_row);
+        if !overlaps {
             continue;
         }
-        let top_left_visible = visible.contains(&mr.start_col);
-        if top_left_visible {
+        if visible.contains(&mr.start_col) {
             for c in mr.start_col..=mr.end_col {
                 visible.insert(c);
             }
@@ -651,8 +891,6 @@ fn compute_column_matches(
             }
         }
     }
-
-    (visible, total, used_binary)
 }
 
 /// 执行多条件列搜索（支持 AND/OR 组合，AND 优先级高于 OR）
@@ -700,7 +938,7 @@ pub fn execute_multi_column_search(
         }
         let opt = &state.column_options[f.column_index];
         let (filter_visible, ft, fis) =
-            compute_column_matches(sheet, opt.col, opt.row, &f.filter_value, f.op);
+            compute_column_matches(sheet, opt, &f.filter_value, f.op);
         max_total = max_total.max(ft);
         any_binary = any_binary || fis;
 
@@ -752,7 +990,7 @@ pub fn execute_multi_column_search(
     // 确保所有激活条件的目标列自身不被隐藏
     for f in &active {
         if f.column_index < state.column_options.len() {
-            hidden_columns.remove(&state.column_options[f.column_index].col);
+            hidden_columns.remove(&state.column_options[f.column_index].first_col());
         }
     }
 
@@ -764,11 +1002,11 @@ pub fn execute_multi_column_search(
 
     // 诊断信息
     let first_ref = &state.column_options[active[0].column_index];
-    let col_letter = crate::excel::reader::col_to_letter(first_ref.col);
+    let col_letter = crate::excel::reader::col_to_letter(first_ref.first_col());
     state.debug_info = format!(
         "选中{}{} | 共{}列 | 匹配{}列 隐藏{}列",
         col_letter,
-        first_ref.row,
+        first_ref.first_row(),
         max_total,
         visible.len(),
         hidden_columns.len()
@@ -793,8 +1031,8 @@ pub fn execute_search(
     };
 
     let keyword = state.search_keyword.to_lowercase();
-    let target_col = opt.col;
-    let target_row = opt.row;
+    let target_col = opt.first_col();
+    let target_row = opt.first_row();
     let max_col = sheet.max_col;
 
     // 收集搜索范围内所有列的头值（选中列右侧的所有列）
@@ -898,68 +1136,6 @@ pub fn execute_search(
 // ═══════════════════════════════════════════════════════════════
 // 行筛选
 // ═══════════════════════════════════════════════════════════════
-
-/// 加载行筛选配置列表
-///
-/// 读取 my-excel.yaml 中 search.row，使用 parse_search_range 解析所有单元格引用，
-/// 为每个单元格构建一个 RowFilterState。
-///
-/// 支持格式：
-/// - 离散: "A14,D14" → 两个独立的筛选项
-/// - 范围: "A14-D14" → A14, B14, C14, D14 四个筛选项
-/// - 混合: "A14,D14-F14" → A14 + D14, E14, F14
-pub fn load_row_filter_configs(
-    excel_data: &ExcelData,
-    current_sheet: usize,
-) -> Vec<RowFilterState> {
-    let sheet = match excel_data.get_sheet(current_sheet) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-
-    let path = config_path();
-    let range_str = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
-            .and_then(|doc| {
-                doc.get("search")
-                    .and_then(|s| s.get("row"))
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    if range_str.is_empty() {
-        return Vec::new();
-    }
-
-    // 复用 parse_search_range 解析所有单元格引用
-    let cells = parse_search_range(&range_str);
-
-    cells
-        .into_iter()
-        .map(|(col, row)| {
-            let title = sheet
-                .get_cell(row, col)
-                .map(|c| cell_search_value(c))
-                .unwrap_or_default();
-            let col_letter = crate::excel::reader::col_to_letter(col);
-            let cell_ref = format!("{}{}", col_letter, row);
-            RowFilterState {
-                title,
-                cell_ref,
-                col,
-                row,
-                keyword: String::new(),
-                logic: FilterLogic::And,
-                op: CompareOp::Contains,
-            }
-        })
-        .collect()
-}
 
 /// 解析行筛选关键字输入
 ///
@@ -1248,13 +1424,13 @@ pub fn execute_row_search(
 ) {
     hidden_rows.clear();
 
-    if state.row_filters.is_empty() {
+    if state.row_options.is_empty() {
         state.row_debug_info = "行筛选未配置".to_string();
         return;
     }
 
-    // 收集所有激活的筛选器
-    let active_filters: Vec<&RowFilterState> = state
+    // 收集所有激活的筛选条件（每条引用 row_options 中的一个范围）
+    let active_filters: Vec<&RowFilterCondition> = state
         .row_filters
         .iter()
         .filter(|f| f.is_active())
@@ -1266,7 +1442,12 @@ pub fn execute_row_search(
     }
 
     let max_row = sheet.max_row;
-    let start_row = active_filters[0].row;
+    // start_row 取首个激活条件所选范围的首个锚点行号（以首条件表头行为基准，与旧实现一致）
+    let start_row = state
+        .row_options
+        .get(active_filters[0].range_index)
+        .map(|o| o.first_row())
+        .unwrap_or(0);
 
     if max_row <= start_row {
         state.row_total_searched = 0;
@@ -1279,9 +1460,9 @@ pub fn execute_row_search(
     state.row_total_searched = (max_row - start_row) as usize;
     let row_count = state.row_total_searched;
 
-    // ═══ 解析所有筛选器关键字（owned 数据，线程安全） ═══
+    // ═══ 解析每条条件：锚点列集合（多列=步长段）+ 关键字 + 运算符 ═══
     struct ParsedFilter {
-        col: u32,
+        cols: Vec<u32>,
         keywords: Vec<String>,
         is_range: bool,
         op: CompareOp,
@@ -1291,8 +1472,16 @@ pub fn execute_row_search(
         .iter()
         .map(|f| {
             let (keywords, is_range) = parse_row_keywords(&f.keyword);
+            // 锚点列：去重升序（步长段覆盖多列，匹配时取 OR）
+            let mut cols: Vec<u32> = state
+                .row_options
+                .get(f.range_index)
+                .map(|o| o.cells.iter().map(|(c, _)| *c).collect())
+                .unwrap_or_default();
+            cols.sort_unstable();
+            cols.dedup();
             ParsedFilter {
-                col: f.col,
+                cols,
                 keywords,
                 is_range,
                 op: f.op,
@@ -1309,68 +1498,67 @@ pub fn execute_row_search(
         .take(logic_seq.len().saturating_sub(1))
         .any(|&l| l == FilterLogic::Or);
 
+    // ═══ 预计算 cond_match[fi][idx]：条件 fi 在数据行 idx 是否匹配 ═══
+    // 多列（步长段）在此一次性收敛为单 bool（任一列命中即 true，OR）。
+    // 预计算后并行/串行热循环不再 get_cell，并统一多列处理。
+    let cond_match: Vec<Vec<bool>> = parsed
+        .iter()
+        .map(|pf| {
+            (0..row_count)
+                .map(|idx| {
+                    let row = start_row + 1 + idx as u32;
+                    pf.cols.iter().any(|&c| {
+                        let value = sheet
+                            .get_cell(row, c)
+                            .map(|c| cell_search_value(c).to_lowercase())
+                            .unwrap_or_default();
+                        match_filter_value(&value, &pf.keywords, pf.is_range, pf.op)
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
     // 用于诊断信息的搜索模式标签
     let search_mode: &str;
 
-    // ═══ P1: 预收集第一列的值（用于排序检测 + 二分查找） ═══
-    let first_col_data = collect_column_values(sheet, parsed[0].col, start_row, max_row);
-
-    // 检测第一列是否已排序（单调非递减）
-    let is_sorted = first_col_data
-        .windows(2)
-        .all(|w| w[0].1 <= w[1].1);
-
-    // 二分查找（find_rows_in_sorted）仅支持「范围」与「包含」两种语义；
-    // 当首列运算符为 =/!=/>/< 等时回退到线性扫描以保证正确性。
+    // ═══ P1: 预收集首列的值（排序检测 + 二分查找）；仅首条件单列时有效 ═══
+    let first_single = parsed[0].cols.len() == 1;
+    let first_col_data = if first_single {
+        collect_column_values(sheet, parsed[0].cols[0], start_row, max_row)
+    } else {
+        Vec::new()
+    };
+    // 检测首列是否已排序（单调非递减）；多列时不走二分
+    let is_sorted = first_single && first_col_data.windows(2).all(|w| w[0].1 <= w[1].1);
+    // 二分查找（find_rows_in_sorted）仅支持「范围」与「包含」两种语义
     let first_binary_compatible = parsed[0].is_range || parsed[0].op == CompareOp::Contains;
 
-    if !has_or && is_sorted && first_binary_compatible {
-        // ══════════ P0: 二分查找路径（仅纯 AND 时可用：首列必须匹配） ══════════
+    if !has_or && first_single && is_sorted && first_binary_compatible {
+        // ══════════ P0: 二分查找路径（纯 AND、首条件单列且已排序） ══════════
         search_mode = "二分";
 
-        // 在第一列中二分查找匹配行
+        // 在首列中二分查找匹配行（候选集）
         let candidate_rows = find_rows_in_sorted(
             &first_col_data,
             &parsed[0].keywords,
             parsed[0].is_range,
         );
 
-        if parsed.len() == 1 {
-            // 仅一个筛选器：候选行之外的全部隐藏
-            for (row, _) in &first_col_data {
-                if !candidate_rows.contains(row) {
+        // 候选行之外直接隐藏；候选行用 cond_match 验证其余条件（首条件已由二分保证）
+        for (idx, (row, _)) in first_col_data.iter().enumerate() {
+            if !candidate_rows.contains(row) {
+                hidden_rows.insert(*row);
+            } else {
+                let all_matched = (1..parsed.len()).all(|fi| cond_match[fi][idx]);
+                if !all_matched {
                     hidden_rows.insert(*row);
-                }
-            }
-        } else {
-            // 多个筛选器：候选行需验证其余列，非候选行直接隐藏
-            for (row, _) in &first_col_data {
-                if !candidate_rows.contains(row) {
-                    hidden_rows.insert(*row);
-                } else {
-                    // 验证其余筛选器（按需 get_cell，候选集已被二分缩小）
-                    let all_matched = parsed[1..].iter().all(|pf| {
-                        let value = sheet
-                            .get_cell(*row, pf.col)
-                            .map(|c| cell_search_value(c).to_lowercase())
-                            .unwrap_or_default();
-                        match_filter_value(&value, &pf.keywords, pf.is_range, pf.op)
-                    });
-                    if !all_matched {
-                        hidden_rows.insert(*row);
-                    }
                 }
             }
         }
     } else if row_count > PARALLEL_ROW_THRESHOLD {
         // ══════════ P2: 并行线性扫描路径 ══════════
         search_mode = "并行";
-
-        // P1: 预收集所有筛选器的列值
-        let all_col_data: Vec<Vec<(u32, String)>> = parsed
-            .iter()
-            .map(|pf| collect_column_values(sheet, pf.col, start_row, max_row))
-            .collect();
 
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -1379,41 +1567,29 @@ pub fn execute_row_search(
             .max(MIN_ROWS_PER_THREAD);
         let num_chunks = (row_count + chunk_size - 1) / chunk_size;
 
-        // 使用 scope 允许线程借用栈上数据，无需 Arc
+        // 使用 scope 允许线程借用栈上数据，无需 Arc；cond_match 已预计算，热循环不再 get_cell
         let thread_results: Vec<HashSet<u32>> = std::thread::scope(|s| {
             let mut handles = Vec::with_capacity(num_chunks);
+            let cond_match_ref = &cond_match;
+            let logic_seq_ref = &logic_seq;
+            let use_or = has_or;
 
             for chunk_idx in 0..num_chunks {
                 let start_idx = chunk_idx * chunk_size;
                 let end_idx = ((chunk_idx + 1) * chunk_size).min(row_count);
 
-                // 显式捕获引用（move 闭包中引用是 Copy，可安全传递到线程）
-                let all_col_data_ref = &all_col_data;
-                let parsed_ref = &parsed;
-                let logic_seq_ref = &logic_seq;
-                let use_or = has_or;
-
                 handles.push(s.spawn(move || {
                     let mut local_hidden = HashSet::new();
                     for idx in start_idx..end_idx {
-                        let row = all_col_data_ref[0][idx].0;
+                        let row = start_row + 1 + idx as u32;
                         let hide = if use_or {
-                            // 多条件 AND/OR 组合：逐条件求值后按运算符求整体
-                            let matches: Vec<bool> = parsed_ref
-                                .iter()
-                                .enumerate()
-                                .map(|(fi, pf)| {
-                                    let value = &all_col_data_ref[fi][idx].1;
-                                    match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
-                                })
-                                .collect();
+                            // 多条件 AND/OR 组合：按运算符优先级求整体
+                            let matches: Vec<bool> =
+                                cond_match_ref.iter().map(|cm| cm[idx]).collect();
                             !row_matches_expr(&matches, logic_seq_ref)
                         } else {
                             // 纯 AND：全部匹配才可见
-                            !parsed_ref.iter().enumerate().all(|(fi, pf)| {
-                                let value = &all_col_data_ref[fi][idx].1;
-                                match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
-                            })
+                            !cond_match_ref.iter().all(|cm| cm[idx])
                         };
                         if hide {
                             local_hidden.insert(row);
@@ -1433,51 +1609,36 @@ pub fn execute_row_search(
         // ══════════ 串行线性扫描路径 ══════════
         search_mode = "串行";
 
-        // P1: 预收集所有筛选器的列值
-        let all_col_data: Vec<Vec<(u32, String)>> = parsed
-            .iter()
-            .map(|pf| collect_column_values(sheet, pf.col, start_row, max_row))
-            .collect();
-
-        if has_or {
-            // 多条件 AND/OR 组合：逐条件求值后按运算符求整体
-            for idx in 0..row_count {
-                let row = all_col_data[0][idx].0;
-                let matches: Vec<bool> = parsed
-                    .iter()
-                    .enumerate()
-                    .map(|(fi, pf)| {
-                        let value = &all_col_data[fi][idx].1;
-                        match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
-                    })
-                    .collect();
-                if !row_matches_expr(&matches, &logic_seq) {
-                    hidden_rows.insert(row);
-                }
-            }
-        } else {
-            // 纯 AND：全部匹配才可见
-            for idx in 0..row_count {
-                let row = all_col_data[0][idx].0;
-                let all_matched = parsed.iter().enumerate().all(|(fi, pf)| {
-                    let value = &all_col_data[fi][idx].1;
-                    match_filter_value(value, &pf.keywords, pf.is_range, pf.op)
-                });
-                if !all_matched {
-                    hidden_rows.insert(row);
-                }
+        for idx in 0..row_count {
+            let row = start_row + 1 + idx as u32;
+            let hide = if has_or {
+                // 多条件 AND/OR 组合：按运算符优先级求整体
+                let matches: Vec<bool> = cond_match.iter().map(|cm| cm[idx]).collect();
+                !row_matches_expr(&matches, &logic_seq)
+            } else {
+                // 纯 AND：全部匹配才可见
+                !cond_match.iter().all(|cm| cm[idx])
+            };
+            if hide {
+                hidden_rows.insert(row);
             }
         }
     }
 
-    // 处理跨行合并：对每个激活筛选器的列进行合并单元格对齐
+    // 处理跨行合并：对每个激活条件的每个锚点列进行合并单元格对齐
     for pf in &parsed {
-        expand_hidden_rows_for_merged_cells(sheet, hidden_rows, pf.col);
+        for &col in &pf.cols {
+            expand_hidden_rows_for_merged_cells(sheet, hidden_rows, col);
+        }
     }
 
-    // 确保配置行自身不被隐藏
+    // 确保配置行（锚点行）自身不被隐藏
     for f in &active_filters {
-        hidden_rows.remove(&f.row);
+        if let Some(opt) = state.row_options.get(f.range_index) {
+            for (_, r) in &opt.cells {
+                hidden_rows.remove(r);
+            }
+        }
     }
 
     state.row_matched_count = state.row_total_searched.saturating_sub(hidden_rows.len());
@@ -1487,8 +1648,11 @@ pub fn execute_row_search(
     let col_labels: Vec<String> = active_filters
         .iter()
         .map(|f| {
-            let col_letter = crate::excel::reader::col_to_letter(f.col);
-            format!("{}={}", f.title, col_letter)
+            let opt = state.row_options.get(f.range_index);
+            let col_letter =
+                crate::excel::reader::col_to_letter(opt.map(|o| o.first_col()).unwrap_or(0));
+            let title = opt.map(|o| o.title.as_str()).unwrap_or("");
+            format!("{}={}", title, col_letter)
         })
         .collect();
     state.row_debug_info = format!(
@@ -1552,9 +1716,14 @@ fn reset_search(
     state.row_matched_count = 0;
     state.row_total_searched = 0;
     state.debug_info.clear();
-    for f in &mut state.row_filters {
-        f.keyword.clear();
-        f.op = CompareOp::Contains;
+    state.row_filters.clear();
+    if !state.row_options.is_empty() {
+        state.row_filters.push(RowFilterCondition {
+            range_index: 0,
+            keyword: String::new(),
+            logic: FilterLogic::And,
+            op: CompareOp::Contains,
+        });
     }
     state.row_debug_info.clear();
     state.column_filters.clear();
@@ -1598,7 +1767,7 @@ pub fn execute_column_filter(
     let config_rows: HashSet<u32> = state
         .column_options
         .iter()
-        .map(|opt| opt.row)
+        .map(|opt| opt.first_row())
         .collect();
 
     // ═══ AND 优先级高于 OR：按 OR 分组，组内 AND 取交集，组间取并集 ═══
@@ -1609,7 +1778,7 @@ pub fn execute_column_filter(
         // 计算当前条件匹配的行集合
         let mut filter_matches: HashSet<u32> = HashSet::new();
         if f.column_index < state.column_options.len() {
-            let col = state.column_options[f.column_index].col;
+            let col = state.column_options[f.column_index].first_col();
             let keyword = f.filter_value.to_lowercase();
             for row in 1..=max_row {
                 if config_rows.contains(&row) {
@@ -1778,8 +1947,16 @@ pub fn draw_search_window(
                         {
                             state.selected_index = 0;
                         }
-                        // 同步加载行筛选配置（支持多单元格引用）
-                        state.row_filters = load_row_filter_configs(data, current_sheet);
+                        // 同步加载行筛选可选范围；默认展示第一条范围（动态增删）
+                        state.row_options = load_row_options(data, current_sheet);
+                        if state.row_filters.is_empty() && !state.row_options.is_empty() {
+                            state.row_filters.push(RowFilterCondition {
+                                range_index: 0,
+                                keyword: String::new(),
+                                logic: FilterLogic::And,
+                                op: CompareOp::Contains,
+                            });
+                        }
                     }
                 }
 
@@ -1832,14 +2009,14 @@ pub fn draw_search_window(
                             let col_sel = state.column_filters[idx].column_index;
                             let selected_text = state.column_options
                                 .get(col_sel)
-                                .map(|o| format!("{} ({})", o.title, o.cell_ref))
+                                .map(|o| o.display())
                                 .unwrap_or_else(|| "请选择列...".to_string());
                             egui::ComboBox::from_id_salt(format!("col_filter_select_{}", idx))
                                 .selected_text(&selected_text)
                                 .width(166.0)
                                 .show_ui(ui, |ui| {
                                     for (i, opt) in state.column_options.iter().enumerate() {
-                                        let label = format!("{} ({})", opt.title, opt.cell_ref);
+                                        let label = opt.display();
                                         if ui
                                             .selectable_label(col_sel == i, &label)
                                             .clicked()
@@ -1935,13 +2112,13 @@ pub fn draw_search_window(
                     }
                 }
 
-                // ══════ 行筛选（列筛选下方，支持多列） ══════
-                if !state.row_filters.is_empty() {
+                // ══════ 行筛选（列筛选下方，动态增删，与列筛选同构） ══════
+                if !state.row_options.is_empty() {
                     ui.add_space(4.0);
                     ui.separator();
                     ui.add_space(4.0);
-                
-                    // ══════ 行筛选 ══════
+
+                    // ══════ 行筛选标题行（含「添加筛选条件」按钮） ══════
                     ui.horizontal(|ui| {
                         ui.label("行筛选:");
                         // 统计信息（搜索后显示）
@@ -1957,95 +2134,164 @@ pub fn draw_search_window(
                                 .color(egui::Color32::from_rgb(0, 130, 0)),
                             );
                         }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.button("添加筛选条件").clicked() {
+                                    state.row_filters.push(RowFilterCondition {
+                                        range_index: 0,
+                                        keyword: String::new(),
+                                        logic: FilterLogic::And,
+                                        op: CompareOp::Contains,
+                                    });
+                                }
+                            },
+                        );
                     });
 
-                    // 为每个行筛选项渲染一个输入行
-                    let filter_count = state.row_filters.len();
-                    for idx in 0..filter_count {
-                        let title = state.row_filters[idx].title.clone();
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{} ({}):", title, state.row_filters[idx].cell_ref));
+                    // 渲染每条行筛选条件
+                    {
+                        let filter_count = state.row_filters.len();
+                        let mut delete_idx = None;
 
-                            // 比较运算符下拉框（width=60）
-                            let op = state.row_filters[idx].op;
-                            egui::ComboBox::from_id_salt(format!("row_filter_op_{}", idx))
-                                .selected_text(op.label())
-                                .width(60.0)
-                                .show_ui(ui, |ui| {
-                                    for variant in CompareOp::ALL {
-                                        if ui
-                                            .selectable_label(op == variant, variant.label())
-                                            .clicked()
-                                        {
-                                            state.row_filters[idx].op = variant;
+                        for idx in 0..filter_count {
+                            ui.horizontal(|ui| {
+                                // 行范围选择下拉框（width=166），选项来自 row_options
+                                let range_sel = state.row_filters[idx].range_index;
+                                let selected_text = state
+                                    .row_options
+                                    .get(range_sel)
+                                    .map(|o| o.display())
+                                    .unwrap_or_else(|| "请选择行...".to_string());
+                                egui::ComboBox::from_id_salt(format!("row_filter_select_{}", idx))
+                                    .selected_text(&selected_text)
+                                    .width(166.0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, opt) in state.row_options.iter().enumerate() {
+                                            let label = opt.display();
+                                            if ui
+                                                .selectable_label(range_sel == i, &label)
+                                                .clicked()
+                                            {
+                                                state.row_filters[idx].range_index = i;
+                                            }
                                         }
-                                    }
-                                });
+                                    });
 
-                            let input = egui::TextEdit::singleline(&mut state.row_filters[idx].keyword)
-                                .desired_width(250.0)
-                                .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
-                            let response = ui.add(input);
+                                ui.add_space(0.0);
 
-                            // 输入被清空时自动还原行筛选结果（恢复显示所有行）
-                            if response.changed() && state.row_filters[idx].keyword.trim().is_empty() && state.is_row_searching {
-                                hidden_rows.clear();
-                                state.is_row_searching = false;
-                                state.row_matched_count = 0;
-                                state.row_total_searched = 0;
-                                state.row_debug_info.clear();
-                            }
-
-                            // Enter 键触发统一搜索（列筛选 + 行筛选）
-                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus() {
-                                if let Some(data) = excel_data {
-                                    if let Some(sheet) = data.get_sheet(current_sheet) {
-                                        let has_col = state.column_filters.iter().any(|f| f.is_active());
-                                        let has_row = state.row_filters.iter().any(|f| f.is_active());
-                                        // 列搜索（多条件 AND/OR 组合，隐藏列）
-                                        if has_col {
-                                            execute_multi_column_search(state, sheet, hidden_columns);
-                                        } else {
-                                            hidden_columns.clear();
+                                // 比较运算符下拉框（width=60）
+                                let op = state.row_filters[idx].op;
+                                egui::ComboBox::from_id_salt(format!("row_filter_op_{}", idx))
+                                    .selected_text(op.label())
+                                    .width(60.0)
+                                    .show_ui(ui, |ui| {
+                                        for variant in CompareOp::ALL {
+                                            if ui
+                                                .selectable_label(op == variant, variant.label())
+                                                .clicked()
+                                            {
+                                                state.row_filters[idx].op = variant;
+                                            }
                                         }
-                                        if has_row {
-                                            hidden_rows.clear();
-                                            execute_row_search(state, sheet, hidden_rows);
-                                        }
-                                        if has_col || has_row {
-                                            response.surrender_focus();
+                                    });
+
+                                ui.add_space(0.0);
+
+                                // 关键字输入框（desired_width=180）
+                                let input =
+                                    egui::TextEdit::singleline(&mut state.row_filters[idx].keyword)
+                                        .desired_width(180.0)
+                                        .hint_text("xxxx 或 'xx1','xx2' 或 'xx3'-'xx4'");
+                                let response = ui.add(input);
+
+                                // 输入被清空时自动还原行筛选结果（恢复显示所有行）
+                                if response.changed()
+                                    && state.row_filters[idx].keyword.trim().is_empty()
+                                    && state.is_row_searching
+                                {
+                                    hidden_rows.clear();
+                                    state.is_row_searching = false;
+                                    state.row_matched_count = 0;
+                                    state.row_total_searched = 0;
+                                    state.row_debug_info.clear();
+                                }
+
+                                // Enter 键触发统一搜索（列筛选 + 行筛选）
+                                if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    && response.has_focus()
+                                {
+                                    if let Some(data) = excel_data {
+                                        if let Some(sheet) = data.get_sheet(current_sheet) {
+                                            let has_col =
+                                                state.column_filters.iter().any(|f| f.is_active());
+                                            let has_row =
+                                                state.row_filters.iter().any(|f| f.is_active());
+                                            // 列搜索（多条件 AND/OR 组合，隐藏列）
+                                            if has_col {
+                                                execute_multi_column_search(
+                                                    state,
+                                                    sheet,
+                                                    hidden_columns,
+                                                );
+                                            } else {
+                                                hidden_columns.clear();
+                                            }
+                                            if has_row {
+                                                hidden_rows.clear();
+                                                execute_row_search(state, sheet, hidden_rows);
+                                            }
+                                            if has_col || has_row {
+                                                response.surrender_focus();
+                                            }
                                         }
                                     }
                                 }
+
+                                // AND/OR 选择下拉框（每条条件独立设置，支持混合 AND/OR 表达式）
+                                let filter_logic = state.row_filters[idx].logic;
+                                egui::ComboBox::from_id_salt(format!("row_filter_logic_{}", idx))
+                                    .selected_text(match filter_logic {
+                                        FilterLogic::And => "AND",
+                                        FilterLogic::Or => "OR",
+                                    })
+                                    .width(50.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                filter_logic == FilterLogic::And,
+                                                "AND",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.row_filters[idx].logic = FilterLogic::And;
+                                        }
+                                        if ui
+                                            .selectable_label(filter_logic == FilterLogic::Or, "OR")
+                                            .clicked()
+                                        {
+                                            state.row_filters[idx].logic = FilterLogic::Or;
+                                        }
+                                    });
+
+                                // 删除按钮（至少保留一条）
+                                let can_delete = filter_count > 1;
+                                if ui.add_enabled(can_delete, egui::Button::new("X")).clicked()
+                                    && can_delete
+                                {
+                                    delete_idx = Some(idx);
+                                }
+                            });
+
+                            // 条件行间添加小间距
+                            if idx + 1 < filter_count {
+                                ui.add_space(2.0);
                             }
+                        }
 
-                            // AND/OR 选择下拉框（每条条件独立设置，支持混合 AND/OR 表达式）
-                            let filter_logic = state.row_filters[idx].logic;
-                            egui::ComboBox::from_id_salt(format!("row_filter_logic_{}", idx))
-                                .selected_text(match filter_logic {
-                                    FilterLogic::And => "AND",
-                                    FilterLogic::Or => "OR",
-                                })
-                                .width(50.0)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(filter_logic == FilterLogic::And, "AND")
-                                        .clicked()
-                                    {
-                                        state.row_filters[idx].logic = FilterLogic::And;
-                                    }
-                                    if ui
-                                        .selectable_label(filter_logic == FilterLogic::Or, "OR")
-                                        .clicked()
-                                    {
-                                        state.row_filters[idx].logic = FilterLogic::Or;
-                                    }
-                                });
-                        });
-
-                        // 行间添加小间距
-                        if idx + 1 < filter_count {
-                            ui.add_space(2.0);
+                        // 延迟执行删除（避免迭代中修改集合导致越界）
+                        if let Some(idx) = delete_idx {
+                            state.row_filters.remove(idx);
                         }
                     }
 
@@ -2086,5 +2332,258 @@ pub fn draw_search_window(
     if !keep_open {
         reset_search(state, hidden_columns, hidden_rows);
         state.visible = false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 单元测试
+// ═══════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_cell_ref / parse_cell_ref_bound ──
+
+    #[test]
+    fn single_cell_ref() {
+        assert_eq!(parse_cell_ref("A1"), Some((1, 1)));
+        assert_eq!(parse_cell_ref("B14"), Some((2, 14)));
+        assert_eq!(parse_cell_ref("AA100"), Some((27, 100)));
+        assert_eq!(parse_cell_ref(""), None);
+        assert_eq!(parse_cell_ref("A"), None);
+        assert_eq!(parse_cell_ref("1"), None);
+    }
+
+    #[test]
+    fn cell_ref_bound_no_tilde() {
+        assert_eq!(parse_cell_ref_bound("A1", 10, 20), Some((1, 1)));
+        assert_eq!(parse_cell_ref_bound("B14", 10, 20), Some((2, 14)));
+    }
+
+    #[test]
+    fn cell_ref_bound_tilde_last_col() {
+        assert_eq!(parse_cell_ref_bound("~14", 10, 20), Some((10, 14)));
+        assert_eq!(parse_cell_ref_bound("~1", 5, 100), Some((5, 1)));
+        assert_eq!(parse_cell_ref_bound("~0", 10, 20), None); // row 0 invalid
+    }
+
+    #[test]
+    fn cell_ref_bound_tilde_last_row() {
+        assert_eq!(parse_cell_ref_bound("A~", 10, 20), Some((1, 20)));
+        assert_eq!(parse_cell_ref_bound("Z~", 10, 50), Some((26, 50)));
+    }
+
+    #[test]
+    fn cell_ref_bound_tilde_both() {
+        assert_eq!(parse_cell_ref_bound("~", 10, 20), Some((10, 20)));
+        assert_eq!(parse_cell_ref_bound("~", 0, 0), Some((1, 1))); // .max(1)
+    }
+
+    // ── parse_search_segments ──
+
+    fn seg_cells(segs: &[RangeSegment]) -> Vec<Vec<(u32, u32)>> {
+        segs.iter().map(|s| s.cells.clone()).collect()
+    }
+
+    fn seg_exprs(segs: &[RangeSegment]) -> Vec<&str> {
+        segs.iter().map(|s| s.expr.as_str()).collect()
+    }
+
+    fn seg_is_step(segs: &[RangeSegment]) -> Vec<bool> {
+        segs.iter().map(|s| s.is_step).collect()
+    }
+
+    const MAX: (u32, u32) = (10, 20);
+
+    #[test]
+    fn flat_single_cell() {
+        let segs = parse_search_segments("A14", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 14)]]);
+        assert!(!segs[0].is_step);
+    }
+
+    #[test]
+    fn flat_range_same_col() {
+        // A1-A3 → 3 flat segments, each 1 cell
+        let segs = parse_search_segments("A1-A3", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 1)], vec![(1, 2)], vec![(1, 3)]]);
+        assert_eq!(seg_is_step(&segs), vec![false, false, false]);
+    }
+
+    #[test]
+    fn flat_range_same_row() {
+        // A1-C1 → 3 flat segments
+        let segs = parse_search_segments("A1-C1", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 1)], vec![(2, 1)], vec![(3, 1)]]);
+    }
+
+    #[test]
+    fn flat_comma_separated() {
+        let segs = parse_search_segments("A14,D14", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 14)], vec![(4, 14)]]);
+    }
+
+    #[test]
+    fn step_vertical_with_end() {
+        // A(1:+2):A13 → 1 step segment, 7 cells (col A rows 1,3,5,7,9,11,13)
+        let segs = parse_search_segments("A(1:+2):A13", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 1), (1, 3), (1, 5), (1, 7), (1, 9), (1, 11), (1, 13)]]);
+        assert!(segs[0].is_step);
+    }
+
+    #[test]
+    fn step_vertical_no_end() {
+        // A(1:+2) → steps to max_row (20)
+        let segs = parse_search_segments("A(1:+2)", MAX.0, MAX.1);
+        let cells = &segs[0].cells;
+        assert!(segs[0].is_step);
+        assert_eq!(cells[0], (1, 1));
+        assert_eq!(*cells.last().unwrap(), (1, 19)); // 1,3,5,7,9,11,13,15,17,19
+        assert_eq!(cells.len(), 10);
+    }
+
+    #[test]
+    fn step_vertical_aa_col() {
+        // AA(1:+2):AA7 → col 27, rows 1..7 step 2
+        let segs = parse_search_segments("AA(1:+2):AA7", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(27, 1), (27, 3), (27, 5), (27, 7)]]);
+        assert!(segs[0].is_step);
+    }
+
+    #[test]
+    fn step_horizontal_with_end() {
+        // (B:+2)14:~14 → row 14, cols B, D, F (last=G=7)
+        let segs = parse_search_segments("(B:+2)14:~14", 7, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(2, 14), (4, 14), (6, 14)]]);
+        assert!(segs[0].is_step);
+    }
+
+    #[test]
+    fn step_horizontal_no_end() {
+        // (B:+2)14 → steps to max_col (10)
+        let segs = parse_search_segments("(B:+2)14", MAX.0, MAX.1);
+        let cells = &segs[0].cells;
+        assert!(segs[0].is_step);
+        assert_eq!(cells[0], (2, 14));
+        assert_eq!(*cells.last().unwrap(), (10, 14)); // B,D,F,H,J (2,4,6,8,10)
+        assert_eq!(cells.len(), 5);
+    }
+
+    #[test]
+    fn step_horizontal_tilde_explicit_end() {
+        // (B:+2)14:F14 → row 14, cols B, D, F (end=F=6)
+        let segs = parse_search_segments("(B:+2)14:F14", MAX.0, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(2, 14), (4, 14), (6, 14)]]);
+        assert!(segs[0].is_step);
+    }
+
+    #[test]
+    fn step_mixed_with_flat() {
+        let segs = parse_search_segments("A14,(B:+2)14:~14", 7, MAX.1);
+        assert_eq!(seg_cells(&segs), vec![vec![(1, 14)], vec![(2, 14), (4, 14), (6, 14)]]);
+        assert_eq!(seg_is_step(&segs), vec![false, true]);
+    }
+
+    #[test]
+    fn step_zero_rejected() {
+        let segs = parse_search_segments("A(1:+0):A13", MAX.0, MAX.1);
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn malformed_step_falls_through() {
+        // "(A:+2)14" — inner has letters but before="A" not empty → vertical branch
+        // tries parse on left="A" as u32 → fails → falls through. "" is returned
+        let segs = parse_search_segments("(A:+2)14", MAX.0, MAX.1);
+        // before empty? "(A:+2)14": before="" inner="A:+2", left="A" (alpha), row=14, start_col=A=1, end=none→max_col=10. So it IS a valid horizontal step!
+        // Actually: before="" (empty), inner="A:+2", left="A" is alpha, tail="14", prefix="14", end=None → horizontal step
+        assert_eq!(segs.len(), 1, "should parse as horizontal step");
+        assert!(segs[0].is_step);
+    }
+
+    #[test]
+    fn step_invalid_nested_parens_skipped() {
+        // Nested parens: just try to parse, if fails returns empty
+        let segs = parse_search_segments("A((1:+2):A13", MAX.0, MAX.1);
+        // Step parser expects clean inner; inner="(1:+2" → find ':' in inner → "..." doesn't make sense → None
+        assert!(segs.is_empty() || segs.iter().all(|s| !s.is_step));
+    }
+
+    #[test]
+    fn empty_input() {
+        let segs = parse_search_segments("", MAX.0, MAX.1);
+        assert!(segs.is_empty());
+        let segs = parse_search_segments("   ", MAX.0, MAX.1);
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn flat_range_with_tilde_end() {
+        // A1-A~ → flat range from row 1 to max_row (20)
+        let segs = parse_search_segments("A1-A~", MAX.0, MAX.1);
+        assert_eq!(segs.len(), 20);
+        assert_eq!(segs[0].cells, vec![(1, 1)]);
+        assert_eq!(segs[19].cells, vec![(1, 20)]);
+    }
+
+    // ── RangeOption::display ──
+
+    #[test]
+    fn range_option_display_normal() {
+        let opt = RangeOption {
+            title: "入库".into(),
+            cell_ref: "A14".into(),
+            cells: vec![(1, 14)],
+            is_step: false,
+            expr: "A14".into(),
+        };
+        assert_eq!(opt.display(), "入库 (A14)");
+    }
+
+    #[test]
+    fn range_option_display_step() {
+        let opt = RangeOption {
+            title: "入库".into(),
+            cell_ref: "B14".into(),
+            cells: vec![(2, 14), (4, 14), (6, 14)],
+            is_step: true,
+            expr: "(B:+2)14:~14".into(),
+        };
+        assert_eq!(opt.display(), "入库((B:+2)14:~14)");
+    }
+
+    #[test]
+    fn range_option_first_col_row() {
+        let opt = RangeOption {
+            title: "".into(),
+            cell_ref: "".into(),
+            cells: vec![(3, 5), (3, 7)],
+            is_step: true,
+            expr: "".into(),
+        };
+        assert_eq!(opt.first_col(), 3);
+        assert_eq!(opt.first_row(), 5);
+    }
+
+    #[test]
+    fn range_option_empty_cells() {
+        let opt = RangeOption {
+            title: "".into(),
+            cell_ref: "".into(),
+            cells: vec![],
+            is_step: false,
+            expr: "".into(),
+        };
+        assert_eq!(opt.first_col(), 0);
+        assert_eq!(opt.first_row(), 0);
+    }
+
+    // ── parse_cell_ref_bound edges ──
+
+    #[test]
+    fn bound_weird_ab_form() {
+        // A~B — falls through to parse_cell_ref, row_part "~B" fails parse → None
+        assert_eq!(parse_cell_ref_bound("A~B", 10, 20), None);
     }
 }

@@ -108,6 +108,9 @@ insert:
 search:
   column: "A1-A13"
   row: "A14,B14"
+# 也支持步长语法与 ~末尾占位：
+# search.column: "A(1:+2):A13"
+# search.row: "(B:+2)14:~14"
 ```
 
 ### 3.2 方法
@@ -150,9 +153,10 @@ search:
 - **窗口属性**：同上（420 宽、无标题栏、居中偏移）。
 - **自定义标题栏**：左侧"搜索配置"；右侧 `X` / `保存` + `search_save_success_timer` 驱动的"保存成功"。
 - **页签**：切换 `SearchPage::{ColumnFilter, RowFilter}`。
-- **列筛选**：`TextEdit`（`desired_width(INFINITY)`）编辑 `search_column_input`，提示 `A1-A13` / `A1,A3`；
-  下方灰色说明"支持范围格式与离散格式"。
-- **行筛选**：`TextEdit` 编辑 `search_row_input`，提示 `A14,B14` / `D14-F14`；灰色说明支持引用/范围/离散。
+- **列筛选**：`TextEdit`（`desired_width(INFINITY)`）编辑 `search_column_input`，提示 `A1-A13` / `A1,A3` / `A(1:+2):A13`；
+  下方灰色说明"支持范围格式(A1-A13)、离散格式(A1,A3)与步长语法(A(1:+2):A13)，`~`=末尾"。
+- **行筛选**：`TextEdit` 编辑 `search_row_input`，提示 `A14,B14` / `D14-F14` / `(B:+2)14:~14`；
+  灰色说明"支持单元格引用(A14)、范围(D14-F14)、离散(A14,B14)与步长语法((B:+2)14:~14)，`~`=末尾"。
 - **保存**：调用 `sp.save_search_column()`，成功则 `search_save_success_timer = 2.0`。
 
 > 借用模式：进入 `Window::show` 闭包前先 `let active_page = sp.active_page;`（`Copy` 读出），避免闭包内
