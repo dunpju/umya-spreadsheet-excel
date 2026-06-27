@@ -1656,6 +1656,12 @@ pub fn draw_table_content(
                 0.0,
                 egui::Color32::LIGHT_GRAY,
             );
+            painter.rect_stroke(
+                egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                0.0,
+                egui::Stroke::new(border_width, egui::Color32::GRAY),
+                egui::StrokeKind::Outside,
+            );
             painter.text(
                 egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
                 egui::Align2::CENTER_CENTER,
@@ -1742,6 +1748,12 @@ pub fn draw_table_content(
                 0.0,
                 egui::Color32::LIGHT_GRAY,
             );
+            painter.rect_stroke(
+                egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                0.0,
+                egui::Stroke::new(border_width, egui::Color32::GRAY),
+                egui::StrokeKind::Outside,
+            );
             painter.text(
                 egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
                 egui::Align2::CENTER_CENTER,
@@ -1760,6 +1772,12 @@ pub fn draw_table_content(
                 egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
                 0.0,
                 egui::Color32::LIGHT_GRAY,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
+                0.0,
+                egui::Stroke::new(border_width, egui::Color32::GRAY),
+                egui::StrokeKind::Outside,
             );
             painter.text(
                 egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),
@@ -1851,6 +1869,12 @@ pub fn draw_table_content(
                     0.0,
                     egui::Color32::LIGHT_GRAY,
                 );
+                painter.rect_stroke(
+                    egui::Rect::from_min_size(egui::Pos2::new(fixed_x, viewport_rect.min.y), egui::vec2(col_width, col_height)),
+                    0.0,
+                    egui::Stroke::new(border_width, egui::Color32::GRAY),
+                    egui::StrokeKind::Outside,
+                );
                 painter.text(
                     egui::Pos2::new(fixed_x + col_width / 2.0, viewport_rect.min.y + col_height / 2.0),
                     egui::Align2::CENTER_CENTER,
@@ -1868,6 +1892,12 @@ pub fn draw_table_content(
                     egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
                     0.0,
                     egui::Color32::LIGHT_GRAY,
+                );
+                painter.rect_stroke(
+                    egui::Rect::from_min_size(egui::Pos2::new(viewport_rect.min.x, fixed_y), egui::vec2(header_width, row_height)),
+                    0.0,
+                    egui::Stroke::new(border_width, egui::Color32::GRAY),
+                    egui::StrokeKind::Outside,
                 );
                 painter.text(
                     egui::Pos2::new(viewport_rect.min.x + header_width / 2.0, fixed_y + row_height / 2.0),

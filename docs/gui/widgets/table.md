@@ -155,6 +155,10 @@ fn cell_display_text<'a>(cell: &'a CellData) -> Cow<'a, str>
 `draw_frozen_cell` 闭包复用：只调用一次 `get_merged_range`、一次 `get_cell`，避免重复 HashMap 查询。合并宽高同样用累积数组差值计算。
 **编辑中的单元格**：`draw_frozen_cell` 保留背景/边框/批注指示器绘制，但跳过文本（`let cell_data_for_text = if *editing_cell == Some((col,row)) { None } else { cell_data }`，文本块用 `cell_data_for_text`），由透明原位 TextEdit 渲染——避免冻结区单元格编辑时旧值与新编辑器叠加成重影（与主网格 content pass 的跳过一致；见 §2.5/§2.13）。
 
+> **冻结行号栏 / 列标题的边框一致性**：冻结区中手工绘制的列标题（第1步 `// 绘制冻结列范围内的列标题`、第3步 `// 左上角冻结列范围内的列标题`、第4步 `// 重绘冻结列标题`）与冻结行号（第3步 `// 左上角冻结行范围内的行号`、第4步 `// 重绘冻结行号`）均为「背景 `rect_filled`(`LIGHT_GRAY`) + 灰色 `rect_stroke`(`border_width` / `Color32::GRAY` / `StrokeKind::Outside`) + 文字」三件套，与非冻结列标题、非冻结行号（`rows > fr`，`// 非冻结行的行号`）完全一致。此前冻结区行号栏/列标题均遗漏 `rect_stroke`（只有文字、无单元格边框），已修复。
+>
+> **关键（绘制顺序覆盖，曾经的失效根因）**：第4步会先以白色 `rect_filled` 重填**整个左上角区域**（含 col 0 行号列与 row 0 列标题行），再重绘行号与列标题；因此第3步画的冻结行号/列标题**必然被第4步的白色重填覆盖**，**最终可见的冻结行号与列标题由第4步绘制**。补边框时第1/3 步与第4步必须**同时**改——只改前几步会被第4步白色重填擦掉，表现为「仍有文字、无单元格边框」。
+
 ### 2.11 选中高亮与选中范围
 
 - **选中边框**：2px **绿色** `rect_stroke`（`Color32::from_rgb(0,176,80)`，`StrokeKind::Outside`）覆盖**整段选区**——优先取 `selected_range` 的包围盒，否则退化为 `selected_cell`（单格时展开到所在合并区域）。与 Excel 一致：填充/框选后绿框覆盖整段选区（含目标格），而非仅活动格。冻结区/非冻结区用不同坐标参考系定位。绿框矩形同时存入 `selected_cell_rect` 返回（供数据有效性弹窗定位）。
