@@ -176,10 +176,10 @@ impl Default for ContextMenuState {
             target_cell: None,
             insert_rows_count: 1,
             insert_cols_count: 1,
-            select_down_count: 1,
-            select_up_count: 1,
-            select_left_count: 1,
-            select_right_count: 1,
+            select_down_count: 0,
+            select_up_count: 0,
+            select_left_count: 0,
+            select_right_count: 0,
             confirm_visible: false,
             confirm_established: false,
             confirm_action: None,
@@ -1501,21 +1501,34 @@ impl eframe::App for ExcelViewer {
                                         let (anchor_col, anchor_row, anchor_end_col, anchor_end_row) = mr
                                             .map(|m| (m.start_col, m.start_row, m.end_col, m.end_row))
                                             .unwrap_or((col, row, col, row));
+                                        // 兼容合并单元格：选中 N 行/列时，若目标边界落在合并单元格内，
+                                        // 将选区扩展到该合并区域边界（与 Excel 一致），避免选区切断合并单元格。
+                                        // 例：J8:K8 向右选1列→目标 L8 落在 L8:M8 合并→选区扩展到 M（J8:M8）；
+                                        // 向左/向上/向下同理。检查扩展端的两端角点，兼顾 anchor 本身跨多行/列的合并。
+                                        let merge_sheet = excel_data.get_sheet(self.current_sheet);
+                                        let merge_end_col   = |c: u32, r: u32| merge_sheet.and_then(|s| s.get_merged_range(c, r)).map(|m| m.end_col.max(c)).unwrap_or(c);
+                                        let merge_start_col = |c: u32, r: u32| merge_sheet.and_then(|s| s.get_merged_range(c, r)).map(|m| m.start_col.min(c)).unwrap_or(c);
+                                        let merge_end_row   = |c: u32, r: u32| merge_sheet.and_then(|s| s.get_merged_range(c, r)).map(|m| m.end_row.max(r)).unwrap_or(r);
+                                        let merge_start_row = |c: u32, r: u32| merge_sheet.and_then(|s| s.get_merged_range(c, r)).map(|m| m.start_row.min(r)).unwrap_or(r);
                                         let (start_col, start_row, end_col, end_row) = match action {
                                             ContextAction::SelectDown => {
                                                 let er = if n == 0 { max_row } else { (anchor_end_row + n).min(max_row) };
+                                                let er = merge_end_row(anchor_col, er).max(merge_end_row(anchor_end_col, er));
                                                 (anchor_col, anchor_row, anchor_end_col, er)
                                             }
                                             ContextAction::SelectUp => {
                                                 let sr = if n == 0 { 1 } else { anchor_row.saturating_sub(n).max(1) };
+                                                let sr = merge_start_row(anchor_col, sr).min(merge_start_row(anchor_end_col, sr));
                                                 (anchor_col, sr, anchor_end_col, anchor_end_row)
                                             }
                                             ContextAction::SelectRight => {
                                                 let ec = if n == 0 { max_col } else { (anchor_end_col + n).min(max_col) };
+                                                let ec = merge_end_col(ec, anchor_row).max(merge_end_col(ec, anchor_end_row));
                                                 (anchor_col, anchor_row, ec, anchor_end_row)
                                             }
                                             ContextAction::SelectLeft => {
                                                 let sc = if n == 0 { 1 } else { anchor_col.saturating_sub(n).max(1) };
+                                                let sc = merge_start_col(sc, anchor_row).min(merge_start_col(sc, anchor_end_row));
                                                 (sc, anchor_row, anchor_end_col, anchor_end_row)
                                             }
                                             _ => (col, row, col, row),
@@ -1592,10 +1605,10 @@ impl eframe::App for ExcelViewer {
                                 self.context_menu.confirm_established = false;
                                 self.context_menu.confirm_action = None;
                             }
-                            self.context_menu.select_down_count = 1;
-                            self.context_menu.select_up_count = 1;
-                            self.context_menu.select_left_count = 1;
-                            self.context_menu.select_right_count = 1;
+                            self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                         }
 
                         // 点击菜单外部关闭
@@ -1613,10 +1626,10 @@ impl eframe::App for ExcelViewer {
                                             self.context_menu.confirm_established = false;
                                             self.context_menu.confirm_action = None;
                                         }
-                                        self.context_menu.select_down_count = 1;
-                            self.context_menu.select_up_count = 1;
-                            self.context_menu.select_left_count = 1;
-                            self.context_menu.select_right_count = 1;
+                                        self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                                     }
                                 }
                             }
@@ -1628,10 +1641,10 @@ impl eframe::App for ExcelViewer {
                                 self.context_menu.confirm_established = false;
                                 self.context_menu.confirm_action = None;
                             }
-                            self.context_menu.select_down_count = 1;
-                            self.context_menu.select_up_count = 1;
-                            self.context_menu.select_left_count = 1;
-                            self.context_menu.select_right_count = 1;
+                            self.context_menu.select_down_count = 0;
+                            self.context_menu.select_up_count = 0;
+                            self.context_menu.select_left_count = 0;
+                            self.context_menu.select_right_count = 0;
                         }
                     }
 

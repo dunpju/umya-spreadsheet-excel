@@ -109,7 +109,7 @@
 - `visible` / `confirm_visible`：菜单与确认弹窗各自可见性；
 - `target_cell`、`position`：操作目标格与弹屏坐标；
 - `insert_rows_count` / `insert_cols_count`：插入数量（`DragValue`，可调）；
-- `select_down/up/left/right_count`：四方选中数量（默认 `1`：向该方向选中 1 行/列；`0` = 选到边界——向左→第 1 列、向下→最后一行…。菜单每次打开/关闭都会重置回默认 `1`，避免打开即误触"选到边界"导致靠边格一下选中整行/整列）；
+- `select_down/up/left/right_count`：四方选中数量（`0` = 选到边界）；
 - `confirm_action: Option<ContextAction>`、`confirm_established`：待确认动作 + "首帧已建立"标志
   （用于**外部点击关闭**时跳过触发帧，避免一打开就被关掉）；
 - `copy_merge/copy_formula/copy_style/copy_value`：插入列时的复制选项。
@@ -120,6 +120,13 @@
 > 选中范围从 D 列（非 E 列）开始向右延伸至边界，且行方向覆盖合并区域全高（第 1 行）。
 > 非合并格退化为原逻辑：锚点=点击坐标。此修复解决了右键位置非合并区域左上角时选中范围遗漏
 > 合并格起始列/行的问题。
+>
+> **目标边界也兼容合并单元格（选区不切断合并）**：选中 N 行/列算出目标边界后，会再检查该边界
+> 是否落在合并单元格内，若是则把选区边界对齐到该合并区域边界（与 Excel 一致）。例：`J8:K8` 与
+> `L8:M8` 两组横向合并，在 `J8` 右键「向右选中 1 列」→目标 `L8` 落在 `L8:M8` 合并→选区右边界扩展
+> 到 `M`，最终选中 `J8:M8`（而非只到 `L` 的 `J8:L8`）。向左/向上/向下同理：边界切入合并时自动对齐
+> 到合并边界。实现上对扩展端的两端角点（`anchor_row`/`anchor_end_row` 或 `anchor_col`/
+> `anchor_end_col`）都做检查，兼顾 anchor 本身跨多行/列的合并。
 
 > **两种确认弹窗的视觉区分**：`confirm_action == ClearCell` 的「清空确认弹窗」（`egui::Window::new("clear_confirm")` 分支）
 > 采用**红色警示样式**——浅红背景（`#FEECEC`）+ 2px 红色边框（`#D32F2F`）+ 红色加粗标题「⚠ 警告」+ 深红正文（`#961818`），
