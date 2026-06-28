@@ -109,7 +109,7 @@
 - `visible` / `confirm_visible`：菜单与确认弹窗各自可见性；
 - `target_cell`、`position`：操作目标格与弹屏坐标；
 - `insert_rows_count` / `insert_cols_count`：插入数量（`DragValue`，可调）；
-- `select_down/up/left/right_count`：四方选中数量（`0` = 选到边界）；
+- `select_down/up/left/right_count`：四方选中数量（默认 `1`：向该方向选中 1 行/列；`0` = 选到边界——向左→第 1 列、向下→最后一行…。菜单每次打开/关闭都会重置回默认 `1`，避免打开即误触"选到边界"导致靠边格一下选中整行/整列）；
 - `confirm_action: Option<ContextAction>`、`confirm_established`：待确认动作 + "首帧已建立"标志
   （用于**外部点击关闭**时跳过触发帧，避免一打开就被关掉）；
 - `copy_merge/copy_formula/copy_style/copy_value`：插入列时的复制选项。

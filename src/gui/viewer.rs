@@ -176,10 +176,10 @@ impl Default for ContextMenuState {
             target_cell: None,
             insert_rows_count: 1,
             insert_cols_count: 1,
-            select_down_count: 0,
-            select_up_count: 0,
-            select_left_count: 0,
-            select_right_count: 0,
+            select_down_count: 1,
+            select_up_count: 1,
+            select_left_count: 1,
+            select_right_count: 1,
             confirm_visible: false,
             confirm_established: false,
             confirm_action: None,
@@ -1592,10 +1592,10 @@ impl eframe::App for ExcelViewer {
                                 self.context_menu.confirm_established = false;
                                 self.context_menu.confirm_action = None;
                             }
-                            self.context_menu.select_down_count = 0;
-                            self.context_menu.select_up_count = 0;
-                            self.context_menu.select_left_count = 0;
-                            self.context_menu.select_right_count = 0;
+                            self.context_menu.select_down_count = 1;
+                            self.context_menu.select_up_count = 1;
+                            self.context_menu.select_left_count = 1;
+                            self.context_menu.select_right_count = 1;
                         }
 
                         // 点击菜单外部关闭
@@ -1613,10 +1613,10 @@ impl eframe::App for ExcelViewer {
                                             self.context_menu.confirm_established = false;
                                             self.context_menu.confirm_action = None;
                                         }
-                                        self.context_menu.select_down_count = 0;
-                            self.context_menu.select_up_count = 0;
-                            self.context_menu.select_left_count = 0;
-                            self.context_menu.select_right_count = 0;
+                                        self.context_menu.select_down_count = 1;
+                            self.context_menu.select_up_count = 1;
+                            self.context_menu.select_left_count = 1;
+                            self.context_menu.select_right_count = 1;
                                     }
                                 }
                             }
@@ -1628,10 +1628,10 @@ impl eframe::App for ExcelViewer {
                                 self.context_menu.confirm_established = false;
                                 self.context_menu.confirm_action = None;
                             }
-                            self.context_menu.select_down_count = 0;
-                            self.context_menu.select_up_count = 0;
-                            self.context_menu.select_left_count = 0;
-                            self.context_menu.select_right_count = 0;
+                            self.context_menu.select_down_count = 1;
+                            self.context_menu.select_up_count = 1;
+                            self.context_menu.select_left_count = 1;
+                            self.context_menu.select_right_count = 1;
                         }
                     }
 
